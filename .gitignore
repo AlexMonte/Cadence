@@ -2,3 +2,8 @@
 runtime/js/node_modules
 .DS_Store
 %[scene]-*
+/docs
+/tests
+/test_project
+/.codex
+/current_project
