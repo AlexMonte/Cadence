@@ -1,0 +1,8 @@
+{
+  "name": "grooveatlas-runtime-host",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@strudel/web": "^1.2.6"
+  }
+}
