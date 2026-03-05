@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GrooveAtlas Dev Inspector</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1424;
+        --panel: #151c31;
+        --text: #d8e1ff;
+        --muted: #8b98c5;
+        --border: #2a3354;
+        --mono: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-rows: 34px 1fr;
+        height: 100%;
+      }
+
+      .head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 10px;
+        border-bottom: 1px solid var(--border);
+        background: #10172a;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        padding: 10px;
+        min-height: 0;
+      }
+
+      .panel {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: 28px 1fr;
+        min-height: 0;
+      }
+
+      .panel h2 {
+        margin: 0;
+        padding: 0 8px;
+        font-size: 11px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        border-bottom: 1px solid var(--border);
+      }
+
+      pre {
+        margin: 0;
+        padding: 8px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="head">
+        <span>GrooveAtlas Dev Inspector</span>
+        <span id="status" class="muted">connecting...</span>
+      </header>
+      <section class="grid">
+        <section class="panel">
+          <h2>Runtime Status</h2>
+          <pre id="runtime-view">{}</pre>
+        </section>
+        <section class="panel">
+          <h2>Diagnostics</h2>
+          <pre id="diagnostics-view">[]</pre>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="./devtools.js"></script>
+  </body>
+</html>
