@@ -1,5 +1,5 @@
-use crate::core::graph::GraphOpRecord;
 use crate::errors::{AppError, AppResult};
+use crate::model::TargetedGraphOpRecord;
 use crate::store::app_state::{AppStore, HistorySnapshot};
 
 fn history_limit(store: &AppStore) -> usize {
@@ -13,7 +13,7 @@ fn trim_front_to_limit(limit: usize, snapshots: &mut Vec<HistorySnapshot>) {
     }
 }
 
-fn trim_front_to_limit_graph(limit: usize, records: &mut Vec<GraphOpRecord>) {
+fn trim_front_to_limit_graph(limit: usize, records: &mut Vec<TargetedGraphOpRecord>) {
     if records.len() > limit {
         let drain = records.len() - limit;
         records.drain(0..drain);
@@ -50,8 +50,11 @@ pub fn record_successful_mutation(store: &mut AppStore, before: Option<HistorySn
     store.history_future.clear();
 }
 
-pub fn record_graph_mutation(store: &mut AppStore, record: GraphOpRecord) {
-    if record.do_ops.is_empty() && record.undo_ops.is_empty() && record.removed_edges.is_empty() {
+pub fn record_graph_mutation(store: &mut AppStore, record: TargetedGraphOpRecord) {
+    if record.record.do_ops.is_empty()
+        && record.record.undo_ops.is_empty()
+        && record.record.removed_edges.is_empty()
+    {
         return;
     }
     let limit = history_limit(store);
@@ -99,8 +102,9 @@ mod tests {
 
     use serde_json::Value;
 
-    use crate::core::graph::{Edge, Graph, Node, ProjectDocument};
-    use crate::core::types::{EdgeId, GridPos};
+    use crate::model::{CadenceProjectDocument, CadenceGraphTarget};
+    use tile_graph::graph::{Edge, Graph, GraphOpRecord, Node};
+    use tile_graph::types::{EdgeId, GridPos};
 
     use super::*;
 
@@ -116,6 +120,8 @@ mod tests {
                 )]),
                 input_sides: Default::default(),
                 output_side: None,
+                label: None,
+                node_state: None,
             },
         );
         nodes.insert(
@@ -123,9 +129,11 @@ mod tests {
             Node {
                 piece_id: "strudel.output".to_string(),
                 inline_params: BTreeMap::new(),
-            input_sides: Default::default(),
-            output_side: None,
-},
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
         );
         let edge = Edge {
             id: EdgeId::new(),
@@ -134,12 +142,14 @@ mod tests {
             to_param: "pattern".to_string(),
         };
         AppStore {
-            current_project: Some(ProjectDocument::new(
+            current_project: Some(CadenceProjectDocument::new(
                 name.to_string(),
                 Graph {
                     nodes,
                     edges: BTreeMap::from([(edge.id.clone(), edge)]),
                     name: "history".to_string(),
+                    cols: 9,
+                    rows: 9,
                 },
             )),
             ..Default::default()
@@ -171,10 +181,13 @@ mod tests {
         let mut store = seed_store("demo");
         record_graph_mutation(
             &mut store,
-            GraphOpRecord {
-                do_ops: Vec::new(),
-                undo_ops: Vec::new(),
-                removed_edges: Vec::new(),
+            TargetedGraphOpRecord {
+                target: CadenceGraphTarget::Runtime,
+                record: GraphOpRecord {
+                    do_ops: Vec::new(),
+                    undo_ops: Vec::new(),
+                    removed_edges: Vec::new(),
+                },
             },
         );
         assert!(store.graph_history_past.is_empty());

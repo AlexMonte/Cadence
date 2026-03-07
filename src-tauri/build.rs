@@ -43,10 +43,35 @@ Run: npm --prefix {} run build",
     }
 }
 
-fn warn_if_dist_stale(ui_dir: &Path, dist_index: &Path) {
+fn uses_tauri_dev_server() -> bool {
+    let Ok(mut config) = std::env::var("TAURI_CONFIG") else {
+        return false;
+    };
+    config.retain(|ch| !ch.is_whitespace());
+    let compact = config;
+    if !compact.contains("\"devUrl\"") {
+        return false;
+    }
+    !(compact.contains("\"devUrl\":null") || compact.contains("\"devUrl\":\"\""))
+}
+
+fn is_test_build() -> bool {
+    matches!(
+        std::env::var("PROFILE").ok().as_deref(),
+        Some("test") | Some("bench")
+    ) || std::env::var("CARGO_CFG_TEST").is_ok()
+}
+
+fn allow_stale_dist_override() -> bool {
+    std::env::var("CADENCE_ALLOW_STALE_DIST")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn stale_dist_input(ui_dir: &Path, dist_index: &Path) -> Option<PathBuf> {
     let dist_mtime = match dist_index.metadata().and_then(|meta| meta.modified()) {
         Ok(value) => value,
-        Err(_) => return,
+        Err(_) => return None,
     };
 
     let inputs = [
@@ -60,16 +85,31 @@ fn warn_if_dist_stale(ui_dir: &Path, dist_index: &Path) {
             continue;
         };
         if input_mtime > dist_mtime {
-            println!(
-                "cargo:warning=UI dist may be stale ({} newer than {}). \
-Run: npm --prefix {} run build",
-                input.display(),
-                dist_index.display(),
-                ui_dir.display()
-            );
-            return;
+            return Some(input);
         }
     }
+    None
+}
+
+fn enforce_dist_freshness(ui_dir: &Path, dist_index: &Path) {
+    let Some(input) = stale_dist_input(ui_dir, dist_index) else {
+        return;
+    };
+    if uses_tauri_dev_server() || is_test_build() || allow_stale_dist_override() {
+        println!(
+            "cargo:warning=UI dist is stale ({} newer than {}), but build continues in dev/test mode",
+            input.display(),
+            dist_index.display()
+        );
+        return;
+    }
+    panic!(
+        "UI dist is stale ({} newer than {}). \
+Run `npm --prefix {} run build` or use `cargo tauri dev --config src-tauri/tauri.dev.conf.json`.",
+        input.display(),
+        dist_index.display(),
+        ui_dir.display()
+    );
 }
 
 fn main() {
@@ -93,6 +133,6 @@ fn main() {
         );
     }
 
-    warn_if_dist_stale(&ui_dir, &dist_index);
+    enforce_dist_freshness(&ui_dir, &dist_index);
     tauri_build::build();
 }

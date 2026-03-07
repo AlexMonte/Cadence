@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::types::{EdgeId, GridPos, TileSide};
+use crate::types::{EdgeId, GridPos, TileSide};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -14,6 +14,12 @@ pub struct Node {
     pub input_sides: BTreeMap<String, TileSide>,
     #[serde(default)]
     pub output_side: Option<TileSide>,
+    /// Optional user-defined display name for this node instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Optional per-node opaque state blob (for stateful pieces).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_state: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +37,19 @@ pub struct Graph {
     pub edges: BTreeMap<EdgeId, Edge>,
     #[serde(default)]
     pub name: String,
+    /// Grid width in columns. Defaults to 9.
+    #[serde(default = "default_grid_cols")]
+    pub cols: u32,
+    /// Grid height in rows. Defaults to 9.
+    #[serde(default = "default_grid_rows")]
+    pub rows: u32,
+}
+
+fn default_grid_cols() -> u32 {
+    9
+}
+fn default_grid_rows() -> u32 {
+    9
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +64,10 @@ pub enum GraphOp {
     NodeMove {
         from: GridPos,
         to: GridPos,
+    },
+    NodeSwap {
+        a: GridPos,
+        b: GridPos,
     },
     NodeRemove {
         position: GridPos,
@@ -84,13 +107,27 @@ pub enum GraphOp {
     OutputClearSide {
         position: GridPos,
     },
+    /// Set or clear a user-defined display label on a node.
+    NodeSetLabel {
+        position: GridPos,
+        label: Option<String>,
+    },
+    /// Set opaque state data on a node (for stateful pieces).
+    NodeSetState {
+        position: GridPos,
+        state: Option<Value>,
+    },
+    /// Resize the grid bounds.
+    ResizeGrid {
+        cols: u32,
+        rows: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub struct GraphOpRecord {
     pub do_ops: Vec<GraphOp>,
     pub undo_ops: Vec<GraphOp>,
-    #[allow(dead_code)]
     pub removed_edges: Vec<Edge>,
 }
 

@@ -3,17 +3,18 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::project_commands::{SharedAppState, active_project};
-use crate::core::compiler::compile_graph;
-use crate::core::diagnostics::Diagnostic;
-use crate::core::piece_registry::PieceRegistry;
-use crate::core::semantic::semantic_pass;
+use crate::commands::runtime_commands::TerminalStrategy;
+use crate::core::project_compile::compile_project;
 use crate::errors::{AppError, AppResult};
+use tile_graph::compiler::CompileMode;
+use tile_graph::diagnostics::Diagnostic;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExportSongArgs {
     pub path: String,
     pub cpm: Option<f32>,
     pub code_override: Option<String>,
+    pub terminal_strategy: Option<TerminalStrategy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +54,7 @@ pub fn export_song(
     args: ExportSongArgs,
 ) -> Result<ExportSongResultDto, String> {
     let _ = args.cpm.unwrap_or(120.0);
+    let strategy = args.terminal_strategy.unwrap_or(TerminalStrategy::Stack);
     let path = resolve_export_path(args.path.as_str()).map_err(|err| err.to_string())?;
     let mut store = state
         .store
@@ -71,27 +73,16 @@ pub fn export_song(
         override_code.to_string()
     } else {
         let project = active_project(&store).map_err(|err| err.to_string())?;
-        let registry = PieceRegistry::default_strudel();
-        let sem = semantic_pass(&project.graph, &registry);
-        if !sem.is_valid() {
+        let compiled = compile_project(project, strategy, CompileMode::Preview);
+        if !compiled.can_render {
             return Ok(ExportSongResultDto {
                 exported: false,
-                message: format!("compile blocked by {} diagnostics", sem.errors.len()),
+                message: format!("compile blocked by {} diagnostics", compiled.diagnostics.len()),
                 path: None,
-                diagnostics: sem.errors,
+                diagnostics: compiled.diagnostics,
             });
         }
-        match compile_graph(&project.graph, &registry, &sem) {
-            Ok(expr) => expr.render(),
-            Err(errors) => {
-                return Ok(ExportSongResultDto {
-                    exported: false,
-                    message: format!("compile blocked by {} diagnostics", errors.len()),
-                    path: None,
-                    diagnostics: errors,
-                });
-            }
-        }
+        compiled.full_code.unwrap_or_default()
     };
 
     write_export(path.as_path(), payload).map_err(|err| err.to_string())?;

@@ -1,6 +1,6 @@
 # Third-Party Assets Manifest
 
-This directory is the only intake path for external UI assets used by GrooveAtlas.
+This directory is the only intake path for external UI assets used by Cadence.
 
 ## License Policy
 

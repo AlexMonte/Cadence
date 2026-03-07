@@ -1,13 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+use crate::commands::graph_commands::registry_for_target;
 use crate::commands::project_commands::SharedAppState;
-use crate::core::ops::apply_ops_to_graph;
-use crate::core::piece_registry::PieceRegistry;
-use crate::core::semantic::semantic_pass;
 use crate::errors::AppError;
 use crate::errors::AppResult;
 use crate::store::app_state::AppStore;
 use crate::store::history;
+use tile_graph::ops::apply_ops_to_graph;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HistoryStatusDto {
@@ -51,10 +50,13 @@ fn undo_graph_op_internal(store: &mut AppStore) -> AppResult<HistoryStatusDto> {
             "no active project; create or open a project first".to_string(),
         ));
     };
-    let mut candidate = project.graph.clone();
-    let piece_registry = PieceRegistry::default_strudel();
+    let mut candidate = project
+        .graph(&record.target)
+        .ok_or_else(|| AppError::InvalidInput("unknown graph target".to_string()))?
+        .clone();
+    let piece_registry = registry_for_target(project, &record.target);
     if let Err(errors) =
-        apply_ops_to_graph(&mut candidate, &piece_registry, record.undo_ops.as_slice())
+        apply_ops_to_graph(&mut candidate, &piece_registry, record.record.undo_ops.as_slice())
     {
         store.graph_history_past.push(record);
         return Err(AppError::InvalidInput(format!(
@@ -65,22 +67,10 @@ fn undo_graph_op_internal(store: &mut AppStore) -> AppResult<HistoryStatusDto> {
                 .unwrap_or_else(|| "unknown error".to_string())
         )));
     }
-    let sem = semantic_pass(&candidate, &piece_registry);
-    if !sem.errors.is_empty() {
-        store.graph_history_past.push(record);
-        let first = sem
-            .errors
-            .first()
-            .map(|diag| format!("{:?}", diag.kind))
-            .unwrap_or_else(|| "unknown error".to_string());
-        return Err(AppError::InvalidInput(format!(
-            "graph undo produced invalid graph: {} diagnostics (first={})",
-            sem.errors.len(),
-            first
-        )));
-    }
     if let Some(project) = store.current_project.as_mut() {
-        project.graph = candidate;
+        if let Some(graph) = project.graph_mut(&record.target) {
+            *graph = candidate;
+        }
     }
     store.graph_history_future.push(record);
     trim_graph_history_to_limit(store);
@@ -102,10 +92,13 @@ fn redo_graph_op_internal(store: &mut AppStore) -> AppResult<HistoryStatusDto> {
             "no active project; create or open a project first".to_string(),
         ));
     };
-    let mut candidate = project.graph.clone();
-    let piece_registry = PieceRegistry::default_strudel();
+    let mut candidate = project
+        .graph(&record.target)
+        .ok_or_else(|| AppError::InvalidInput("unknown graph target".to_string()))?
+        .clone();
+    let piece_registry = registry_for_target(project, &record.target);
     if let Err(errors) =
-        apply_ops_to_graph(&mut candidate, &piece_registry, record.do_ops.as_slice())
+        apply_ops_to_graph(&mut candidate, &piece_registry, record.record.do_ops.as_slice())
     {
         store.graph_history_future.push(record);
         return Err(AppError::InvalidInput(format!(
@@ -116,22 +109,10 @@ fn redo_graph_op_internal(store: &mut AppStore) -> AppResult<HistoryStatusDto> {
                 .unwrap_or_else(|| "unknown error".to_string())
         )));
     }
-    let sem = semantic_pass(&candidate, &piece_registry);
-    if !sem.errors.is_empty() {
-        store.graph_history_future.push(record);
-        let first = sem
-            .errors
-            .first()
-            .map(|diag| format!("{:?}", diag.kind))
-            .unwrap_or_else(|| "unknown error".to_string());
-        return Err(AppError::InvalidInput(format!(
-            "graph redo produced invalid graph: {} diagnostics (first={})",
-            sem.errors.len(),
-            first
-        )));
-    }
     if let Some(project) = store.current_project.as_mut() {
-        project.graph = candidate;
+        if let Some(graph) = project.graph_mut(&record.target) {
+            *graph = candidate;
+        }
     }
     store.graph_history_past.push(record);
     trim_graph_history_to_limit(store);
@@ -204,9 +185,11 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::core::graph::{Edge, Graph, GraphOp, GraphOpRecord, Node, ProjectDocument};
-    use crate::core::types::{EdgeId, GridPos};
+    use crate::core::piece_registry::runtime_registry;
+    use crate::model::{CadenceGraphTarget, CadenceProjectDocument, TargetedGraphOpRecord};
     use crate::store::history::record_graph_mutation;
+    use tile_graph::graph::{Edge, Graph, GraphOp, GraphOpRecord, Node};
+    use tile_graph::types::{EdgeId, GridPos};
 
     fn seeded_store() -> AppStore {
         let mut nodes = BTreeMap::new();
@@ -220,6 +203,8 @@ mod tests {
                 )]),
                 input_sides: Default::default(),
                 output_side: None,
+                label: None,
+                node_state: None,
             },
         );
         nodes.insert(
@@ -227,18 +212,22 @@ mod tests {
             Node {
                 piece_id: "strudel.fast".to_string(),
                 inline_params: BTreeMap::new(),
-            input_sides: Default::default(),
-            output_side: None,
-},
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
         );
         nodes.insert(
             GridPos { col: 2, row: 0 },
             Node {
                 piece_id: "strudel.output".to_string(),
                 inline_params: BTreeMap::new(),
-            input_sides: Default::default(),
-            output_side: None,
-},
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
         );
         let edge_a = Edge {
             id: EdgeId::new(),
@@ -253,7 +242,7 @@ mod tests {
             to_param: "pattern".to_string(),
         };
         AppStore {
-            current_project: Some(ProjectDocument::new(
+            current_project: Some(CadenceProjectDocument::new(
                 "undo-redo".to_string(),
                 Graph {
                     nodes,
@@ -262,6 +251,8 @@ mod tests {
                         (edge_b.id.clone(), edge_b),
                     ]),
                     name: "undo-redo".to_string(),
+                    cols: 9,
+                    rows: 9,
                 },
             )),
             ..Default::default()
@@ -271,7 +262,7 @@ mod tests {
     #[test]
     fn graph_history_undo_redo_replays_inverse_ops() {
         let mut store = seeded_store();
-        let registry = PieceRegistry::default_strudel();
+        let registry = runtime_registry(store.current_project.as_ref().expect("project"));
         let mut candidate = store
             .current_project
             .as_ref()
@@ -302,10 +293,13 @@ mod tests {
 
         record_graph_mutation(
             &mut store,
-            GraphOpRecord {
-                do_ops: outcome.applied_ops.clone(),
-                undo_ops: outcome.undo_ops.clone(),
-                removed_edges: outcome.removed_edges.clone(),
+            TargetedGraphOpRecord {
+                target: CadenceGraphTarget::Runtime,
+                record: GraphOpRecord {
+                    do_ops: outcome.applied_ops.clone(),
+                    undo_ops: outcome.undo_ops.clone(),
+                    removed_edges: outcome.removed_edges.clone(),
+                },
             },
         );
 

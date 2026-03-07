@@ -1,7 +1,7 @@
 use crate::state::project_state::{ProjectCreateStatus, ProjectState};
 
 pub fn editor_page_title() -> &'static str {
-    "GrooveAtlas Editor"
+    "Cadence Editor"
 }
 
 pub fn render_editor_shell(state: &ProjectState) -> String {

@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::core::code_expr::CodeExpr;
-use crate::core::piece::{ParamDef, ParamSchema, Piece, PieceDef};
-use crate::core::types::{PieceCategory, TileSide};
+use crate::core::strudel_schema::pattern_schema;
+use tile_graph::code_expr::CodeExpr;
+use tile_graph::piece::{ParamDef, Piece, PieceDef, PieceInputs};
+use tile_graph::types::{PieceCategory, TileSide};
 
 pub struct OutputPiece {
     def: PieceDef,
@@ -21,12 +22,16 @@ impl OutputPiece {
                     id: "pattern".into(),
                     label: "pattern".into(),
                     side: TileSide::West,
-                    schema: ParamSchema::Pattern { can_inline: false },
+                    schema: pattern_schema(),
+                    variadic_group: None,
                     required: true,
                 }],
                 output_type: None,
                 output_side: None,
-                description: Some("Terminal output node.".into()),
+                description: Some(
+                    "Terminal sink: commits a pattern chain as one program voice. Use one output per independent voice path."
+                        .into(),
+                ),
             },
         }
     }
@@ -37,11 +42,7 @@ impl Piece for OutputPiece {
         &self.def
     }
 
-    fn compile(
-        &self,
-        inputs: &BTreeMap<String, CodeExpr>,
-        _inline_params: &BTreeMap<String, Value>,
-    ) -> CodeExpr {
+    fn compile(&self, inputs: &PieceInputs, _inline_params: &BTreeMap<String, Value>) -> CodeExpr {
         inputs
             .get("pattern")
             .cloned()
