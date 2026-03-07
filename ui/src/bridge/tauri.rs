@@ -51,6 +51,23 @@ pub struct GridPos {
 pub struct EdgeId(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamValueKind {
+    Number,
+    Text,
+    Bool,
+    Json,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamInlineMode {
+    Literal,
+    Raw,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParamSchema {
     Number {
@@ -63,12 +80,23 @@ pub enum ParamSchema {
         default: String,
         can_inline: bool,
     },
-    Pattern {
-        can_inline: bool,
-    },
-    Rhythm {
+    Enum {
+        options: Vec<String>,
         default: String,
         can_inline: bool,
+    },
+    Bool {
+        default: bool,
+        can_inline: bool,
+    },
+    Custom {
+        port_type: String,
+        value_kind: ParamValueKind,
+        default: Option<Value>,
+        can_inline: bool,
+        inline_mode: ParamInlineMode,
+        min: Option<f64>,
+        max: Option<f64>,
     },
 }
 
@@ -78,6 +106,7 @@ pub struct ParamDef {
     pub label: String,
     pub side: String,
     pub schema: ParamSchema,
+    pub variadic_group: Option<String>,
     pub required: bool,
 }
 
@@ -94,30 +123,28 @@ pub struct PieceDef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphSnapshotDto {
-    pub schema_version: u32,
+    pub nodes: Value,
+    pub edges: Value,
     pub name: String,
-    pub graph: Value,
-    pub diagnostics: Vec<Value>,
-    pub eval_order: Vec<GridPos>,
-    pub terminal: Option<GridPos>,
-    pub can_compile: bool,
+    pub cols: u32,
+    pub rows: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphCompilePreviewDto {
     pub can_compile: bool,
     pub code: Option<String>,
-    pub expr: Option<Value>,
+    pub exprs: Vec<Value>,
     pub diagnostics: Vec<Value>,
     pub eval_order: Vec<GridPos>,
-    pub terminal: Option<GridPos>,
+    pub terminals: Vec<GridPos>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphApplyResultDto {
-    pub applied: bool,
-    pub snapshot: GraphSnapshotDto,
-    pub errors: Vec<Value>,
+    pub graph: GraphSnapshotDto,
+    pub semantic: Value,
+    pub preview_code: Option<String>,
     pub removed_edges: Vec<Value>,
 }
 
@@ -133,6 +160,10 @@ pub enum GraphOp {
     NodeMove {
         from: GridPos,
         to: GridPos,
+    },
+    NodeSwap {
+        a: GridPos,
+        b: GridPos,
     },
     NodeRemove {
         position: GridPos,
@@ -159,6 +190,34 @@ pub enum GraphOp {
         position: GridPos,
         #[serde(alias = "param")]
         param_id: String,
+    },
+    ParamSetSide {
+        position: GridPos,
+        param_id: String,
+        side: String,
+    },
+    ParamClearSide {
+        position: GridPos,
+        param_id: String,
+    },
+    OutputSetSide {
+        position: GridPos,
+        side: String,
+    },
+    OutputClearSide {
+        position: GridPos,
+    },
+    NodeSetLabel {
+        position: GridPos,
+        label: Option<String>,
+    },
+    NodeSetState {
+        position: GridPos,
+        state: Option<Value>,
+    },
+    ResizeGrid {
+        cols: u32,
+        rows: u32,
     },
 }
 
@@ -203,7 +262,7 @@ mod wasm_bridge {
     use wasm_bindgen::prelude::*;
 
     #[wasm_bindgen(inline_js = r#"
-export async function grooveatlasInvoke(command, payload) {
+export async function cadenceInvoke(command, payload) {
   const invoke =
     window.__TAURI__?.core?.invoke ??
     window.__TAURI_INTERNALS__?.invoke;
@@ -214,11 +273,8 @@ export async function grooveatlasInvoke(command, payload) {
 }
 "#)]
     extern "C" {
-        #[wasm_bindgen(catch, js_name = grooveatlasInvoke)]
-        pub async fn grooveatlas_invoke(
-            command: &str,
-            payload: JsValue,
-        ) -> Result<JsValue, JsValue>;
+        #[wasm_bindgen(catch, js_name = cadenceInvoke)]
+        pub async fn cadence_invoke(command: &str, payload: JsValue) -> Result<JsValue, JsValue>;
     }
 }
 
@@ -242,7 +298,7 @@ where
     #[cfg(target_arch = "wasm32")]
     {
         let payload = serde_wasm_bindgen::to_value(args).map_err(|err| err.to_string())?;
-        let raw = wasm_bridge::grooveatlas_invoke(command, payload)
+        let raw = wasm_bridge::cadence_invoke(command, payload)
             .await
             .map_err(js_error_message)?;
         return serde_wasm_bindgen::from_value(raw).map_err(|err| err.to_string());

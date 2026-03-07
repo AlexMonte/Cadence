@@ -14,7 +14,8 @@ const boot = {
 
 const DEFAULT_SAMPLE_LIBRARIES = [
   "github:tidalcycles/dirt-samples",
-  "github:felixroos/vcsl",
+  "https://raw.githubusercontent.com/felixroos/dough-samples/main/vcsl.json",
+  "https://raw.githubusercontent.com/felixroos/dough-samples/main/tidal-drum-machines.json",
 ];
 
 let gestureAudioContext = null;
@@ -22,6 +23,7 @@ const runtime = {
   api: null,
   evaluate: null,
 };
+const initSampleLoads = new Map();
 
 async function callIfFunction(name) {
   const fn = window[name];
@@ -125,7 +127,7 @@ export async function primeAudioFromGesture() {
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-grooveatlas-src=\"${src}\"]`);
+    const existing = document.querySelector(`script[data-cadence-src=\"${src}\"]`);
     if (existing) {
       existing.addEventListener("load", () => resolve());
       existing.addEventListener("error", () => reject(new Error(`failed to load ${src}`)));
@@ -138,7 +140,7 @@ function loadScript(src) {
     const script = document.createElement("script");
     script.src = src;
     script.async = true;
-    script.dataset.grooveatlasSrc = src;
+    script.dataset.cadenceSrc = src;
     script.onload = () => {
       script.dataset.loaded = "1";
       resolve();
@@ -194,6 +196,13 @@ function resolveEvaluateFunction(api) {
   return null;
 }
 
+function resolveSamplesFunction() {
+  return (
+    (runtime.api && typeof runtime.api.samples === "function" && runtime.api.samples.bind(runtime.api))
+    || (typeof window.samples === "function" ? window.samples.bind(window) : null)
+  );
+}
+
 async function executeScript(source) {
   const evaluator = runtime.evaluate;
   if (typeof evaluator === "function") {
@@ -219,9 +228,7 @@ async function initRuntime() {
   runtime.evaluate = resolveEvaluateFunction(api);
   installCompatibilityShims();
 
-  const samplesFn =
-    (runtime.api && typeof runtime.api.samples === "function" && runtime.api.samples.bind(runtime.api)) ||
-    (typeof window.samples === "function" ? window.samples.bind(window) : null);
+  const samplesFn = resolveSamplesFunction();
   if (samplesFn) {
     const loads = DEFAULT_SAMPLE_LIBRARIES.map((library) => samplesFn(library));
     const results = await Promise.allSettled(loads);
@@ -314,6 +321,26 @@ export function runtimeSampleReadiness() {
   };
 }
 
+export function runtimeInitSampleStatus() {
+  return [...initSampleLoads.values()].map((entry) => ({
+    id: entry.id,
+    source: entry.source,
+    aliases: { ...(entry.aliases ?? {}) },
+    status: entry.status,
+    error: entry.error ?? null,
+  }));
+}
+
+function setInitSampleStatus(id, next) {
+  initSampleLoads.set(id, {
+    id,
+    source: next.source,
+    aliases: { ...(next.aliases ?? {}) },
+    status: next.status,
+    error: next.error ?? null,
+  });
+}
+
 export async function evalProgram(code) {
   await ensureRuntimeReady();
   await resumeKnownAudioContexts();
@@ -334,6 +361,81 @@ export async function evalProgram(code) {
     const snippet = compactSnippet(lastSource);
     const context = snippet ? ` | snippet: ${snippet}` : "";
     throw new Error(`runtime_eval_failed: ${message}${context}`);
+  }
+}
+
+export async function runCadenceProgram(program) {
+  await ensureRuntimeReady();
+  await resumeKnownAudioContexts();
+
+  const cpsExpr = typeof program?.cpsExpr === "string" ? program.cpsExpr.trim() : "";
+  const sampleLoads = Array.isArray(program?.sampleLoads) ? program.sampleLoads : [];
+  const declarationCode = Array.isArray(program?.declarationCode) ? program.declarationCode : [];
+  const runtimeCode = typeof program?.runtimeCode === "string" ? program.runtimeCode.trim() : "";
+
+  if (cpsExpr) {
+    await executeScript(`setCps(${cpsExpr})`);
+  }
+
+  const samplesFn = resolveSamplesFunction();
+  for (const load of sampleLoads) {
+    if (!load || typeof load !== "object") {
+      continue;
+    }
+    const id = String(load.id ?? "").trim();
+    const source = String(load.source ?? "").trim();
+    const aliases = load.aliases && typeof load.aliases === "object" ? load.aliases : {};
+    if (!id || !source) {
+      continue;
+    }
+    setInitSampleStatus(id, {
+      source,
+      aliases,
+      status: "loading",
+      error: null,
+    });
+    if (typeof samplesFn !== "function") {
+      setInitSampleStatus(id, {
+        source,
+        aliases,
+        status: "error",
+        error: "samples() API unavailable",
+      });
+      throw new Error(`sample_load_failed: samples() API unavailable for ${id}`);
+    }
+    try {
+      const result = samplesFn(aliases, source);
+      if (result && typeof result.then === "function") {
+        await result;
+      }
+      setInitSampleStatus(id, {
+        source,
+        aliases,
+        status: "ready",
+        error: null,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error ?? "unknown");
+      setInitSampleStatus(id, {
+        source,
+        aliases,
+        status: "error",
+        error: detail,
+      });
+      throw new Error(`sample_load_failed[${id}]: ${detail}`);
+    }
+  }
+
+  for (const declaration of declarationCode) {
+    const source = normalizeLegacyScript(declaration);
+    if (!source.trim()) {
+      continue;
+    }
+    await executeScript(source);
+  }
+
+  if (runtimeCode) {
+    await executeScript(runtimeCode);
   }
 }
 

@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::graph::{GraphOpRecord, ProjectDocument};
 use crate::core::selection::SelectionState;
+use crate::model::{CadenceProjectDocument, TargetedGraphOpRecord};
 
 pub fn now_epoch_ms() -> u64 {
     SystemTime::now()
@@ -75,7 +75,7 @@ impl DiagnosticEntry {
 
 #[derive(Debug, Clone)]
 pub struct HistorySnapshot {
-    pub project: ProjectDocument,
+    pub project: CadenceProjectDocument,
     pub current_path: Option<PathBuf>,
     pub selection: SelectionState,
     pub dirty: bool,
@@ -84,7 +84,7 @@ pub struct HistorySnapshot {
 
 #[derive(Debug)]
 pub struct AppStore {
-    pub current_project: Option<ProjectDocument>,
+    pub current_project: Option<CadenceProjectDocument>,
     pub current_path: Option<PathBuf>,
     pub selection: SelectionState,
     pub runtime: RuntimeState,
@@ -95,8 +95,8 @@ pub struct AppStore {
     pub devtools_visible: bool,
     pub history_past: Vec<HistorySnapshot>,
     pub history_future: Vec<HistorySnapshot>,
-    pub graph_history_past: Vec<GraphOpRecord>,
-    pub graph_history_future: Vec<GraphOpRecord>,
+    pub graph_history_past: Vec<TargetedGraphOpRecord>,
+    pub graph_history_future: Vec<TargetedGraphOpRecord>,
     pub history_limit: usize,
 }
 

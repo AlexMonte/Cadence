@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use serde_json::{Number, Value};
 
-use crate::core::code_expr::CodeExpr;
-use crate::core::piece::{ParamDef, ParamSchema, Piece, PieceDef};
-use crate::core::types::{PieceCategory, PortType, TileSide};
+use tile_graph::code_expr::CodeExpr;
+use tile_graph::piece::{ParamDef, ParamSchema, Piece, PieceDef, PieceInputs};
+use tile_graph::types::{PieceCategory, PortType, TileSide};
 
 pub struct NumberPiece {
     def: PieceDef,
@@ -27,11 +27,15 @@ impl NumberPiece {
                         max: None,
                         can_inline: true,
                     },
+                    variadic_group: None,
                     required: false,
                 }],
-                output_type: Some(PortType::Number),
+                output_type: Some(PortType::number()),
                 output_side: Some(TileSide::North),
-                description: Some("Numeric constant.".into()),
+                description: Some(
+                    "Constant number source. Use to drive numeric params (for example fast factor, gain amount, clock period)."
+                        .into(),
+                ),
             },
         }
     }
@@ -42,11 +46,7 @@ impl Piece for NumberPiece {
         &self.def
     }
 
-    fn compile(
-        &self,
-        inputs: &BTreeMap<String, CodeExpr>,
-        inline_params: &BTreeMap<String, Value>,
-    ) -> CodeExpr {
+    fn compile(&self, inputs: &PieceInputs, inline_params: &BTreeMap<String, Value>) -> CodeExpr {
         inputs
             .get("value")
             .cloned()
@@ -75,11 +75,15 @@ impl TextPiece {
                         default: "bd".into(),
                         can_inline: true,
                     },
+                    variadic_group: None,
                     required: false,
                 }],
-                output_type: Some(PortType::Text),
+                output_type: Some(PortType::text()),
                 output_side: Some(TileSide::North),
-                description: Some("Text constant.".into()),
+                description: Some(
+                    "Constant text source. Use to feed text/string params when you want reusable values instead of inline literals."
+                        .into(),
+                ),
             },
         }
     }
@@ -90,11 +94,7 @@ impl Piece for TextPiece {
         &self.def
     }
 
-    fn compile(
-        &self,
-        inputs: &BTreeMap<String, CodeExpr>,
-        inline_params: &BTreeMap<String, Value>,
-    ) -> CodeExpr {
+    fn compile(&self, inputs: &PieceInputs, inline_params: &BTreeMap<String, Value>) -> CodeExpr {
         inputs
             .get("value")
             .cloned()

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::types::{EdgeId, GridPos};
+use tile_graph::types::{EdgeId, GridPos};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SelectionState {

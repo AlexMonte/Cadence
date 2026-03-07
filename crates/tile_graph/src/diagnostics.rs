@@ -1,7 +1,15 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::types::{EdgeId, GridPos, PortType, TileSide};
+use crate::types::{EdgeId, GridPos, PortType, TileSide};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -68,17 +76,48 @@ pub struct Diagnostic {
     pub kind: DiagnosticKind,
     pub site: Option<GridPos>,
     pub edge_id: Option<EdgeId>,
+    pub severity: DiagnosticSeverity,
+}
+
+impl Diagnostic {
+    pub fn error(kind: DiagnosticKind, site: Option<GridPos>) -> Self {
+        Self {
+            kind,
+            site,
+            edge_id: None,
+            severity: DiagnosticSeverity::Error,
+        }
+    }
+
+    pub fn warning(kind: DiagnosticKind, site: Option<GridPos>) -> Self {
+        Self {
+            kind,
+            site,
+            edge_id: None,
+            severity: DiagnosticSeverity::Warning,
+        }
+    }
+
+    pub fn with_edge(mut self, edge_id: EdgeId) -> Self {
+        self.edge_id = Some(edge_id);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticResult {
-    pub errors: Vec<Diagnostic>,
+    pub diagnostics: Vec<Diagnostic>,
     pub eval_order: Vec<GridPos>,
-    pub terminal: Option<GridPos>,
+    /// All terminal nodes found.
+    pub terminals: Vec<GridPos>,
 }
 
 impl SemanticResult {
     pub fn is_valid(&self) -> bool {
-        self.errors.is_empty() && self.terminal.is_some()
+        let has_error = self
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == DiagnosticSeverity::Error);
+        !has_error && !self.terminals.is_empty()
     }
 }

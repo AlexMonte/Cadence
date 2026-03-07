@@ -1,34 +1,31 @@
-# GrooveAtlas Run Policy
+# Cadence Run Policy
 
-This document is the authoritative run-command policy for GrooveAtlas.
+This document is the authoritative run-command policy for Cadence.
 
 ## Command Matrix
 
-1. `cargo run -p src-tauri`
-- Primary local run command.
+1. `./scripts/dev.sh`
+- Canonical local development command.
+- Runs `cargo tauri dev --config src-tauri/tauri.dev.conf.json`.
+- Starts Vite dev server and always serves live `ui/` source.
+
+2. `cargo run -p src-tauri`
+- Dist-mode run command.
 - Uses bundled frontend assets from `ui/dist`.
-- If `ui/dist/index.html` is missing, `src-tauri/build.rs` runs:
-`npm --prefix ../ui run build`
-- If build cannot run (for example `npm` is missing), build fails fast with an actionable error.
+- Missing `ui/dist/index.html` triggers build preflight.
+- Stale `ui/dist` is a hard error; rebuild first:
+`npm --prefix ui run build`
 
-2. `cargo tauri dev`
-- Frontend/HMR workflow.
-- Uses `src-tauri/tauri.dev.conf.json`.
-- Starts Vite dev server and loads app from `http://127.0.0.1:5173`.
-- Shortcut:
-`./scripts/dev.sh`
+3. `./scripts/run.sh`
+- Dist-mode wrapper for `cargo run -p src-tauri`.
+- Performs stale-dist precheck before launching.
 
-3. `cargo tauri build`
+4. `cargo tauri build`
 - Production packaging workflow.
 - Uses `beforeBuildCommand` to build frontend and package with `ui/dist`.
 
-4. `npm --prefix ui run build`
-- Optional explicit frontend rebuild.
-- Useful when you want to force-refresh `ui/dist`.
-
-5. `./scripts/run.sh`
-- Shortcut wrapper for:
-`cargo run -p src-tauri`
+5. `npm --prefix ui run build`
+- Explicit frontend rebuild for dist-mode workflows.
 
 ## Required Tooling
 
@@ -39,17 +36,16 @@ This document is the authoritative run-command policy for GrooveAtlas.
 ## Startup Guarantees
 
 1. Missing frontend artifacts must never produce a blank window.
-2. Startup either:
-- auto-builds missing frontend artifacts, or
-- fails with explicit remediation steps.
+2. Dist-mode startup fails fast when `ui/dist` is stale, with explicit remediation steps.
+3. Dev-mode startup never depends on `ui/dist` freshness.
 
 ## Troubleshooting
 
-1. Blank window after startup
+1. Dist-mode startup fails with stale UI error
 - Run:
 `npm --prefix ui run build`
 - Then:
-`cargo run -p src-tauri`
+`./scripts/run.sh`
 
 2. `cargo tauri dev` cannot start
 - Confirm Tauri CLI is installed:

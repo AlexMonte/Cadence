@@ -1,26 +1,19 @@
 import {
   ensureRuntimeReady,
-  evalProgram,
   primeAudioFromGesture,
   runtimeBootState,
+  runtimeInitSampleStatus,
+  runtimeSampleReadiness,
   stopProgram,
+  runCadenceProgram,
 } from "./src/bridge/strudel.js";
 
 const controls = {
-  panelTabPalette: document.getElementById("panel-tab-palette"),
-  panelTabTile: document.getElementById("panel-tab-tile"),
-  panelTabCompiled: document.getElementById("panel-tab-compiled"),
-  panelPanePalette: document.getElementById("panel-pane-palette"),
-  panelPaneTile: document.getElementById("panel-pane-tile"),
-  panelPaneCompiled: document.getElementById("panel-pane-compiled"),
   canvas: document.getElementById("canvas"),
   canvasGrid: document.getElementById("canvas-grid"),
   canvasLayer: document.getElementById("canvas-layer"),
   edgeLayer: document.getElementById("edge-layer"),
   addNodeButton: document.getElementById("add-node"),
-  widgetPaletteSearch: document.getElementById("widget-palette-search"),
-  widgetPaletteTabs: document.getElementById("widget-palette-tabs"),
-  widgetPaletteItems: document.getElementById("widget-palette-items"),
   selectedNodeLabel: document.getElementById("selected-node-label"),
   selectedRoleLabel: document.getElementById("selected-role-label"),
   tilePreview: document.getElementById("tile-preview"),
@@ -31,8 +24,10 @@ const controls = {
   projectMeta: document.getElementById("project-meta"),
   projectChip: document.getElementById("project-chip"),
   modeChip: document.getElementById("mode-chip"),
-  nodeNameInput: document.getElementById("node-name-input"),
-  nodeNameApply: document.getElementById("node-name-apply"),
+  workspaceRuntimeButton: document.getElementById("workspace-runtime"),
+  workspaceInitButton: document.getElementById("workspace-init"),
+  workspaceBackButton: document.getElementById("workspace-back"),
+  compileButton: document.getElementById("compile-toggle"),
   deleteNodeButton: document.getElementById("delete-node"),
   playButton: document.getElementById("play-toggle"),
   stopButton: document.getElementById("stop-toggle"),
@@ -44,20 +39,62 @@ const controls = {
   textImportSummary: document.getElementById("text-import-summary"),
   textImportTableBody: document.getElementById("text-import-table-body"),
   compileBanner: document.getElementById("compile-banner"),
+  gridPiecePicker: document.getElementById("grid-piece-picker"),
+  gridPiecePickerSearch: document.getElementById("grid-piece-picker-search"),
+  gridPiecePickerList: document.getElementById("grid-piece-picker-list"),
   statusHost: document.getElementById("status-host"),
   statusPlayback: document.getElementById("status-playback"),
   statusSelection: document.getElementById("status-selection"),
   statusProject: document.getElementById("status-project"),
+  // Pixel modal controls
+  tileInspectorModal: document.getElementById("tile-inspector-modal"),
+  modalInspectorTitle: document.getElementById("modal-inspector-title"),
+  modalInspectorBody: document.getElementById("modal-inspector-body"),
+  modalInspectorClose: document.getElementById("modal-inspector-close"),
+  compileModal: document.getElementById("compile-modal"),
+  modalCompileClose: document.getElementById("modal-compile-close"),
+  gridWindow: document.getElementById("grid-window"),
+  initWorkspace: document.getElementById("init-workspace"),
+  initCpsInput: document.getElementById("init-cps-input"),
+  initCpsSave: document.getElementById("init-cps-save"),
+  initCpsClear: document.getElementById("init-cps-clear"),
+  initSampleId: document.getElementById("init-sample-id"),
+  initSampleSource: document.getElementById("init-sample-source"),
+  initSampleAliases: document.getElementById("init-sample-aliases"),
+  initSampleSave: document.getElementById("init-sample-save"),
+  initSampleList: document.getElementById("init-sample-list"),
+  initSampleSummary: document.getElementById("init-sample-summary"),
+  initTrickName: document.getElementById("init-trick-name"),
+  initTrickCreate: document.getElementById("init-trick-create"),
+  initTrickList: document.getElementById("init-trick-list"),
+  initTrickSummary: document.getElementById("init-trick-summary"),
 };
 
-const CELL_W = 170;
-const CELL_H = 110;
-const NODE_W = 140;
-const NODE_H = 72;
-const GRID_COLS = 9;
-const GRID_ROWS = 9;
-const DRAG_MIME = "application/x-grooveatlas-grid";
-const PALETTE_CATEGORY_ORDER = ["generator", "transform", "constant", "output", "control", "trick"];
+const CELL_W = 64;
+const CELL_H = 64;
+const GRID_ORIGIN_X = 32;
+const GRID_ORIGIN_Y = 32;
+const NODE_W = 60;
+const NODE_H = 60;
+const OUTPUT_HANDLE_SIZE = 28;
+const OUTPUT_HANDLE_OFFSET = OUTPUT_HANDLE_SIZE / 2;
+const DEFAULT_GRID_COLS = 16;
+const DEFAULT_GRID_ROWS = 16;
+const DIRECTION_CYCLE = ["north", "east", "south", "west"];
+
+function patternSchema() {
+  return {
+    kind: "custom",
+    port_type: "pattern",
+    value_kind: "text",
+    can_inline: false,
+    inline_mode: "raw",
+    default: null,
+    min: null,
+    max: null,
+  };
+}
+
 const FALLBACK_CATALOG = [
   {
     id: "strudel.note",
@@ -69,6 +106,15 @@ const FALLBACK_CATALOG = [
     description: "Create a note pattern via note().",
   },
   {
+    id: "strudel.n",
+    label: "n",
+    category: "generator",
+    params: [{ id: "value", side: "south", schema: { kind: "text", can_inline: true } }],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Create a pitch-index pattern via n().",
+  },
+  {
     id: "strudel.sound",
     label: "s",
     category: "generator",
@@ -78,11 +124,39 @@ const FALLBACK_CATALOG = [
     description: "Create a sample pattern via s().",
   },
   {
+    id: "strudel.stack",
+    label: "stack",
+    category: "generator",
+    params: [
+      { id: "in_w", side: "west", schema: patternSchema(), variadic_group: "patterns", required: true },
+      { id: "in_n", side: "north", schema: patternSchema(), variadic_group: "patterns" },
+      { id: "in_s", side: "south", schema: patternSchema(), variadic_group: "patterns" },
+      { id: "in_e", side: "east", schema: patternSchema(), variadic_group: "patterns" },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Stack multiple patterns in parallel via stack(...).",
+  },
+  {
+    id: "strudel.cat",
+    label: "cat",
+    category: "generator",
+    params: [
+      { id: "in_w", side: "west", schema: patternSchema(), variadic_group: "patterns", required: true },
+      { id: "in_n", side: "north", schema: patternSchema(), variadic_group: "patterns" },
+      { id: "in_s", side: "south", schema: patternSchema(), variadic_group: "patterns" },
+      { id: "in_e", side: "east", schema: patternSchema(), variadic_group: "patterns" },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Concatenate multiple patterns in sequence via cat(...).",
+  },
+  {
     id: "strudel.fast",
     label: "fast",
     category: "transform",
     params: [
-      { id: "pattern", side: "west", schema: { kind: "pattern", can_inline: false } },
+      { id: "pattern", side: "west", schema: patternSchema() },
       { id: "factor", side: "south", schema: { kind: "number", can_inline: true } },
     ],
     output_type: "pattern",
@@ -90,16 +164,85 @@ const FALLBACK_CATALOG = [
     description: "Speed up a pattern by a factor.",
   },
   {
+    id: "strudel.slow",
+    label: "slow",
+    category: "transform",
+    params: [
+      { id: "pattern", side: "west", schema: patternSchema() },
+      { id: "factor", side: "south", schema: { kind: "number", can_inline: true } },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Slow down a pattern by a factor.",
+  },
+  {
+    id: "strudel.rev",
+    label: "rev",
+    category: "transform",
+    params: [{ id: "pattern", side: "west", schema: patternSchema(), required: true }],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Reverse event order in a pattern.",
+  },
+  {
     id: "strudel.gain",
     label: "gain",
     category: "transform",
     params: [
-      { id: "pattern", side: "west", schema: { kind: "pattern", can_inline: false } },
+      { id: "pattern", side: "west", schema: patternSchema() },
       { id: "amount", side: "south", schema: { kind: "number", can_inline: true } },
     ],
     output_type: "pattern",
     output_side: "east",
     description: "Set output gain.",
+  },
+  {
+    id: "strudel.pan",
+    label: "pan",
+    category: "transform",
+    params: [
+      { id: "pattern", side: "west", schema: patternSchema() },
+      { id: "amount", side: "south", schema: { kind: "number", can_inline: true } },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Set stereo pan.",
+  },
+  {
+    id: "strudel.room",
+    label: "room",
+    category: "transform",
+    params: [
+      { id: "pattern", side: "west", schema: patternSchema() },
+      { id: "amount", side: "south", schema: { kind: "number", can_inline: true } },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Set reverb room amount.",
+  },
+  {
+    id: "strudel.size",
+    label: "size",
+    category: "transform",
+    params: [
+      { id: "pattern", side: "west", schema: patternSchema() },
+      { id: "amount", side: "south", schema: { kind: "number", can_inline: true } },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Set reverb size.",
+  },
+  {
+    id: "strudel.mask",
+    label: "mask",
+    category: "transform",
+    params: [
+      { id: "pattern", side: "west", schema: patternSchema(), required: true },
+      { id: "by", side: "south", schema: patternSchema(), required: true },
+    ],
+    output_type: "pattern",
+    output_side: "east",
+    description: "Gate one pattern by another pattern.",
   },
   {
     id: "strudel.number",
@@ -111,10 +254,19 @@ const FALLBACK_CATALOG = [
     description: "Numeric constant.",
   },
   {
+    id: "strudel.text",
+    label: "text",
+    category: "constant",
+    params: [{ id: "value", side: "south", schema: { kind: "text", can_inline: true } }],
+    output_type: "text",
+    output_side: "north",
+    description: "Text constant.",
+  },
+  {
     id: "strudel.output",
     label: "play",
     category: "output",
-    params: [{ id: "pattern", side: "west", schema: { kind: "pattern", can_inline: false } }],
+    params: [{ id: "pattern", side: "west", schema: patternSchema() }],
     output_type: null,
     output_side: null,
     description: "Terminal output node.",
@@ -123,6 +275,7 @@ const FALLBACK_CATALOG = [
 
 const state = {
   project: null,
+  initStage: null,
   graph: null,
   semantic: null,
   compilePreview: null,
@@ -131,25 +284,107 @@ const state = {
   catalogById: new Map(),
   selectedPos: null,
   selectedEdgeId: null,
-  armedPieceId: null,
-  paletteCategory: "all",
   nodeDragFrom: null,
-  edgeDragFrom: null,
+  dragHoverCell: null,
   edgeAnimReady: false,
   lastEdgeKeys: new Set(),
   newEdgeUntil: new Map(),
-  activePanel: "palette",
   playback: "stopped",
   busy: false,
   miniConsoleVisible: false,
   logLines: [],
+  uiLastIssue: "",
   requestSeq: 0,
+  gridPickerPos: null,
+  gridPickerQuery: "",
+  editorMode: "runtime",
+  selectedTrickId: null,
 };
+
+function activeGraphTarget() {
+  if (state.editorMode === "trick" && state.selectedTrickId) {
+    return {
+      kind: "trick",
+      trick_id: state.selectedTrickId,
+    };
+  }
+  return { kind: "runtime" };
+}
+
+function isRuntimeMode() {
+  return state.editorMode === "runtime";
+}
+
+function isInitMode() {
+  return state.editorMode === "init";
+}
+
+function isTrickMode() {
+  return state.editorMode === "trick";
+}
+
+function selectedTrick() {
+  return state.initStage?.tricks?.find((trick) => trick.id === state.selectedTrickId) ?? null;
+}
+
+function modalIsOpen(modal) {
+  return !!modal && !modal.classList.contains("is-hidden");
+}
+
+function setModalOpen(modal, open) {
+  modal?.classList.toggle("is-hidden", !open);
+}
+
+function toggleTileInspectorModal(force) {
+  const open = typeof force === "boolean" ? force : !modalIsOpen(controls.tileInspectorModal);
+  setModalOpen(controls.tileInspectorModal, open);
+  if (open) {
+    renderInspector();
+  }
+}
+
+function toggleCompileModal(force) {
+  const open = typeof force === "boolean" ? force : !modalIsOpen(controls.compileModal);
+  setModalOpen(controls.compileModal, open);
+  if (open) {
+    renderCompileView();
+  }
+}
+
+function previewCanRender(preview) {
+  return !!(preview?.can_render || preview?.can_compile);
+}
+
+function slugifyIdentifier(value, fallback = "item") {
+  const base = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_$]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return base || fallback;
+}
+
+function runtimeStatusCode() {
+  const bootState = runtimeBootState();
+  if (state.busy) {
+    return "BUS";
+  }
+  if (bootState === "ready") {
+    return "RDY";
+  }
+  if (bootState === "booting") {
+    return "BOT";
+  }
+  if (bootState.startsWith("error:")) {
+    return "ERR";
+  }
+  return "IDL";
+}
 
 function setBusy(nextBusy) {
   state.busy = nextBusy;
   if (controls.statusHost) {
-    controls.statusHost.textContent = `HOST: ${nextBusy ? "BUSY" : "READY"} | strudel:${runtimeBootState()}`;
+    controls.statusHost.textContent = `H:${runtimeStatusCode()}`;
   }
 }
 
@@ -163,6 +398,279 @@ function logLine(level, text) {
     controls.miniConsoleOutput.textContent = state.logLines.join("\n");
     controls.miniConsoleOutput.scrollTop = controls.miniConsoleOutput.scrollHeight;
   }
+}
+
+function setUiIssue(text) {
+  state.uiLastIssue = text ? String(text) : "";
+  if (controls.statusSelection) {
+    renderProjectMeta();
+  }
+}
+
+function clearCellDragClasses(cell) {
+  if (!(cell instanceof HTMLElement)) {
+    return;
+  }
+  cell.classList.remove("is-drop-valid", "is-drop-invalid", "is-move-valid", "is-move-swap", "is-move-invalid");
+}
+
+function clearDragHover() {
+  if (state.dragHoverCell instanceof HTMLElement) {
+    clearCellDragClasses(state.dragHoverCell);
+  }
+  state.dragHoverCell = null;
+}
+
+function setDragHover(cell, kind, status) {
+  if (!(cell instanceof HTMLElement)) {
+    clearDragHover();
+    return;
+  }
+  if (state.dragHoverCell && state.dragHoverCell !== cell) {
+    clearCellDragClasses(state.dragHoverCell);
+  }
+  clearCellDragClasses(cell);
+  if (!status) {
+    state.dragHoverCell = cell;
+    return;
+  }
+  if (kind === "piece" || kind === "edge_from") {
+    cell.classList.add(status === "valid" ? "is-drop-valid" : "is-drop-invalid");
+  } else if (kind === "node_move_from") {
+    if (status === "valid") {
+      cell.classList.add("is-move-valid");
+    } else if (status === "swap") {
+      cell.classList.add("is-move-swap");
+    } else if (status === "invalid") {
+      cell.classList.add("is-move-invalid");
+    }
+  }
+  state.dragHoverCell = cell;
+}
+
+function clearDragState() {
+  clearDragHover();
+  state.nodeDragFrom = null;
+}
+
+function gridCellElementAt(position) {
+  if (!position || !controls.canvasGrid) {
+    return null;
+  }
+  return controls.canvasGrid.querySelector(`.grid-cell[data-grid-pos="${nodeKey(position)}"]`);
+}
+
+function outputHandleRectForSide(nodeRect, side) {
+  if (!nodeRect || !side) {
+    return null;
+  }
+  const half = OUTPUT_HANDLE_OFFSET;
+  const centerX = side === "east"
+    ? nodeRect.right
+    : side === "west"
+    ? nodeRect.left
+    : nodeRect.left + nodeRect.width / 2;
+  const centerY = side === "south"
+    ? nodeRect.bottom
+    : side === "north"
+    ? nodeRect.top
+    : nodeRect.top + nodeRect.height / 2;
+  return {
+    left: centerX - half,
+    right: centerX + half,
+    top: centerY - half,
+    bottom: centerY + half,
+  };
+}
+
+function pointInRect(clientX, clientY, rect) {
+  return !!rect
+    && clientX >= rect.left
+    && clientX <= rect.right
+    && clientY >= rect.top
+    && clientY <= rect.bottom;
+}
+
+function pointerHitsOutputHandle(nodeEl, side, clientX, clientY) {
+  if (!(nodeEl instanceof HTMLElement)) {
+    return false;
+  }
+  return pointInRect(clientX, clientY, outputHandleRectForSide(nodeEl.getBoundingClientRect(), side));
+}
+
+// ---------------------------------------------------------------------------
+// Pointer-event drag system (replaces HTML5 Drag and Drop which is unreliable
+// in WKWebView / Tauri).
+// ---------------------------------------------------------------------------
+
+const DRAG_THRESHOLD = 5;
+let _ptrDrag = null;
+let _suppressNextClick = false;
+
+// Capture-phase click suppressor — prevents the click that follows a
+// completed drag from selecting/toggling the source element.
+document.addEventListener(
+  "click",
+  (event) => {
+    if (_suppressNextClick) {
+      event.stopPropagation();
+      event.preventDefault();
+      _suppressNextClick = false;
+    }
+  },
+  { capture: true },
+);
+
+/**
+ * Call from `pointerdown` on any drag source.
+ * The actual drag will only begin once the pointer moves past DRAG_THRESHOLD.
+ */
+function beginPossibleDrag(event, kind, data) {
+  if (event.button !== 0 || _ptrDrag) return;
+  _ptrDrag = {
+    kind,
+    pieceId: data.pieceId ?? null,
+    fromPos: data.fromPos ?? null,
+    ghost: null,
+    startX: event.clientX,
+    startY: event.clientY,
+    started: false,
+  };
+  document.addEventListener("pointermove", onPtrDragMove, { capture: true });
+  document.addEventListener("pointerup", onPtrDragEnd, { capture: true });
+  document.addEventListener("pointercancel", onPtrDragEnd, { capture: true });
+}
+
+function commitDragStart() {
+  if (!_ptrDrag || _ptrDrag.started) return;
+  _ptrDrag.started = true;
+  document.body.classList.add("is-pointer-dragging");
+  state.nodeDragFrom = _ptrDrag.kind === "node_move_from" ? _ptrDrag.fromPos : null;
+
+  const ghost = document.createElement("div");
+  ghost.className = "drag-ghost";
+  if (_ptrDrag.kind === "piece") {
+    const def = pieceDef(_ptrDrag.pieceId);
+    ghost.textContent = compactTileLabel(def, null) || def?.label || _ptrDrag.pieceId || "tile";
+  } else if (_ptrDrag.kind === "node_move_from") {
+    const entry = _ptrDrag.fromPos ? nodeByPos(_ptrDrag.fromPos) : null;
+    const def = entry ? pieceDef(entry.node.piece_id) : null;
+    ghost.textContent = compactTileLabel(def, entry);
+  } else {
+    ghost.textContent = "connect";
+  }
+  ghost.style.left = `${_ptrDrag.startX}px`;
+  ghost.style.top = `${_ptrDrag.startY}px`;
+  document.body.append(ghost);
+  _ptrDrag.ghost = ghost;
+
+  closeGridPiecePicker();
+  renderCanvas();
+}
+
+function onPtrDragMove(event) {
+  if (!_ptrDrag) return;
+
+  if (!_ptrDrag.started) {
+    const dx = event.clientX - _ptrDrag.startX;
+    const dy = event.clientY - _ptrDrag.startY;
+    if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+    commitDragStart();
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (_ptrDrag.ghost) {
+    _ptrDrag.ghost.style.left = `${event.clientX}px`;
+    _ptrDrag.ghost.style.top = `${event.clientY}px`;
+  }
+
+  const position = clientPointToGridPos(event.clientX, event.clientY);
+  if (!position) {
+    clearDragHover();
+    return;
+  }
+
+  const hoverCell = gridCellElementAt(position);
+  const isOccupied = !!nodeByPos(position);
+
+  if (_ptrDrag.kind === "piece") {
+    setDragHover(hoverCell, "piece", isOccupied ? "invalid" : "valid");
+  } else if (_ptrDrag.kind === "node_move_from") {
+    setDragHover(hoverCell, "node_move_from", nodeMoveDropStatus(_ptrDrag.fromPos, position));
+  } else if (_ptrDrag.kind === "edge_from") {
+    setDragHover(hoverCell, "edge_from", isOccupied ? edgeDropStatus(_ptrDrag.fromPos, position) : null);
+  }
+}
+
+function onPtrDragEnd(event) {
+  if (!_ptrDrag) return;
+
+  const drag = _ptrDrag;
+  _ptrDrag = null;
+
+  document.removeEventListener("pointermove", onPtrDragMove, { capture: true });
+  document.removeEventListener("pointerup", onPtrDragEnd, { capture: true });
+  document.removeEventListener("pointercancel", onPtrDragEnd, { capture: true });
+
+  if (drag.ghost) {
+    drag.ghost.remove();
+  }
+  document.body.classList.remove("is-pointer-dragging");
+
+  if (!drag.started) {
+    // Pointer never moved past threshold — let the normal click fire.
+    return;
+  }
+
+  _suppressNextClick = true;
+
+  const position = clientPointToGridPos(event.clientX, event.clientY);
+  clearDragState();
+
+  if (!position) {
+    setUiIssue("drop/out_of_bounds");
+    renderCanvas();
+    return;
+  }
+
+  const isOccupied = !!nodeByPos(position);
+
+  if (drag.kind === "piece" && drag.pieceId) {
+    if (!isOccupied) {
+      void placePieceAt(drag.pieceId, position);
+    } else {
+      logLine("warn", `node_place: cell occupied (${position.col}, ${position.row})`);
+      setUiIssue("node_place/occupied");
+      renderCanvas();
+    }
+    return;
+  }
+
+  if (drag.kind === "node_move_from" && drag.fromPos) {
+    if (!posEquals(drag.fromPos, position)) {
+      const op = isOccupied
+        ? { op: "node_swap", a: drag.fromPos, b: position }
+        : { op: "node_move", from: drag.fromPos, to: position };
+      void applyOps(isOccupied ? "node_swap_drag" : "node_move_drag", [op]);
+    } else {
+      renderCanvas();
+    }
+    return;
+  }
+
+  if (drag.kind === "edge_from" && drag.fromPos) {
+    if (isOccupied) {
+      void connectNodes(drag.fromPos, position, "edge_connect_drag");
+    } else {
+      setUiIssue("edge_connect/no_target");
+      renderCanvas();
+    }
+    return;
+  }
+
+  renderCanvas();
 }
 
 function invokeHandle() {
@@ -219,14 +727,16 @@ function normalizeGraph(graph) {
     name: typeof graph?.name === "string" ? graph.name : "",
     nodes: normalizedNodes,
     edges: normalizedEdges,
+    cols: Number.isFinite(Number(graph?.cols)) ? Number(graph.cols) : DEFAULT_GRID_COLS,
+    rows: Number.isFinite(Number(graph?.rows)) ? Number(graph.rows) : DEFAULT_GRID_ROWS,
   };
 }
 
 function normalizeSemantic(semantic) {
   return {
-    errors: Array.isArray(semantic?.errors) ? semantic.errors : [],
+    diagnostics: Array.isArray(semantic?.diagnostics) ? semantic.diagnostics : [],
     eval_order: Array.isArray(semantic?.eval_order) ? semantic.eval_order : [],
-    terminal: semantic?.terminal ?? null,
+    terminals: Array.isArray(semantic?.terminals) ? semantic.terminals : [],
   };
 }
 
@@ -264,6 +774,11 @@ function diagnosticsFromInvokeError(error) {
   return normalizeDiagnosticsPayload(error);
 }
 
+function isErrorDiagnostic(diag) {
+  const severity = String(diag?.severity ?? "error").toLowerCase();
+  return severity === "error";
+}
+
 function setCatalog(defs) {
   state.catalog = Array.isArray(defs) ? defs : [];
   state.catalog.sort((left, right) => String(left.label).localeCompare(String(right.label)));
@@ -272,17 +787,17 @@ function setCatalog(defs) {
 
 function compilePreviewFromApplyResult(result) {
   const semantic = normalizeSemantic(result?.semantic);
-  const diagnostics = semantic.errors;
+  const diagnostics = semantic.diagnostics;
   const code = typeof result?.preview_code === "string" && result.preview_code.length > 0
     ? result.preview_code
     : null;
   return {
-    can_compile: diagnostics.length === 0 && code !== null,
+    can_compile: !diagnostics.some(isErrorDiagnostic) && code !== null,
     code,
-    expr: null,
+    exprs: [],
     diagnostics,
     eval_order: semantic.eval_order,
-    terminal: semantic.terminal,
+    terminals: semantic.terminals,
   };
 }
 
@@ -347,15 +862,34 @@ function normalizedCategory(value) {
   return String(value ?? "unknown").toLowerCase();
 }
 
-function categoryLabel(category) {
-  if (category === "all") {
-    return "All";
+function compactTileLabel(def, entry) {
+  const raw = String(def?.label ?? entry?.node?.piece_id ?? "?")
+    .trim()
+    .toLowerCase();
+  if (!raw) {
+    return "?";
   }
-  return category
-    .split("_")
+  if (raw.length <= 4) {
+    return raw;
+  }
+  const noVowels = `${raw[0]}${raw.slice(1).replace(/[aeiou]/g, "")}`;
+  if (noVowels.length >= 2 && noVowels.length <= 4) {
+    return noVowels;
+  }
+  const initials = raw
+    .split(/[^a-z0-9]+/)
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+    .map((part) => part[0])
+    .join("");
+  if (initials.length >= 2 && initials.length <= 4) {
+    return initials;
+  }
+  return raw.slice(0, 4);
+}
+
+function compactProjectName(name, dirty) {
+  const base = String(name ?? "Untitled").trim() || "Untitled";
+  return `${base}${dirty ? "*" : ""}`;
 }
 
 function displayLabel(value, fallback = "unknown") {
@@ -377,6 +911,115 @@ function appendMetaRow(container, label, value) {
   current.textContent = String(value);
   row.append(key, current);
   container.append(row);
+}
+
+function schemaPortType(schema) {
+  if (!schema) {
+    return null;
+  }
+  if (schema.kind === "custom") {
+    return String(schema.port_type ?? "");
+  }
+  if (schema.kind === "enum") {
+    return "text";
+  }
+  return String(schema.kind ?? "");
+}
+
+function schemaValueKind(schema) {
+  if (!schema) {
+    return "unknown";
+  }
+  if (schema.kind === "custom") {
+    return String(schema.value_kind ?? "text");
+  }
+  if (schema.kind === "enum") {
+    return "text";
+  }
+  return String(schema.kind ?? "unknown");
+}
+
+function schemaKindLabel(schema) {
+  return displayLabel(schemaPortType(schema) || schema?.kind || "unknown");
+}
+
+function describeTileUsage(def) {
+  const category = normalizedCategory(def?.category);
+  switch (category) {
+    case "generator":
+      return "Place it as a source tile, set inline params, then drag from output to downstream inputs.";
+    case "transform":
+      return "Feed a source into required inputs, tune params, then route transformed output onward.";
+    case "constant":
+      return "Set inline constant values and connect to compatible number/text/bool/signal parameters.";
+    case "output":
+      return "Use as a terminal tile. Connect playable pattern/control signals into required inputs.";
+    case "control":
+      return "Use trigger/signal flow to drive gating, switching, and timing across neighboring tiles.";
+    default:
+      return "Connect adjacent tiles by compatible side and type. Use inline params for quick local values.";
+  }
+}
+
+function renderTileData(def, entry, container) {
+  if (!container) {
+    return;
+  }
+  container.replaceChildren();
+
+  const title = document.createElement("h3");
+  title.className = "tile-section-title";
+  title.textContent = "What It Does";
+  const description = document.createElement("p");
+  description.className = "tile-empty-message";
+  description.textContent = String(
+    def?.description
+      ?? "No description yet. This tile is available in the current graph registry.",
+  );
+
+  const usageTitle = document.createElement("h3");
+  usageTitle.className = "tile-section-title";
+  usageTitle.textContent = "How To Use";
+  const usage = document.createElement("p");
+  usage.className = "tile-empty-message";
+  usage.textContent = describeTileUsage(def);
+
+  const portsTitle = document.createElement("h3");
+  portsTitle.className = "tile-section-title";
+  portsTitle.textContent = "Ports";
+
+  const ports = document.createElement("div");
+  ports.className = "tile-meta-grid";
+
+  for (const param of def?.params ?? []) {
+    const currentSide = entry ? nodeInputSide(entry, param) : normalizeSide(param.side);
+    const required = param.required ? "required" : "optional";
+    const group = param.variadic_group ? ` • group ${param.variadic_group}` : "";
+    appendMetaRow(
+      ports,
+      `in ${param.id}`,
+      `${schemaKindLabel(param.schema)} • ${displayLabel(currentSide)} • ${required}${group}`,
+    );
+  }
+
+  if (def?.output_type) {
+    const outSide = entry ? nodeOutputSide(entry, def) : normalizeSide(def.output_side);
+    appendMetaRow(
+      ports,
+      "out",
+      `${displayLabel(def.output_type)} • ${displayLabel(outSide ?? "none")}`,
+    );
+  } else {
+    appendMetaRow(ports, "out", "none (terminal)");
+  }
+
+  const nodeRef = document.createElement("p");
+  nodeRef.className = "tile-empty-message";
+  nodeRef.textContent = entry
+    ? `${entry.node.piece_id} @ (${entry.position.col}, ${entry.position.row})`
+    : String(def?.id ?? "");
+
+  container.append(title, description, usageTitle, usage, portsTitle, ports, nodeRef);
 }
 
 function posEquals(left, right) {
@@ -496,21 +1139,78 @@ function schemaAcceptsType(schema, sourceType) {
   if (sourceType === "any") {
     return true;
   }
-  switch (schema.kind) {
-    case "number":
-      return sourceType === "number";
-    case "text":
-      return sourceType === "text";
-    case "pattern":
-      return sourceType === "pattern";
-    case "rhythm":
-      return sourceType === "rhythm";
-    default:
-      return false;
+  if (schema.kind === "bool") {
+    return sourceType === "bool" || sourceType === "number";
   }
+  const expected = schemaPortType(schema);
+  return !!expected && expected === sourceType;
 }
 
-function pickTargetParam(fromPos, toPos) {
+function nextDirectionInCycle(currentSide, isDefaultState) {
+  if (isDefaultState) {
+    return DIRECTION_CYCLE[0];
+  }
+  const normalized = normalizeSide(currentSide);
+  const index = DIRECTION_CYCLE.indexOf(normalized);
+  if (index < 0) {
+    return DIRECTION_CYCLE[0];
+  }
+  if (index === DIRECTION_CYCLE.length - 1) {
+    return null;
+  }
+  return DIRECTION_CYCLE[index + 1];
+}
+
+function cycleInputDirection(nodeEntry, param) {
+  const hasOverride = Object.prototype.hasOwnProperty.call(nodeEntry.node.input_sides ?? {}, param.id);
+  const currentSide = nodeInputSide(nodeEntry, param);
+  const next = nextDirectionInCycle(currentSide, !hasOverride);
+  if (!next) {
+    void applyOps("param_clear_side_cycle", [
+      {
+        op: "param_clear_side",
+        position: nodeEntry.position,
+        param_id: param.id,
+      },
+    ]);
+    return;
+  }
+  void applyOps("param_set_side_cycle", [
+    {
+      op: "param_set_side",
+      position: nodeEntry.position,
+      param_id: param.id,
+      side: next,
+    },
+  ]);
+}
+
+function cycleOutputDirection(nodeEntry, def) {
+  if (!def?.output_type) {
+    return;
+  }
+  const hasOverride = nodeEntry.node.output_side != null;
+  const currentSide = nodeOutputSide(nodeEntry, def);
+  const next = nextDirectionInCycle(currentSide, !hasOverride);
+  if (!next) {
+    void applyOps("output_clear_side_cycle", [
+      {
+        op: "output_clear_side",
+        position: nodeEntry.position,
+      },
+    ]);
+    return;
+  }
+  void applyOps("output_set_side_cycle", [
+    {
+      op: "output_set_side",
+      position: nodeEntry.position,
+      side: next,
+    },
+  ]);
+}
+
+function pickTargetParamLocal(fromPos, toPos) {
   const toNode = nodeByPos(toPos);
   if (!toNode) {
     return null;
@@ -535,6 +1235,69 @@ function pickTargetParam(fromPos, toPos) {
   return typeMatched.length > 0 ? typeMatched[0].id : null;
 }
 
+function probeReasonLabel(reason) {
+  switch (String(reason ?? "")) {
+    case "unknown_source_node":
+      return "missing source node";
+    case "unknown_target_node":
+      return "missing target node";
+    case "unknown_source_piece":
+      return "unknown source tile type";
+    case "unknown_target_piece":
+      return "unknown target tile type";
+    case "unknown_target_param":
+      return "unknown target parameter";
+    case "not_adjacent":
+      return "source and target must be adjacent";
+    case "side_mismatch":
+      return "source output side must face target side";
+    case "output_from_terminal":
+      return "source tile cannot output";
+    case "no_param_on_target_side":
+      return "target has no input on this side";
+    case "target_param_occupied":
+      return "target input is already connected";
+    case "type_mismatch":
+      return "type mismatch";
+    case "no_compatible_param":
+      return "no compatible target parameter";
+    default:
+      return "connection rejected";
+  }
+}
+
+async function pickTargetParamBackend(fromPos, toPos) {
+  const localFallback = pickTargetParamLocal(fromPos, toPos);
+  try {
+    const raw = await invokeTauri("graph_pick_target_param", {
+      from: { col: fromPos.col, row: fromPos.row },
+      to_node: { col: toPos.col, row: toPos.row },
+      target: activeGraphTarget(),
+    });
+    if (!raw || typeof raw !== "object") {
+      return {
+        to_param: localFallback,
+        reason: localFallback ? null : "no_compatible_param",
+        detail: "probe returned unexpected payload",
+      };
+    }
+    return {
+      to_param:
+        typeof raw.to_param === "string" && raw.to_param.length > 0
+          ? raw.to_param
+          : null,
+      reason: typeof raw.reason === "string" ? raw.reason : null,
+      detail: typeof raw.detail === "string" ? raw.detail : null,
+    };
+  } catch (error) {
+    return {
+      to_param: localFallback,
+      reason: localFallback ? null : "no_compatible_param",
+      detail: `probe unavailable (${error instanceof Error ? error.message : String(error)})`,
+    };
+  }
+}
+
 async function connectNodes(fromPos, toPos, reason) {
   if (!isWithinGrid(fromPos) || !isWithinGrid(toPos)) {
     logLine("warn", `${reason}: out-of-bounds connection`);
@@ -547,9 +1310,12 @@ async function connectNodes(fromPos, toPos, reason) {
     logLine("warn", `${reason}: source and target must be adjacent`);
     return false;
   }
-  const paramId = pickTargetParam(fromPos, toPos);
+  const probe = await pickTargetParamBackend(fromPos, toPos);
+  const paramId = probe?.to_param ?? null;
   if (!paramId) {
-    logLine("warn", `${reason}: no compatible target param at ${nodeKey(toPos)}`);
+    const reasonLabel = probeReasonLabel(probe?.reason);
+    const detail = probe?.detail ? ` (${probe.detail})` : "";
+    logLine("warn", `${reason}: ${reasonLabel} at ${nodeKey(toPos)}${detail}`);
     return false;
   }
   return applyOps(reason, [
@@ -572,7 +1338,7 @@ function edgeDropStatus(fromPos, toPos) {
   if (!nodeByPos(toPos)) {
     return null;
   }
-  return pickTargetParam(fromPos, toPos) ? "valid" : "invalid";
+  return pickTargetParamLocal(fromPos, toPos) ? "valid" : "invalid";
 }
 
 function nodeMoveDropStatus(fromPos, toPos) {
@@ -585,7 +1351,7 @@ function nodeMoveDropStatus(fromPos, toPos) {
   if (!isWithinGrid(toPos)) {
     return "invalid";
   }
-  return nodeByPos(toPos) ? "invalid" : "valid";
+  return nodeByPos(toPos) ? "swap" : "valid";
 }
 
 function invalidEdgeKeys() {
@@ -597,7 +1363,7 @@ function invalidEdgeKeys() {
     "duplicate_connection",
   ]);
   const keys = new Set();
-  for (const diag of currentDiagnostics()) {
+  for (const diag of graphDiagnostics()) {
     const kind = String(diag?.kind?.kind ?? "");
     if (!invalidKinds.has(kind) || diag?.edge_id == null) {
       continue;
@@ -612,8 +1378,9 @@ function appendPortIndicators(nodeEl, def, nodeEntry) {
     return;
   }
 
+  const isSelectedNode = posEquals(state.selectedPos, nodeEntry.position);
   const slots = { north: 0, south: 0, east: 0, west: 0 };
-  const pushIndicator = (sideRaw, markerType, title) => {
+  const pushIndicator = (sideRaw, markerType, title, onClick) => {
     const side = String(sideRaw || "").toLowerCase();
     if (!(side in slots)) {
       return;
@@ -622,17 +1389,49 @@ function appendPortIndicators(nodeEl, def, nodeEntry) {
     marker.className = `port-indicator side-${side} ${markerType}`;
     marker.style.setProperty("--slot-index", String(slots[side]));
     marker.title = title;
+    if (isSelectedNode) {
+      marker.classList.add("is-editable");
+      marker.setAttribute("role", "button");
+      marker.tabIndex = 0;
+      marker.addEventListener("click", (event) => {
+        event.stopPropagation();
+        onClick?.();
+      });
+      marker.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        onClick?.();
+      });
+    }
     slots[side] += 1;
     nodeEl.append(marker);
   };
 
   for (const param of def.params ?? []) {
     const schemaKind = String(param?.schema?.kind ?? "unknown");
-    pushIndicator(nodeInputSide(nodeEntry, param), "input", `${param.id} (${schemaKind})`);
+    const hasOverride = Object.prototype.hasOwnProperty.call(nodeEntry.node.input_sides ?? {}, param.id);
+    const currentSide = nodeInputSide(nodeEntry, param);
+    const directionMode = hasOverride ? "override" : "default";
+    pushIndicator(
+      currentSide,
+      "input",
+      `${param.id} (${schemaKind}) • ${directionMode} • click to rotate`,
+      () => cycleInputDirection(nodeEntry, param),
+    );
   }
   const outSide = nodeOutputSide(nodeEntry, def);
   if (def.output_type && outSide) {
-    pushIndicator(outSide, "output", `out (${def.output_type})`);
+    const hasOverride = nodeEntry.node.output_side != null;
+    const directionMode = hasOverride ? "override" : "default";
+    pushIndicator(
+      outSide,
+      "output",
+      `out (${def.output_type}) • ${directionMode} • click to rotate`,
+      () => cycleOutputDirection(nodeEntry, def),
+    );
   }
 }
 
@@ -649,19 +1448,6 @@ function adjacentInDirection(pos, side) {
     default:
       return { col: pos.col, row: pos.row };
   }
-}
-
-function setActivePanel(panel) {
-  state.activePanel = panel;
-  controls.panelPanePalette?.classList.toggle("is-hidden", panel !== "palette");
-  controls.panelPaneTile?.classList.toggle("is-hidden", panel !== "tile");
-  controls.panelPaneCompiled?.classList.toggle("is-hidden", panel !== "compiled");
-  controls.panelTabPalette?.classList.toggle("is-active", panel === "palette");
-  controls.panelTabTile?.classList.toggle("is-active", panel === "tile");
-  controls.panelTabCompiled?.classList.toggle("is-active", panel === "compiled");
-  controls.panelTabPalette?.setAttribute("aria-selected", panel === "palette" ? "true" : "false");
-  controls.panelTabTile?.setAttribute("aria-selected", panel === "tile" ? "true" : "false");
-  controls.panelTabCompiled?.setAttribute("aria-selected", panel === "compiled" ? "true" : "false");
 }
 
 function diagToText(diag) {
@@ -749,37 +1535,27 @@ function jumpToDiagnostic(diag, index) {
   const found = nodeByPos(target);
   if (!found) {
     logLine("warn", `${index + 1}: ${diagToText(diag)} (site has no node)`);
-    setActivePanel("tile");
     return;
   }
   selectNode(target);
-  setActivePanel("tile");
+  toggleTileInspectorModal(true);
   logLine("warn", `${index + 1}: ${diagToText(diag)}`);
+}
+
+function graphDiagnostics() {
+  return Array.isArray(state.semantic?.diagnostics) ? state.semantic.diagnostics : [];
 }
 
 function currentDiagnostics() {
   if (Array.isArray(state.compilePreview?.diagnostics) && state.compilePreview.diagnostics.length > 0) {
     return state.compilePreview.diagnostics;
   }
-  return Array.isArray(state.semantic?.errors) ? state.semantic.errors : [];
+  return graphDiagnostics();
 }
 
 function updateLastGoodCode() {
-  if (state.compilePreview?.can_compile && typeof state.compilePreview.code === "string") {
+  if (previewCanRender(state.compilePreview) && typeof state.compilePreview.code === "string") {
     state.lastGoodCode = state.compilePreview.code;
-  }
-}
-
-function parseDragPayload(event) {
-  const raw = event.dataTransfer?.getData(DRAG_MIME) || event.dataTransfer?.getData("text/plain") || "";
-  if (!raw) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
   }
 }
 
@@ -799,9 +1575,168 @@ function nextRequestId(label) {
 
 function gridToPx(pos) {
   return {
-    x: 40 + pos.col * CELL_W,
-    y: 40 + pos.row * CELL_H,
+    x: GRID_ORIGIN_X + pos.col * CELL_W,
+    y: GRID_ORIGIN_Y + pos.row * CELL_H,
   };
+}
+
+function gridCols() {
+  return Number.isFinite(state.graph?.cols) ? state.graph.cols : DEFAULT_GRID_COLS;
+}
+
+function gridRows() {
+  return Number.isFinite(state.graph?.rows) ? state.graph.rows : DEFAULT_GRID_ROWS;
+}
+
+function pickerIsOpen() {
+  return !!controls.gridPiecePicker && !controls.gridPiecePicker.classList.contains("is-hidden");
+}
+
+function gridPosToClientPoint(position) {
+  if (!controls.canvas) {
+    return {
+      x: Math.round(window.innerWidth / 2),
+      y: 96,
+    };
+  }
+  const rect = controls.canvas.getBoundingClientRect();
+  const pt = gridToPx(position);
+  return {
+    x: Math.round(rect.left + pt.x - controls.canvas.scrollLeft + CELL_W / 2),
+    y: Math.round(rect.top + pt.y - controls.canvas.scrollTop + CELL_H / 2),
+  };
+}
+
+function clientPointToGridPos(clientX, clientY) {
+  if (!controls.canvas) {
+    return null;
+  }
+  const rect = controls.canvas.getBoundingClientRect();
+  const localX = clientX - rect.left + controls.canvas.scrollLeft;
+  const localY = clientY - rect.top + controls.canvas.scrollTop;
+  const col = Math.floor((localX - GRID_ORIGIN_X) / CELL_W);
+  const row = Math.floor((localY - GRID_ORIGIN_Y) / CELL_H);
+  const position = { col, row };
+  return isWithinGrid(position) ? position : null;
+}
+
+function pickerFilteredCatalog() {
+  const query = String(state.gridPickerQuery ?? "").trim().toLowerCase();
+  return state.catalog.filter((def) => {
+    if (!query) {
+      return true;
+    }
+    return (
+      String(def.id ?? "").toLowerCase().includes(query)
+      || String(def.label ?? "").toLowerCase().includes(query)
+      || String(def.description ?? "").toLowerCase().includes(query)
+      || normalizedCategory(def.category).includes(query)
+    );
+  });
+}
+
+function closeGridPiecePicker() {
+  if (!controls.gridPiecePicker) {
+    return;
+  }
+  controls.gridPiecePicker.classList.add("is-hidden");
+  state.gridPickerPos = null;
+  state.gridPickerQuery = "";
+  if (controls.gridPiecePickerSearch) {
+    controls.gridPiecePickerSearch.value = "";
+  }
+  if (controls.gridPiecePickerList) {
+    controls.gridPiecePickerList.replaceChildren();
+  }
+}
+
+function renderGridPiecePicker() {
+  if (!controls.gridPiecePickerList) {
+    return;
+  }
+  controls.gridPiecePickerList.replaceChildren();
+  const target = state.gridPickerPos;
+  if (!target) {
+    return;
+  }
+  const defs = pickerFilteredCatalog();
+  if (defs.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "tile-empty-message";
+    empty.textContent = "No tiles match this search.";
+    controls.gridPiecePickerList.append(empty);
+    return;
+  }
+
+  const sorted = [...defs].sort((a, b) => String(a.label).localeCompare(String(b.label)));
+  for (const def of sorted) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "grid-piece-picker-item";
+    item.dataset.pieceId = String(def.id);
+    if (def.category) {
+      item.classList.add(`piece-${normalizedCategory(def.category)}`);
+    }
+    item.textContent = `${def.label} / ${def.id}`;
+    item.title = String(def.description ?? def.id);
+    item.addEventListener("pointerdown", (event) => {
+      beginPossibleDrag(event, "piece", { pieceId: def.id });
+    });
+    item.addEventListener("click", () => {
+      const placePos = state.gridPickerPos;
+      closeGridPiecePicker();
+      if (placePos) {
+        void placePieceAt(def.id, placePos);
+      }
+    });
+    controls.gridPiecePickerList.append(item);
+  }
+}
+
+function openGridPiecePicker(position, clientX, clientY) {
+  if (!controls.gridPiecePicker || !controls.gridPiecePickerSearch) {
+    return;
+  }
+  if (nodeByPos(position)) {
+    return;
+  }
+  state.gridPickerPos = { col: position.col, row: position.row };
+  state.gridPickerQuery = "";
+  controls.gridPiecePickerSearch.value = "";
+  controls.gridPiecePicker.classList.remove("is-hidden");
+
+  const anchor = Number.isFinite(clientX) && Number.isFinite(clientY)
+    ? { x: clientX, y: clientY }
+    : gridPosToClientPoint(position);
+  const estimatedWidth = 480;
+  const estimatedHeight = 600;
+  const left = Math.min(Math.max(16, anchor.x), window.innerWidth - estimatedWidth - 16);
+  const top = Math.min(Math.max(56, anchor.y), window.innerHeight - estimatedHeight - 16);
+  controls.gridPiecePicker.style.left = `${left}px`;
+  controls.gridPiecePicker.style.top = `${top}px`;
+
+  renderGridPiecePicker();
+  controls.gridPiecePickerSearch.focus();
+}
+
+function preferredPickerPosition() {
+  if (state.selectedPos && isWithinGrid(state.selectedPos) && !nodeByPos(state.selectedPos)) {
+    return { col: state.selectedPos.col, row: state.selectedPos.row };
+  }
+  return suggestedPlacement(state.selectedPos);
+}
+
+function openPickerFromSelection() {
+  const position = preferredPickerPosition();
+  if (!position) {
+    logLine("warn", "grid full: no empty cell available");
+    return;
+  }
+  state.selectedPos = { col: position.col, row: position.row };
+  state.selectedEdgeId = null;
+  renderAll();
+  const anchor = gridPosToClientPoint(position);
+  openGridPiecePicker(position, anchor.x, anchor.y);
 }
 
 function selectNode(pos) {
@@ -811,20 +1746,20 @@ function selectNode(pos) {
 }
 
 function isWithinGrid(pos) {
-  return pos.col >= 0 && pos.col < GRID_COLS && pos.row >= 0 && pos.row < GRID_ROWS;
+  return pos.col >= 0 && pos.col < gridCols() && pos.row >= 0 && pos.row < gridRows();
 }
 
 function firstFreePosition() {
   const occupied = new Set(sortedNodes().map((entry) => nodeKey(entry.position)));
-  for (let row = 0; row < GRID_ROWS; row += 1) {
-    for (let col = 0; col < GRID_COLS; col += 1) {
+  for (let row = 0; row < gridRows(); row += 1) {
+    for (let col = 0; col < gridCols(); col += 1) {
       const key = `${col}:${row}`;
       if (!occupied.has(key)) {
         return { col, row };
       }
     }
   }
-  return { col: 0, row: 0 };
+  return null;
 }
 
 function suggestedPlacement(basePos) {
@@ -846,17 +1781,30 @@ function suggestedPlacement(basePos) {
   return firstFreePosition();
 }
 
-async function refreshProjectAndGraph() {
+async function refreshProjectSnapshot() {
   state.project = await invokeTauri("project_snapshot");
-  state.graph = normalizeGraph(await invokeTauri("graph_snapshot"));
-  updateEdgeAnimationState();
-  state.compilePreview = await invokeTauri("graph_compile_preview");
-  state.semantic = {
-    errors: Array.isArray(state.compilePreview?.diagnostics) ? state.compilePreview.diagnostics : [],
-    eval_order: Array.isArray(state.compilePreview?.eval_order) ? state.compilePreview.eval_order : [],
-    terminal: state.compilePreview?.terminal ?? null,
-  };
+  state.initStage = await invokeTauri("project_init_snapshot");
+  if (isTrickMode() && !selectedTrick()) {
+    state.editorMode = "init";
+    state.selectedTrickId = null;
+  }
+  state.compilePreview = await invokeTauri("project_compile_preview");
   updateLastGoodCode();
+}
+
+async function refreshGraphForActiveTarget() {
+  if (isInitMode()) {
+    return;
+  }
+  const target = activeGraphTarget();
+  state.graph = normalizeGraph(await invokeTauri("graph_snapshot", { target }));
+  updateEdgeAnimationState();
+  const preview = await invokeTauri("graph_compile_preview", { target });
+  state.semantic = {
+    diagnostics: Array.isArray(preview?.diagnostics) ? preview.diagnostics : [],
+    eval_order: Array.isArray(preview?.eval_order) ? preview.eval_order : [],
+    terminals: Array.isArray(preview?.terminals) ? preview.terminals : [],
+  };
   normalizeSelectionState();
 
   if (!state.selectedPos) {
@@ -866,10 +1814,19 @@ async function refreshProjectAndGraph() {
     const first = sortedNodes()[0];
     state.selectedPos = first ? first.position : null;
   }
+
+  if (state.gridPickerPos && nodeByPos(state.gridPickerPos)) {
+    closeGridPiecePicker();
+  }
+}
+
+async function refreshProjectAndGraph() {
+  await refreshProjectSnapshot();
+  await refreshGraphForActiveTarget();
 }
 
 async function loadPieceCatalog() {
-  const defs = await invokeTauri("graph_piece_catalog");
+  const defs = await invokeTauri("graph_piece_catalog", { target: activeGraphTarget() });
   if (!Array.isArray(defs)) {
     throw new Error("graph_piece_catalog returned non-array payload");
   }
@@ -893,62 +1850,111 @@ async function applyOps(label, ops) {
     const result = await invokeTauri("graph_apply_ops", {
       ops,
       request_id: nextRequestId(label),
+      target: activeGraphTarget(),
     });
     state.graph = normalizeGraph(result?.graph);
     state.semantic = normalizeSemantic(result?.semantic);
     updateEdgeAnimationState();
-    state.compilePreview = compilePreviewFromApplyResult(result);
-    updateLastGoodCode();
     normalizeSelectionState();
-    state.nodeDragFrom = null;
-    state.edgeDragFrom = null;
-    state.project = await invokeTauri("project_snapshot");
+    clearDragState();
+    setUiIssue("");
+    await refreshProjectSnapshot();
     logLine("info", `${label}: applied`);
+    const removedEdgeCount = Array.isArray(result?.removed_edges) ? result.removed_edges.length : 0;
+    if (removedEdgeCount > 0) {
+      logLine("warn", `${label}: removed ${removedEdgeCount} non-adjacent edge(s)`);
+    }
     renderAll();
     return true;
   } catch (error) {
     const diagnostics = diagnosticsFromInvokeError(error);
     if (diagnostics.length > 0) {
-      state.nodeDragFrom = null;
-      state.edgeDragFrom = null;
+      clearDragState();
       state.semantic = {
-        errors: diagnostics,
-        eval_order: Array.isArray(state.semantic?.eval_order) ? state.semantic.eval_order : [],
-        terminal: state.semantic?.terminal ?? null,
-      };
-      state.compilePreview = {
-        can_compile: false,
-        code: null,
-        expr: null,
         diagnostics,
-        eval_order: state.semantic.eval_order,
-        terminal: state.semantic.terminal,
+        eval_order: Array.isArray(state.semantic?.eval_order) ? state.semantic.eval_order : [],
+        terminals: Array.isArray(state.semantic?.terminals) ? state.semantic.terminals : [],
       };
+      await refreshProjectSnapshot();
       logLine("error", `${label}: ${diagnostics.map(diagToText).join("; ")}`);
+      setUiIssue(`${label}/${String(diagnostics[0]?.kind?.kind ?? "diagnostic")}`);
       renderAll();
       return false;
     }
-    state.nodeDragFrom = null;
-    state.edgeDragFrom = null;
+    clearDragState();
     logLine("error", `${label}: ${error instanceof Error ? error.message : String(error)}`);
+    setUiIssue(`${label}/invoke_error`);
     return false;
   } finally {
     setBusy(false);
   }
 }
 
-async function placePieceAt(pieceId, position) {
+async function applyInitOps(label, ops) {
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return true;
+  }
+  setBusy(true);
+  try {
+    state.initStage = await invokeTauri("project_init_apply", { ops });
+    await refreshProjectSnapshot();
+    if (isRuntimeMode()) {
+      await loadPieceCatalog();
+    }
+    if (isTrickMode()) {
+      const trick = selectedTrick();
+      if (!trick) {
+        state.editorMode = "init";
+        state.selectedTrickId = null;
+      } else {
+        await refreshGraphForActiveTarget();
+      }
+    }
+    setUiIssue("");
+    logLine("info", `${label}: applied`);
+    renderAll();
+    return true;
+  } catch (error) {
+    logLine("error", `${label}: ${error instanceof Error ? error.message : String(error)}`);
+    setUiIssue(`${label}/invoke_error`);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function nodePlacePrecondition(pieceId, position) {
   const def = pieceDef(pieceId);
   if (!def) {
-    return;
+    return {
+      ok: false,
+      reason: "unknown_piece",
+      detail: `unknown piece '${pieceId}'`,
+    };
   }
   if (!isWithinGrid(position)) {
-    logLine("warn", `node_place: out of bounds (${position.col}, ${position.row})`);
-    return;
+    return {
+      ok: false,
+      reason: "out_of_bounds",
+      detail: `out of bounds (${position.col}, ${position.row})`,
+    };
   }
   if (nodeByPos(position)) {
-    logLine("warn", `node_place: cell occupied (${position.col}, ${position.row})`);
-    return;
+    return {
+      ok: false,
+      reason: "occupied",
+      detail: `cell occupied (${position.col}, ${position.row})`,
+    };
+  }
+  return { ok: true, reason: null, detail: null };
+}
+
+async function placePieceAt(pieceId, position) {
+  const precondition = nodePlacePrecondition(pieceId, position);
+  if (!precondition.ok) {
+    logLine("warn", `node_place[${precondition.reason}]: ${precondition.detail}`);
+    setUiIssue(`node_place/${precondition.reason}`);
+    return false;
   }
   const ok = await applyOps("node_place", [
     {
@@ -960,191 +1966,9 @@ async function placePieceAt(pieceId, position) {
   if (ok) {
     state.selectedPos = position;
     state.selectedEdgeId = null;
-    setActivePanel("tile");
     renderAll();
   }
-}
-
-async function placePiece(pieceId) {
-  const position = suggestedPlacement(state.selectedPos);
-  return placePieceAt(pieceId, position);
-}
-
-function renderPalette() {
-  if (!controls.widgetPaletteItems) {
-    return;
-  }
-  if (controls.widgetPaletteTabs) {
-    controls.widgetPaletteTabs.replaceChildren();
-  }
-  controls.widgetPaletteItems.replaceChildren();
-
-  const query = String(controls.widgetPaletteSearch?.value ?? "").trim().toLowerCase();
-
-  const byCategoryAll = new Map();
-  for (const def of state.catalog) {
-    const category = normalizedCategory(def.category);
-    if (!byCategoryAll.has(category)) {
-      byCategoryAll.set(category, []);
-    }
-    byCategoryAll.get(category).push(def);
-  }
-
-  const orderedCategories = [
-    ...PALETTE_CATEGORY_ORDER.filter((category) => byCategoryAll.has(category)),
-    ...[...byCategoryAll.keys()]
-      .filter((category) => !PALETTE_CATEGORY_ORDER.includes(category))
-      .sort(),
-  ];
-
-  if (
-    state.paletteCategory !== "all"
-    && !orderedCategories.includes(state.paletteCategory)
-  ) {
-    state.paletteCategory = "all";
-  }
-
-  const addTab = (category, count) => {
-    if (!controls.widgetPaletteTabs) {
-      return;
-    }
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "widget-palette-tab";
-    if (state.paletteCategory === category) {
-      button.classList.add("is-active");
-    }
-    button.textContent = `${categoryLabel(category)} (${count})`;
-    button.addEventListener("click", () => {
-      if (state.paletteCategory === category) {
-        return;
-      }
-      state.paletteCategory = category;
-      renderPalette();
-    });
-    controls.widgetPaletteTabs.append(button);
-  };
-
-  addTab("all", state.catalog.length);
-  for (const category of orderedCategories) {
-    addTab(category, (byCategoryAll.get(category) ?? []).length);
-  }
-
-  const filtered = state.catalog.filter((item) => {
-    const matchesCategory =
-      state.paletteCategory === "all"
-      || normalizedCategory(item.category) === state.paletteCategory;
-    if (!matchesCategory) {
-      return false;
-    }
-    if (!query) {
-      return true;
-    }
-    const description = String(item.description ?? "");
-    return (
-      String(item.id).toLowerCase().includes(query)
-      || String(item.label).toLowerCase().includes(query)
-      || normalizedCategory(item.category).includes(query)
-      || description.toLowerCase().includes(query)
-    );
-  });
-
-  if (filtered.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "widget-palette-empty";
-    empty.textContent = query
-      ? "No pieces match the search and category filter."
-      : "No pieces available in this category.";
-    controls.widgetPaletteItems.append(empty);
-    return;
-  }
-
-  const byCategory = new Map();
-  for (const def of filtered) {
-    const category = normalizedCategory(def.category);
-    if (!byCategory.has(category)) {
-      byCategory.set(category, []);
-    }
-    byCategory.get(category).push(def);
-  }
-  const orderedFilteredCategories = [
-    ...PALETTE_CATEGORY_ORDER.filter((category) => byCategory.has(category)),
-    ...[...byCategory.keys()]
-      .filter((category) => !PALETTE_CATEGORY_ORDER.includes(category))
-      .sort(),
-  ];
-
-  for (const category of orderedFilteredCategories) {
-    const group = document.createElement("section");
-    group.className = "widget-palette-group";
-
-    const heading = document.createElement("h3");
-    heading.className = "widget-palette-group-title";
-    heading.textContent = categoryLabel(category);
-    if (state.paletteCategory === "all") {
-      group.append(heading);
-    }
-
-    const list = document.createElement("div");
-    list.className = "widget-palette-group-items";
-
-    const defs = byCategory.get(category) ?? [];
-    defs.sort((left, right) => String(left.label).localeCompare(String(right.label)));
-    for (const def of defs) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "widget-palette-item";
-      if (state.armedPieceId === def.id) {
-        button.classList.add("is-active");
-      }
-      button.draggable = true;
-
-      const symbol = document.createElement("span");
-      symbol.className = "symbol";
-      symbol.textContent = String(def.label ?? def.id);
-
-      const kind = document.createElement("span");
-      kind.className = "kind";
-      kind.textContent = `${def.id} • ${(def.params ?? []).length} params`;
-
-      const glyph = document.createElement("span");
-      glyph.className = "palette-tile-glyph";
-      glyph.setAttribute("aria-hidden", "true");
-      glyph.textContent = String(def.label ?? def.id).slice(0, 1).toUpperCase();
-
-      button.append(glyph, symbol, kind);
-      if (def.description) {
-        button.title = String(def.description);
-      }
-
-      button.addEventListener("click", () => {
-        state.armedPieceId = state.armedPieceId === def.id ? null : def.id;
-        if (state.armedPieceId) {
-          logLine("info", `armed piece: ${def.id}`);
-        } else {
-          logLine("info", "armed piece cleared");
-        }
-        renderPalette();
-        renderCanvas();
-      });
-      button.addEventListener("dblclick", () => {
-        void placePiece(def.id);
-        setActivePanel("tile");
-      });
-      button.addEventListener("dragstart", (event) => {
-        const payload = JSON.stringify({ kind: "piece", piece_id: def.id });
-        event.dataTransfer?.setData(DRAG_MIME, payload);
-        event.dataTransfer?.setData("text/plain", payload);
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "copy";
-        }
-      });
-      list.append(button);
-    }
-
-    group.append(list);
-    controls.widgetPaletteItems.append(group);
-  }
+  return ok;
 }
 
 function renderCanvas() {
@@ -1157,6 +1981,8 @@ function renderCanvas() {
   if (controls.canvasGrid) {
     controls.canvasGrid.style.setProperty("--grid-cell-w", `${CELL_W}px`);
     controls.canvasGrid.style.setProperty("--grid-cell-h", `${CELL_H}px`);
+    controls.canvasGrid.style.setProperty("--grid-origin-x", `${GRID_ORIGIN_X}px`);
+    controls.canvasGrid.style.setProperty("--grid-origin-y", `${GRID_ORIGIN_Y}px`);
   }
 
   const nodes = sortedNodes();
@@ -1169,8 +1995,8 @@ function renderCanvas() {
   let maxX = 0;
   let maxY = 0;
 
-  for (let row = 0; row < GRID_ROWS; row += 1) {
-    for (let col = 0; col < GRID_COLS; col += 1) {
+  for (let row = 0; row < gridRows(); row += 1) {
+    for (let col = 0; col < gridCols(); col += 1) {
       const position = { col, row };
       const pt = gridToPx(position);
       const key = nodeKey(position);
@@ -1189,109 +2015,31 @@ function renderCanvas() {
       if (posEquals(state.selectedPos, position)) {
         cell.classList.add("is-selected");
       }
-      if (!isOccupied && state.armedPieceId) {
-        cell.classList.add("is-armed-target");
-      }
-      if (state.nodeDragFrom) {
-        const moveStatus = nodeMoveDropStatus(state.nodeDragFrom, position);
-        if (moveStatus === "valid") {
-          cell.classList.add("is-move-valid");
-        } else if (moveStatus === "invalid" && !posEquals(state.nodeDragFrom, position)) {
-          cell.classList.add("is-move-invalid");
-        }
-      }
-      if (state.edgeDragFrom && isOccupied) {
-        const dropStatus = edgeDropStatus(state.edgeDragFrom, position);
-        if (dropStatus === "valid") {
-          cell.classList.add("is-drop-valid");
-        } else if (dropStatus === "invalid") {
-          cell.classList.add("is-drop-invalid");
-        }
-      }
-      cell.style.left = `${pt.x - 10}px`;
-      cell.style.top = `${pt.y - 10}px`;
-      cell.style.width = `${CELL_W - 20}px`;
-      cell.style.height = `${CELL_H - 20}px`;
-      cell.title = `(${col}, ${row})`;
-      const cellLabel = document.createElement("span");
-      cellLabel.className = "grid-cell-label";
-      cellLabel.textContent = `${col},${row}`;
-      cell.append(cellLabel);
+      cell.style.left = `${pt.x}px`;
+      cell.style.top = `${pt.y}px`;
+      cell.style.width = `${CELL_W}px`;
+      cell.style.height = `${CELL_H}px`;
+      cell.dataset.gridPos = nodeKey(position);
+      cell.title = `Cell ${col},${row}`;
       cell.addEventListener("click", () => {
+        closeGridPiecePicker();
         const existing = nodeByPos(position);
         if (existing) {
           selectNode(position);
-          setActivePanel("tile");
-          return;
-        }
-        if (state.armedPieceId) {
-          void placePieceAt(state.armedPieceId, position);
+          toggleTileInspectorModal(true);
           return;
         }
         state.selectedPos = position;
         state.selectedEdgeId = null;
         renderAll();
       });
-      cell.addEventListener("dragover", (event) => {
-        const payload = parseDragPayload(event);
-        if (!payload) {
+      cell.addEventListener("contextmenu", (event) => {
+        if (isOccupied) {
           return;
         }
         event.preventDefault();
-        if (event.dataTransfer) {
-          if (payload.kind === "piece") {
-            event.dataTransfer.dropEffect = "copy";
-          } else if (payload.kind === "node_move_from") {
-            event.dataTransfer.dropEffect = isOccupied ? "none" : "move";
-          } else {
-            event.dataTransfer.dropEffect = "link";
-          }
-        }
-      });
-      cell.addEventListener("drop", (event) => {
-        event.preventDefault();
-        const payload = parseDragPayload(event);
-        if (!payload) {
-          return;
-        }
-        if (payload.kind === "piece" && typeof payload.piece_id === "string" && !isOccupied) {
-          void placePieceAt(payload.piece_id, position);
-          return;
-        }
-        if (
-          payload.kind === "node_move_from"
-          && payload.from
-          && Number.isFinite(payload.from.col)
-          && Number.isFinite(payload.from.row)
-          && !isOccupied
-        ) {
-          const from = { col: Number(payload.from.col), row: Number(payload.from.row) };
-          state.nodeDragFrom = null;
-          if (!posEquals(from, position)) {
-            void applyOps("node_move_drag", [
-              {
-                op: "node_move",
-                from,
-                to: position,
-              },
-            ]);
-          }
-          return;
-        }
-        if (
-          payload.kind === "edge_from"
-          && payload.from
-          && Number.isFinite(payload.from.col)
-          && Number.isFinite(payload.from.row)
-          && isOccupied
-        ) {
-          state.edgeDragFrom = null;
-          void connectNodes(
-            { col: Number(payload.from.col), row: Number(payload.from.row) },
-            position,
-            "edge_connect_drag",
-          );
-        }
+        event.stopPropagation();
+        openGridPiecePicker(position, event.clientX, event.clientY);
       });
       controls.canvasGrid?.append(cell);
     }
@@ -1300,13 +2048,13 @@ function renderCanvas() {
   for (const entry of nodes) {
     const def = pieceDef(entry.node.piece_id);
     const pt = gridToPx(entry.position);
-    maxX = Math.max(maxX, pt.x + NODE_W + 40);
-    maxY = Math.max(maxY, pt.y + NODE_H + 40);
+    maxX = Math.max(maxX, pt.x + NODE_W + GRID_ORIGIN_X);
+    maxY = Math.max(maxY, pt.y + NODE_H + GRID_ORIGIN_Y);
 
-    const node = document.createElement("button");
-    node.type = "button";
+    const node = document.createElement("div");
     node.className = "voice-node";
-    node.draggable = true;
+    node.setAttribute("role", "button");
+    node.tabIndex = 0;
     if (def?.category) {
       node.classList.add(`piece-${normalizedCategory(def.category)}`);
     }
@@ -1320,116 +2068,96 @@ function renderCanvas() {
     node.style.left = `${pt.x}px`;
     node.style.top = `${pt.y}px`;
     node.style.width = `${NODE_W}px`;
+    node.style.height = `${NODE_H}px`;
     node.style.minHeight = `${NODE_H}px`;
+    node.dataset.gridPos = nodeKey(entry.position);
+    node.title = [
+      `${def?.label ?? entry.node.piece_id} • ${entry.node.piece_id}`,
+      def?.description ?? "No description available.",
+      `Cell ${entry.position.col},${entry.position.row}`,
+    ].join("\n");
 
-    const tileHeader = document.createElement("div");
-    tileHeader.className = "grid-tile-head";
+    const spriteId = typeof def?.sprite_id === "string" && def.sprite_id.length > 0
+      ? def.sprite_id
+      : typeof def?.sprite === "string" && def.sprite.length > 0
+      ? def.sprite
+      : null;
+    if (spriteId) {
+      node.dataset.sprite = spriteId;
+    }
 
-    const tileTitle = document.createElement("strong");
-    tileTitle.className = "grid-tile-title";
-    tileTitle.textContent = String(def?.label ?? entry.node.piece_id);
+    const tileLabel = document.createElement("strong");
+    tileLabel.className = "grid-tile-label";
+    tileLabel.textContent = compactTileLabel(def, entry);
 
-    const tileCategory = document.createElement("span");
-    tileCategory.className = "grid-tile-category";
-    tileCategory.textContent = categoryLabel(normalizedCategory(def?.category));
-
-    tileHeader.append(tileTitle, tileCategory);
-
-    const tileId = document.createElement("div");
-    tileId.className = "grid-tile-id";
-    tileId.textContent = entry.node.piece_id;
-
-    const tilePos = document.createElement("div");
-    tilePos.className = "grid-tile-pos";
-    tilePos.textContent = `(${entry.position.col}, ${entry.position.row})`;
-
-    const inlineCount = Object.keys(entry.node.inline_params ?? {}).length;
-    const edgeCount = edgesForNode(entry.position).length;
-    const tileMeta = document.createElement("div");
-    tileMeta.className = "grid-tile-meta";
-    tileMeta.textContent = `${inlineCount} inline • ${edgeCount} edges`;
-
-    node.append(tileHeader, tileId, tilePos, tileMeta);
+    node.append(tileLabel);
+    node.dataset.pieceId = entry.node.piece_id;
+    const sourcePos = { col: entry.position.col, row: entry.position.row };
+    const outSide = nodeOutputSide(entry, def);
 
     node.addEventListener("click", () => {
+      closeGridPiecePicker();
       selectNode(entry.position);
-      setActivePanel("tile");
+      toggleTileInspectorModal(true);
     });
-    node.addEventListener("dragstart", (event) => {
-      state.nodeDragFrom = { col: entry.position.col, row: entry.position.row };
-      state.edgeDragFrom = null;
-      renderCanvas();
-      const payload = JSON.stringify({ kind: "node_move_from", from: entry.position });
-      event.dataTransfer?.setData(DRAG_MIME, payload);
-      event.dataTransfer?.setData("text/plain", payload);
-      if (event.dataTransfer) {
-        event.dataTransfer.effectAllowed = "move";
-      }
-    });
-    node.addEventListener("dragend", () => {
-      state.nodeDragFrom = null;
-      renderCanvas();
-    });
-    node.addEventListener("dragover", (event) => {
-      const payload = parseDragPayload(event);
-      if (!payload || (payload.kind !== "edge_from" && payload.kind !== "node_move_from")) {
+    node.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
         return;
       }
       event.preventDefault();
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = payload.kind === "node_move_from" ? "none" : "link";
-      }
+      closeGridPiecePicker();
+      selectNode(entry.position);
+      toggleTileInspectorModal(true);
     });
-    node.addEventListener("drop", (event) => {
-      event.preventDefault();
-      const payload = parseDragPayload(event);
-      if (
-        !payload
-        || payload.kind !== "edge_from"
-        || !payload.from
-        || !Number.isFinite(payload.from.col)
-        || !Number.isFinite(payload.from.row)
-      ) {
-        return;
+    node.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      const dragFromOutput = !!def?.output_type
+        && !!outSide
+        && (
+          (target instanceof Element && !!target.closest(".node-output-handle"))
+          || pointerHitsOutputHandle(node, outSide, event.clientX, event.clientY)
+        );
+      if (dragFromOutput) {
+        event.preventDefault();
       }
-      state.edgeDragFrom = null;
-      void connectNodes(
-        { col: Number(payload.from.col), row: Number(payload.from.row) },
-        entry.position,
-        "edge_connect_drag",
-      );
+      beginPossibleDrag(event, dragFromOutput ? "edge_from" : "node_move_from", {
+        fromPos: sourcePos,
+      });
     });
 
     appendPortIndicators(node, def, entry);
-    const outSide = nodeOutputSide(entry, def);
     if (def?.output_type && outSide) {
-      const outHandle = document.createElement("button");
-      outHandle.type = "button";
+      const outHandle = document.createElement("span");
       outHandle.className = `node-output-handle side-${outSide}`;
+      outHandle.setAttribute("role", "button");
+      outHandle.tabIndex = 0;
       outHandle.title = "Drag to connect output";
-      outHandle.draggable = true;
       outHandle.addEventListener("click", (event) => {
         event.stopPropagation();
+        closeGridPiecePicker();
         state.selectedPos = entry.position;
         state.selectedEdgeId = null;
-        setActivePanel("tile");
         renderAll();
+        toggleTileInspectorModal(true);
       });
-      outHandle.addEventListener("dragstart", (event) => {
-        event.stopPropagation();
-        state.nodeDragFrom = null;
-        state.edgeDragFrom = { col: entry.position.col, row: entry.position.row };
-        renderCanvas();
-        const payload = JSON.stringify({ kind: "edge_from", from: entry.position });
-        event.dataTransfer?.setData(DRAG_MIME, payload);
-        event.dataTransfer?.setData("text/plain", payload);
-        if (event.dataTransfer) {
-          event.dataTransfer.effectAllowed = "link";
+      outHandle.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
         }
+        event.preventDefault();
+        event.stopPropagation();
+        closeGridPiecePicker();
+        state.selectedPos = entry.position;
+        state.selectedEdgeId = null;
+        renderAll();
+        toggleTileInspectorModal(true);
       });
-      outHandle.addEventListener("dragend", () => {
-        state.edgeDragFrom = null;
-        renderCanvas();
+      outHandle.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        beginPossibleDrag(event, "edge_from", {
+          fromPos: sourcePos,
+        });
       });
       node.append(outHandle);
     }
@@ -1442,11 +2170,26 @@ function renderCanvas() {
     });
   }
 
-  const gridPt = gridToPx({ col: GRID_COLS - 1, row: GRID_ROWS - 1 });
-  const fixedWidth = gridPt.x + NODE_W + 40;
-  const fixedHeight = gridPt.y + NODE_H + 40;
-  controls.canvas.style.minWidth = `${Math.max(800, fixedWidth, maxX)}px`;
-  controls.canvas.style.minHeight = `${Math.max(420, fixedHeight, maxY)}px`;
+  const gridPt = gridToPx({ col: gridCols() - 1, row: gridRows() - 1 });
+  const fixedWidth = gridPt.x + NODE_W + GRID_ORIGIN_X;
+  const fixedHeight = gridPt.y + NODE_H + GRID_ORIGIN_Y;
+  const canvasWidth = Math.max(fixedWidth, maxX);
+  const canvasHeight = Math.max(fixedHeight, maxY);
+  if (controls.canvasGrid) {
+    controls.canvasGrid.style.width = `${canvasWidth}px`;
+    controls.canvasGrid.style.height = `${canvasHeight}px`;
+  }
+  if (controls.canvasLayer) {
+    controls.canvasLayer.style.width = `${canvasWidth}px`;
+    controls.canvasLayer.style.height = `${canvasHeight}px`;
+  }
+  if (controls.edgeLayer) {
+    controls.edgeLayer.style.width = `${canvasWidth}px`;
+    controls.edgeLayer.style.height = `${canvasHeight}px`;
+    controls.edgeLayer.setAttribute("width", String(canvasWidth));
+    controls.edgeLayer.setAttribute("height", String(canvasHeight));
+    controls.edgeLayer.setAttribute("viewBox", `0 0 ${canvasWidth} ${canvasHeight}`);
+  }
 
   const edges = Array.isArray(state.graph?.edges) ? state.graph.edges : [];
   const invalidEdges = invalidEdgeKeys();
@@ -1473,21 +2216,22 @@ function renderCanvas() {
     line.setAttribute("y1", String(from.y));
     line.setAttribute("x2", String(to.x));
     line.setAttribute("y2", String(to.y));
-    line.setAttribute("pointer-events", "stroke");
     line.addEventListener("click", (event) => {
       event.stopPropagation();
       state.selectedEdgeId = key;
       state.selectedPos = null;
       renderAll();
+      toggleTileInspectorModal(true);
     });
     controls.edgeLayer.append(line);
 
     if (invalidEdges.has(key)) {
-      const marker = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      const marker = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       marker.classList.add("graph-edge-error");
-      marker.setAttribute("x", String((from.x + to.x) / 2));
-      marker.setAttribute("y", String((from.y + to.y) / 2 - 4));
-      marker.textContent = "x";
+      marker.setAttribute("cx", String((from.x + to.x) / 2));
+      marker.setAttribute("cy", String((from.y + to.y) / 2));
+      marker.setAttribute("r", "3");
+      marker.setAttribute("pointer-events", "none");
       controls.edgeLayer.append(marker);
     }
   }
@@ -1495,7 +2239,8 @@ function renderCanvas() {
 
 function buildParamEditor(param, nodeEntry) {
   const schema = param?.schema ?? {};
-  const schemaKind = String(schema.kind ?? "unknown");
+  const schemaTypeLabel = schemaKindLabel(schema);
+  const valueKind = schemaValueKind(schema);
   const currentSide = nodeInputSide(nodeEntry, param);
   const defaultSide = normalizeSide(param.side);
   const wrap = document.createElement("section");
@@ -1543,7 +2288,7 @@ function buildParamEditor(param, nodeEntry) {
 
   const paramId = document.createElement("p");
   paramId.className = "tile-param-id";
-  paramId.textContent = `${param.id} • ${displayLabel(schemaKind)} • ${param.required ? "required" : "optional"}`;
+  paramId.textContent = `${param.id} • ${schemaTypeLabel} • ${param.required ? "required" : "optional"}`;
   wrap.append(paramId);
 
   const incoming = incomingEdgeForParam(nodeEntry.position, param.id);
@@ -1575,11 +2320,13 @@ function buildParamEditor(param, nodeEntry) {
         connectionText.textContent = `Neighbor (${expected.col}, ${expected.row}) cannot output.`;
       } else if (!sidesFace(fromSide, currentSide)) {
         connectionText.textContent = `Source side ${displayLabel(fromSide)} must face ${displayLabel(currentSide)}.`;
-      } else if (!schemaAcceptsType(schema, fromType)) {
-        connectionText.textContent =
-          `Type mismatch: got ${displayLabel(fromType)}, need ${displayLabel(schemaKind)}.`;
       } else {
-        connectionText.textContent = `Ready to connect from (${expected.col}, ${expected.row}).`;
+        if (!schemaAcceptsType(schema, fromType)) {
+          connectionText.textContent =
+            `Type hint mismatch (backend will decide): got ${displayLabel(fromType)}, need ${schemaTypeLabel}.`;
+        } else {
+          connectionText.textContent = `Ready to connect from (${expected.col}, ${expected.row}).`;
+        }
         const connect = document.createElement("button");
         connect.type = "button";
         connect.className = "tile-action-btn";
@@ -1604,25 +2351,52 @@ function buildParamEditor(param, nodeEntry) {
     const inlineRow = document.createElement("div");
     inlineRow.className = "tile-inline-row";
 
-    const input = document.createElement("input");
-    input.className = "tile-inline-input";
-    input.type = schemaKind === "number" ? "number" : "text";
-    input.placeholder = schemaKind === "number" ? "0" : "value";
-    if (schemaKind === "number") {
-      input.step = "0.1";
-      if (Number.isFinite(schema.min)) {
-        input.min = String(schema.min);
-      }
-      if (Number.isFinite(schema.max)) {
-        input.max = String(schema.max);
-      }
-    }
-
     const inlineMap = nodeEntry.node.inline_params ?? {};
-    if (Object.prototype.hasOwnProperty.call(inlineMap, param.id)) {
-      input.value = String(inlineMap[param.id]);
-    } else if (Object.prototype.hasOwnProperty.call(schema, "default")) {
-      input.value = String(schema.default);
+    const currentInline = Object.prototype.hasOwnProperty.call(inlineMap, param.id)
+      ? inlineMap[param.id]
+      : Object.prototype.hasOwnProperty.call(schema, "default")
+      ? schema.default
+      : null;
+
+    let input;
+    if (schema.kind === "enum") {
+      input = document.createElement("select");
+      input.className = "tile-side-select";
+      for (const optionValue of Array.isArray(schema.options) ? schema.options : []) {
+        const option = document.createElement("option");
+        option.value = String(optionValue);
+        option.textContent = String(optionValue);
+        input.append(option);
+      }
+      input.value = String(currentInline ?? schema.default ?? "");
+    } else if (valueKind === "bool") {
+      input = document.createElement("input");
+      input.className = "tile-inline-input";
+      input.type = "checkbox";
+      input.checked = Boolean(currentInline);
+    } else if (valueKind === "json") {
+      input = document.createElement("textarea");
+      input.className = "tile-inline-input init-textarea";
+      input.spellcheck = false;
+      input.placeholder = '{"value":true}';
+      input.value = currentInline == null ? "" : JSON.stringify(currentInline, null, 2);
+    } else {
+      input = document.createElement("input");
+      input.className = "tile-inline-input";
+      input.type = valueKind === "number" ? "number" : "text";
+      input.placeholder = valueKind === "number" ? "0" : "value";
+      if (valueKind === "number") {
+        input.step = "0.1";
+        if (Number.isFinite(schema.min)) {
+          input.min = String(schema.min);
+        }
+        if (Number.isFinite(schema.max)) {
+          input.max = String(schema.max);
+        }
+      }
+      if (currentInline != null) {
+        input.value = String(currentInline);
+      }
     }
 
     const buttons = document.createElement("div");
@@ -1634,7 +2408,18 @@ function buildParamEditor(param, nodeEntry) {
     save.textContent = "Set";
     save.addEventListener("click", () => {
       let value;
-      if (schemaKind === "number") {
+      if (schema.kind === "enum") {
+        value = String(input.value);
+      } else if (valueKind === "bool") {
+        value = Boolean(input.checked);
+      } else if (valueKind === "json") {
+        try {
+          value = input.value.trim() ? JSON.parse(input.value) : null;
+        } catch (error) {
+          logLine("warn", `inline value for '${param.id}' must be valid JSON`);
+          return;
+        }
+      } else if (valueKind === "number") {
         value = Number(input.value);
         if (!Number.isFinite(value)) {
           logLine("warn", `inline value for '${param.id}' must be a number`);
@@ -1654,7 +2439,7 @@ function buildParamEditor(param, nodeEntry) {
           op: "param_set_inline",
           position: nodeEntry.position,
           param_id: param.id,
-          value,
+          value: value ?? null,
         },
       ]);
     });
@@ -1731,6 +2516,10 @@ function renderInspector() {
   if (controls.nodeCodeEditorHost) {
     controls.nodeCodeEditorHost.classList.add("editor-host-active");
     controls.nodeCodeEditorHost.replaceChildren();
+    const controlsStack = document.createElement("section");
+    controlsStack.className = "tile-controls-stack";
+    const dataScroll = document.createElement("section");
+    dataScroll.className = "tile-data-scroll";
     if (selectedEdge) {
       const info = document.createElement("section");
       info.className = "tile-info-card";
@@ -1750,17 +2539,18 @@ function renderInspector() {
         void applyOps("edge_disconnect", [{ op: "edge_disconnect", edge_id: selectedEdge.id }]);
       });
       info.append(title, details, disconnect);
-      controls.nodeCodeEditorHost.append(info);
+      controlsStack.append(info);
+      const edgeHelp = document.createElement("p");
+      edgeHelp.className = "tile-empty-message";
+      edgeHelp.textContent = "Edge controls are shown above. Select a tile to see tile data and usage details.";
+      dataScroll.append(edgeHelp);
     } else if (!entry || !def) {
       const placeholder = document.createElement("p");
       placeholder.className = "tile-empty-message";
       placeholder.textContent = "Select a tile to edit value and side directions.";
-      controls.nodeCodeEditorHost.append(placeholder);
+      dataScroll.append(placeholder);
     } else {
-      const summary = document.createElement("p");
-      summary.className = "tile-empty-message";
-      summary.textContent = `${entry.node.piece_id} @ (${entry.position.col}, ${entry.position.row})`;
-      controls.nodeCodeEditorHost.append(summary);
+      renderTileData(def, entry, dataScroll);
 
       if (def.output_type) {
         const outputCard = document.createElement("section");
@@ -1804,37 +2594,42 @@ function renderInspector() {
         outputHint.className = "tile-param-hint";
         outputHint.textContent = `Drag from ${displayLabel(currentOutput)} side to connect output.`;
         outputCard.append(outputHeader, outputHint);
-        controls.nodeCodeEditorHost.append(outputCard);
+        controlsStack.append(outputCard);
       }
 
       const paramTitle = document.createElement("h3");
       paramTitle.className = "tile-section-title";
       paramTitle.textContent = "Parameters";
-      controls.nodeCodeEditorHost.append(paramTitle);
+      controlsStack.append(paramTitle);
 
       for (const param of def.params ?? []) {
-        controls.nodeCodeEditorHost.append(buildParamEditor(param, entry));
+        controlsStack.append(buildParamEditor(param, entry));
       }
       if ((def.params ?? []).length === 0) {
         const noParams = document.createElement("p");
         noParams.className = "tile-empty-message";
         noParams.textContent = "This tile has no parameters.";
-        controls.nodeCodeEditorHost.append(noParams);
+        controlsStack.append(noParams);
       }
     }
-  }
-
-  if (controls.nodeNameInput) {
-    controls.nodeNameInput.value = entry
-      ? `${entry.position.col},${entry.position.row}`
-      : "";
-  }
-  if (controls.nodeNameApply) {
-    controls.nodeNameApply.disabled = !entry;
+    if (controlsStack.childElementCount > 0) {
+      controls.nodeCodeEditorHost.append(controlsStack);
+    }
+    if (dataScroll.childElementCount > 0) {
+      controls.nodeCodeEditorHost.append(dataScroll);
+    }
   }
   if (controls.deleteNodeButton) {
     controls.deleteNodeButton.disabled = !entry && !selectedEdge;
     controls.deleteNodeButton.textContent = selectedEdge ? "Delete Edge" : "Delete Node";
+  }
+
+  if (controls.modalInspectorTitle) {
+    controls.modalInspectorTitle.textContent = selectedEdge
+      ? "Edge"
+      : entry && def
+      ? compactTileLabel(def, entry)
+      : "Tile";
   }
 
   if (controls.projectTitle) {
@@ -1851,32 +2646,46 @@ function renderInspector() {
 function renderProjectMeta() {
   const nodeCount = sortedNodes().length;
   const edgeCount = Array.isArray(state.graph?.edges) ? state.graph.edges.length : 0;
+  const projectName = compactProjectName(state.project?.name, state.project?.dirty);
+  const trick = selectedTrick();
+  const sampleLoads = Array.isArray(state.initStage?.sample_loads) ? state.initStage.sample_loads : [];
+  const readySamples = runtimeInitSampleStatus().filter((entry) => entry.status === "ready").length;
+  const defaultSamples = runtimeSampleReadiness();
 
   if (controls.projectMeta) {
-    controls.projectMeta.textContent = `Nodes ${nodeCount} | Edges ${edgeCount}`;
+    controls.projectMeta.textContent = [
+      `Nodes ${nodeCount}`,
+      `Edges ${edgeCount}`,
+      `Samples ${readySamples}/${sampleLoads.length}`,
+      `Default ${defaultSamples.loaded}/${defaultSamples.attempted}`,
+      trick ? `Trick ${trick.name}` : currentModeLabel(),
+    ].join(" | ");
   }
   if (controls.projectChip) {
-    const dirty = state.project?.dirty ? "*" : "";
-    controls.projectChip.textContent = `Project: ${state.project?.name ?? "None"}${dirty}`;
+    controls.projectChip.textContent = projectName;
   }
   if (controls.modeChip) {
-    controls.modeChip.textContent = "Mode: GRAPH (Canonical)";
+    controls.modeChip.textContent = currentModeLabel();
+  }
+  if (controls.statusHost) {
+    controls.statusHost.textContent = `H:${runtimeStatusCode()}`;
   }
 
   if (controls.statusPlayback) {
-    controls.statusPlayback.textContent = `PLAYBACK: ${state.playback.toUpperCase()} | CPM ${Number(
-      controls.cpmInput?.value ?? 120
-    ).toFixed(0)}`;
+    const mode = state.playback === "playing" ? "PLY" : "STP";
+    controls.statusPlayback.textContent = `${mode} ${Number(controls.cpmInput?.value ?? 120).toFixed(0)}`;
   }
   if (controls.statusSelection) {
-    if (state.selectedEdgeId) {
-      controls.statusSelection.textContent = `SELECTED: EDGE ${state.selectedEdgeId}`;
-    } else {
-      controls.statusSelection.textContent = `SELECTED: ${state.selectedPos ? nodeKey(state.selectedPos) : "NONE"}`;
-    }
+    controls.statusSelection.textContent = state.selectedEdgeId
+      ? "S:E"
+      : state.selectedPos
+      ? `S:${state.selectedPos.col},${state.selectedPos.row}`
+      : "S:-";
+    controls.statusSelection.title = state.uiLastIssue ? state.uiLastIssue : "";
   }
   if (controls.statusProject) {
-    controls.statusProject.textContent = `PROJECT: ${state.project?.name ?? "NONE"}`;
+    controls.statusProject.textContent = `${projectName} N:${nodeCount} E:${edgeCount} S:${readySamples}/${sampleLoads.length} D:${defaultSamples.loaded}/${defaultSamples.attempted}`;
+    controls.statusProject.title = String(state.project?.name ?? "Untitled");
   }
 }
 
@@ -1886,7 +2695,7 @@ function renderCompileView() {
   }
   controls.textScriptInput.readOnly = true;
 
-  if (state.compilePreview?.can_compile && state.compilePreview.code) {
+  if (previewCanRender(state.compilePreview) && state.compilePreview.code) {
     controls.textScriptInput.classList.remove("is-stale");
     if (controls.compileBanner) {
       controls.compileBanner.classList.add("is-hidden");
@@ -1946,36 +2755,255 @@ function renderCompileView() {
   }
 }
 
-async function refreshEverything() {
+function currentModeLabel() {
+  if (isTrickMode()) {
+    const trick = selectedTrick();
+    return trick ? `TRK ${trick.name}` : "TRK";
+  }
+  return isInitMode() ? "INIT" : "RUN";
+}
+
+function sampleStatusById() {
+  return new Map(runtimeInitSampleStatus().map((entry) => [entry.id, entry]));
+}
+
+function renderInitWorkspace() {
+  if (!controls.initWorkspace || !controls.gridWindow) {
+    return;
+  }
+
+  const showInit = isInitMode();
+  controls.initWorkspace.classList.toggle("is-hidden", !showInit);
+  controls.gridWindow.classList.toggle("is-hidden", showInit);
+  controls.addNodeButton?.classList.toggle("is-hidden", showInit);
+  controls.workspaceBackButton?.classList.toggle("is-hidden", !isTrickMode());
+  controls.workspaceRuntimeButton?.classList.toggle("is-active", isRuntimeMode());
+  controls.workspaceInitButton?.classList.toggle("is-active", showInit);
+
+  if (!showInit) {
+    return;
+  }
+
+  if (controls.initCpsInput) {
+    controls.initCpsInput.value = state.initStage?.cps_expr ?? "";
+  }
+
+  const runtimeSamples = runtimeSampleReadiness();
+  controls.initWorkspace.querySelector(".init-runtime-note")?.remove();
+  const runtimeNote = document.createElement("p");
+  runtimeNote.className = "tile-empty-message init-runtime-note";
+  if (runtimeSamples.failed > 0) {
+    runtimeNote.textContent = `Default sample maps failed: ${runtimeSamples.failures.join(" | ")}`;
+  } else if (runtimeSamples.attempted > 0) {
+    runtimeNote.textContent = `Default sample maps ready: ${runtimeSamples.loaded}/${runtimeSamples.attempted}`;
+  } else {
+    runtimeNote.textContent = "Default sample maps have not reported readiness yet.";
+  }
+  controls.initWorkspace.prepend(runtimeNote);
+
+  const sampleLoads = Array.isArray(state.initStage?.sample_loads) ? state.initStage.sample_loads : [];
+  const sampleStatuses = sampleStatusById();
+  if (controls.initSampleSummary) {
+    controls.initSampleSummary.textContent = `${sampleLoads.length}`;
+  }
+  if (controls.initSampleList) {
+    controls.initSampleList.replaceChildren();
+    if (sampleLoads.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "tile-empty-message";
+      empty.textContent = "No sample loads configured.";
+      controls.initSampleList.append(empty);
+    }
+    for (const load of sampleLoads) {
+      const card = document.createElement("section");
+      card.className = "init-card";
+
+      const head = document.createElement("div");
+      head.className = "init-card-head";
+      const title = document.createElement("strong");
+      title.textContent = load.id;
+      const status = document.createElement("span");
+      const sampleStatus = sampleStatuses.get(load.id) ?? { status: "idle", error: null };
+      status.className = `init-status is-${sampleStatus.status ?? "idle"}`;
+      status.textContent = String(sampleStatus.status ?? "idle").toUpperCase();
+      head.append(title, status);
+
+      const meta = document.createElement("div");
+      meta.className = "init-card-meta";
+      appendMetaRow(meta, "source", load.source);
+      appendMetaRow(meta, "aliases", JSON.stringify(load.aliases ?? {}));
+      if (sampleStatus?.error) {
+        appendMetaRow(meta, "error", sampleStatus.error);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "init-card-actions";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => {
+        if (controls.initSampleId) controls.initSampleId.value = load.id;
+        if (controls.initSampleSource) controls.initSampleSource.value = load.source;
+        if (controls.initSampleAliases) {
+          controls.initSampleAliases.value = JSON.stringify(load.aliases ?? {}, null, 2);
+        }
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => {
+        void applyInitOps("sample_load_remove", [{ op: "sample_load_remove", id: load.id }]);
+      });
+      actions.append(edit, remove);
+
+      card.append(head, meta, actions);
+      controls.initSampleList.append(card);
+    }
+  }
+
+  const tricks = Array.isArray(state.initStage?.tricks) ? state.initStage.tricks : [];
+  if (controls.initTrickSummary) {
+    controls.initTrickSummary.textContent = `${tricks.length}`;
+  }
+  if (controls.initTrickList) {
+    controls.initTrickList.replaceChildren();
+    if (tricks.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "tile-empty-message";
+      empty.textContent = "No tricks defined yet.";
+      controls.initTrickList.append(empty);
+    }
+    for (const trick of tricks) {
+      const card = document.createElement("section");
+      card.className = "init-card";
+
+      const head = document.createElement("div");
+      head.className = "init-card-head";
+      const title = document.createElement("strong");
+      title.textContent = trick.name;
+      const badge = document.createElement("span");
+      badge.className = "node-chip";
+      badge.textContent = `${trick.node_count}N ${trick.edge_count}E`;
+      head.append(title, badge);
+
+      const meta = document.createElement("div");
+      meta.className = "init-card-meta";
+      appendMetaRow(meta, "id", trick.id);
+
+      const actions = document.createElement("div");
+      actions.className = "init-card-actions";
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = "Open";
+      open.addEventListener("click", () => {
+        void setEditorMode("trick", trick.id);
+      });
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.textContent = "Rename";
+      rename.addEventListener("click", () => {
+        const nextName = window.prompt("Rename trick", trick.name);
+        if (!nextName || !nextName.trim()) {
+          return;
+        }
+        void applyInitOps("trick_rename", [{ op: "trick_rename", id: trick.id, name: nextName.trim() }]);
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Delete";
+      remove.addEventListener("click", () => {
+        if (isTrickMode() && state.selectedTrickId === trick.id) {
+          state.selectedTrickId = null;
+        }
+        void applyInitOps("trick_delete", [{ op: "trick_delete", id: trick.id }]);
+      });
+      actions.append(open, rename, remove);
+
+      card.append(head, meta, actions);
+      controls.initTrickList.append(card);
+    }
+  }
+}
+
+async function setEditorMode(nextMode, trickId = null) {
+  const mode = nextMode === "trick" ? "trick" : nextMode === "init" ? "init" : "runtime";
+  state.editorMode = mode;
+  state.selectedTrickId = mode === "trick" ? trickId : null;
+  if (mode === "init") {
+    toggleTileInspectorModal(false);
+  }
+
+  if (mode === "trick" && !selectedTrick()) {
+    state.editorMode = "init";
+    state.selectedTrickId = null;
+    renderAll();
+    return;
+  }
+
+  try {
+    if (mode !== "init") {
+      await loadPieceCatalog();
+      await refreshGraphForActiveTarget();
+    } else {
+      clearDragState();
+    }
+  } catch (error) {
+    logLine("error", `workspace switch failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    renderAll();
+  }
+}
+
+async function refreshEverything(options = {}) {
+  if (options.resetEditorContext) {
+    state.editorMode = "runtime";
+    state.selectedTrickId = null;
+    state.selectedPos = null;
+    state.selectedEdgeId = null;
+    closeGridPiecePicker();
+    clearDragState();
+    toggleTileInspectorModal(false);
+  }
   setBusy(true);
   try {
     await refreshProjectAndGraph();
-    renderAll();
+    await loadPieceCatalog();
   } catch (error) {
     logLine("error", error instanceof Error ? error.message : String(error));
   } finally {
+    renderAll();
     setBusy(false);
   }
 }
 
 function renderAll() {
-  renderPalette();
-  renderCanvas();
+  renderInitWorkspace();
+  if (!isInitMode()) {
+    renderCanvas();
+  }
   renderInspector();
   renderCompileView();
   renderProjectMeta();
+  if (pickerIsOpen()) {
+    renderGridPiecePicker();
+  }
 }
 
 async function handlePlay() {
   setBusy(true);
   try {
     await primeAudioFromGesture();
+    const defaultSamples = runtimeSampleReadiness();
+    if (defaultSamples.failed > 0) {
+      logLine("warn", `default sample maps failed: ${defaultSamples.failures.join(" | ")}`);
+      setUiIssue("runtime/default_sample_maps_failed");
+    }
     const commit = await invokeTauri("runtime_commit", {
       cpm: Number(controls.cpmInput?.value ?? 120),
       force: false,
       playing: true,
     });
-    if (!commit.success || !commit.code) {
+    if (!commit.success) {
       const details = Array.isArray(commit.diagnostics)
         ? commit.diagnostics.map(diagToText).join("; ")
         : commit.error || "unknown compile failure";
@@ -1988,7 +3016,12 @@ async function handlePlay() {
       }
       return;
     }
-    await evalProgram(commit.code);
+    await runCadenceProgram({
+      cpsExpr: commit.cps_expr,
+      sampleLoads: commit.sample_loads,
+      declarationCode: commit.declaration_code,
+      runtimeCode: commit.runtime_code,
+    });
     state.playback = "playing";
     logLine("info", "runtime playing");
   } catch (error) {
@@ -2044,17 +3077,21 @@ async function handleMenuAction(action) {
         return;
       }
       await invokeTauri("project_new", { name: "Untitled" });
-      await refreshEverything();
+      await refreshEverything({ resetEditorContext: true });
       return;
     }
     case "file.open": {
       if (!(await maybeSaveBeforeDangerousAction())) {
         return;
       }
-      const path = await invokeTauri("project_pick_open_path");
-      if (path) {
-        await invokeTauri("project_open_path", { path });
-        await refreshEverything();
+      try {
+        const path = await invokeTauri("project_pick_open_path");
+        if (path) {
+          await invokeTauri("project_open_path", { path });
+          await refreshEverything({ resetEditorContext: true });
+        }
+      } catch (error) {
+        logLine("error", `Failed to open project: ${error instanceof Error ? error.message : String(error)}`);
       }
       return;
     }
@@ -2134,29 +3171,96 @@ async function deleteSelection() {
 }
 
 function bindEvents() {
-  controls.panelTabPalette?.addEventListener("click", () => {
-    setActivePanel("palette");
-    renderAll();
-  });
-  controls.panelTabTile?.addEventListener("click", () => {
-    setActivePanel("tile");
-    renderAll();
-  });
-  controls.panelTabCompiled?.addEventListener("click", () => {
-    setActivePanel("compiled");
-    renderAll();
+  controls.addNodeButton?.addEventListener("click", () => {
+    openPickerFromSelection();
   });
 
-  controls.addNodeButton?.addEventListener("click", () => {
-    setActivePanel("palette");
-    if (!state.armedPieceId) {
-      logLine("info", "pick a piece in Palette, then click an empty grid cell.");
+  controls.workspaceRuntimeButton?.addEventListener("click", () => {
+    void setEditorMode("runtime");
+  });
+
+  controls.workspaceInitButton?.addEventListener("click", () => {
+    void setEditorMode("init");
+  });
+
+  controls.workspaceBackButton?.addEventListener("click", () => {
+    void setEditorMode("init");
+  });
+
+  controls.compileButton?.addEventListener("click", () => {
+    toggleCompileModal();
+  });
+
+  controls.initCpsSave?.addEventListener("click", () => {
+    const expr = String(controls.initCpsInput?.value ?? "").trim();
+    void applyInitOps("init_set_cps", [{ op: "set_cps", expr: expr || null }]);
+  });
+
+  controls.initCpsClear?.addEventListener("click", () => {
+    if (controls.initCpsInput) {
+      controls.initCpsInput.value = "";
+    }
+    void applyInitOps("init_clear_cps", [{ op: "set_cps", expr: null }]);
+  });
+
+  controls.initSampleSave?.addEventListener("click", () => {
+    const id = String(controls.initSampleId?.value ?? "").trim();
+    const source = String(controls.initSampleSource?.value ?? "").trim();
+    const aliasesText = String(controls.initSampleAliases?.value ?? "").trim();
+    if (!id || !source) {
+      logLine("warn", "sample load requires both id and source");
       return;
     }
-    void placePiece(state.armedPieceId);
+    let aliases = {};
+    if (aliasesText) {
+      try {
+        const parsed = JSON.parse(aliasesText);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+          throw new Error("aliases must be a JSON object");
+        }
+        aliases = parsed;
+      } catch (error) {
+        logLine("warn", `sample load aliases must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    }
+    void applyInitOps("sample_load_upsert", [{ op: "sample_load_upsert", id, source, aliases }]);
   });
 
-  controls.widgetPaletteSearch?.addEventListener("input", () => renderPalette());
+  controls.initTrickCreate?.addEventListener("click", () => {
+    const name = String(controls.initTrickName?.value ?? "").trim();
+    if (!name) {
+      logLine("warn", "trick name cannot be empty");
+      return;
+    }
+    const trickId = `${slugifyIdentifier(name, "trick")}_${Date.now().toString(36)}`;
+    void applyInitOps("trick_create", [{ op: "trick_create", id: trickId, name }]).then((ok) => {
+      if (ok && controls.initTrickName) {
+        controls.initTrickName.value = "";
+      }
+    });
+  });
+
+  controls.gridPiecePickerSearch?.addEventListener("input", () => {
+    state.gridPickerQuery = String(controls.gridPiecePickerSearch?.value ?? "");
+    renderGridPiecePicker();
+  });
+  controls.gridPiecePickerSearch?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeGridPiecePicker();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const first = pickerFilteredCatalog()[0];
+      const target = state.gridPickerPos;
+      if (first && target) {
+        closeGridPiecePicker();
+        void placePieceAt(first.id, target);
+      }
+    }
+  });
 
   controls.deleteNodeButton?.addEventListener("click", () => {
     if (state.selectedEdgeId) {
@@ -2180,32 +3284,29 @@ function bindEvents() {
     ]);
   });
 
-  controls.nodeNameApply?.addEventListener("click", () => {
-    const entry = selectedNodeEntry();
-    if (!entry || !controls.nodeNameInput) {
+  controls.canvas?.addEventListener("contextmenu", (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest(".grid-cell, .voice-node")) {
       return;
     }
-    const parsed = parseNodeKey(controls.nodeNameInput.value.replace(",", ":"));
-    if (!Number.isFinite(parsed.col) || !Number.isFinite(parsed.row)) {
-      logLine("warn", "invalid target cell, use col,row");
+    const position = clientPointToGridPos(event.clientX, event.clientY);
+    if (!position || nodeByPos(position)) {
       return;
     }
-    const target = { col: Math.trunc(parsed.col), row: Math.trunc(parsed.row) };
-    if (!isWithinGrid(target)) {
-      logLine("warn", `node_move: out of bounds (${target.col}, ${target.row})`);
-      return;
-    }
-    void applyOps("node_move", [
-      {
-        op: "node_move",
-        from: entry.position,
-        to: target,
-      },
-    ]);
+    event.preventDefault();
+    openGridPiecePicker(position, event.clientX, event.clientY);
   });
 
   controls.textRefreshButton?.addEventListener("click", () => {
     void refreshEverything();
+  });
+
+  controls.modalInspectorClose?.addEventListener("click", () => {
+    toggleTileInspectorModal(false);
+  });
+
+  controls.modalCompileClose?.addEventListener("click", () => {
+    toggleCompileModal(false);
   });
 
   controls.playButton?.addEventListener("click", () => {
@@ -2216,30 +3317,97 @@ function bindEvents() {
     void handleStop();
   });
 
+  controls.modeChip?.addEventListener("click", () => {
+    toggleCompileModal();
+  });
+
+  controls.projectChip?.addEventListener("click", () => {
+    if (isInitMode()) {
+      return;
+    }
+    if (state.selectedPos || state.selectedEdgeId) {
+      toggleTileInspectorModal();
+    }
+  });
+
   controls.miniConsoleToggle?.addEventListener("click", () => {
     state.miniConsoleVisible = !state.miniConsoleVisible;
     controls.miniConsole?.classList.toggle("is-hidden", !state.miniConsoleVisible);
   });
 
   window.addEventListener("keydown", (event) => {
-    if ((event.key !== "Delete" && event.key !== "Backspace") || isTypingTarget(event.target)) {
+    const key = event.key.toLowerCase();
+    const typing = isTypingTarget(event.target);
+
+    if (event.key === "Escape") {
+      if (pickerIsOpen()) {
+        closeGridPiecePicker();
+        return;
+      }
+      if (modalIsOpen(controls.tileInspectorModal) || modalIsOpen(controls.compileModal)) {
+        toggleTileInspectorModal(false);
+        toggleCompileModal(false);
+      }
       return;
     }
-    event.preventDefault();
-    void deleteSelection();
+
+    if (typing) {
+      return;
+    }
+
+    if (event.key === "Tab" && state.selectedPos && !nodeByPos(state.selectedPos)) {
+      event.preventDefault();
+      if (!pickerIsOpen()) {
+        const anchor = gridPosToClientPoint(state.selectedPos);
+        openGridPiecePicker(state.selectedPos, anchor.x, anchor.y);
+      }
+      return;
+    }
+
+    if (key === "i") {
+      event.preventDefault();
+      toggleTileInspectorModal();
+      return;
+    }
+
+    if (key === "c") {
+      event.preventDefault();
+      toggleCompileModal();
+      return;
+    }
+
+    if (event.key === "Delete" || event.key === "Backspace") {
+      event.preventDefault();
+      void deleteSelection();
+    }
+  });
+  window.addEventListener("pointerdown", (event) => {
+    if (!pickerIsOpen() || !controls.gridPiecePicker) {
+      return;
+    }
+    const target = event.target;
+    if (target instanceof Node && controls.gridPiecePicker.contains(target)) {
+      return;
+    }
+    closeGridPiecePicker();
   });
 
-  window.__GA_MENU_ACTION = (action) => {
+  window.__CADENCE_MENU_ACTION = (action) => {
     void handleMenuAction(action);
   };
 }
 
 async function boot() {
   bindEvents();
-  setActivePanel("palette");
   setBusy(true);
   try {
-    await ensureRuntimeReady();
+    if (window.__CADENCE_TEST__ !== true) {
+      await ensureRuntimeReady();
+      const defaultSamples = runtimeSampleReadiness();
+      if (defaultSamples.failed > 0) {
+        logLine("warn", `default sample maps failed during bootstrap: ${defaultSamples.failures.join(" | ")}`);
+      }
+    }
   } catch (error) {
     logLine("warn", `runtime bootstrap failed: ${error instanceof Error ? error.message : String(error)}`);
   }

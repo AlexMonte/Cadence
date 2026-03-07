@@ -9,3 +9,14 @@ cargo.lock
 /.tmp
 /ui/node_modules
 /ui/dist
+/ui/playwright-report
+/ui/test-results
+/node_modules
+/.claude
+/docs
+package-lock.json
+package.json
+/scripts
+# Local Cadence export files
+/project.cadence.json
+/project.grooveatlas.json

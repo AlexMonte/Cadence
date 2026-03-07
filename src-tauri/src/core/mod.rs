@@ -1,14 +1,13 @@
-pub mod code_expr;
-pub mod compiler;
-pub mod diagnostics;
-pub mod graph;
-pub mod ops;
-pub mod piece;
+//! Cadence's Strudel-specific implementation layer built on top of `tile_graph`.
+
+pub mod cadence_program;
 pub mod piece_registry;
 pub mod pieces;
+pub mod project_compile;
 pub mod selection;
-pub mod semantic;
-pub mod types;
+pub mod strudel_schema;
+pub mod terminal_strategy;
+pub mod tricks;
 
 #[cfg(test)]
 mod grid_tests;

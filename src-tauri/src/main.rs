@@ -1,13 +1,15 @@
 mod commands;
 mod core;
 mod errors;
+mod model;
 mod store;
 
 use commands::{
     SharedAppState, diagnostics_snapshot, export_song, graph_apply_ops, graph_compile_preview,
-    graph_piece_catalog, graph_snapshot, history_redo, history_status, history_undo,
-    project_create, project_dirty_status, project_new, project_open, project_open_path,
-    project_pick_open_path, project_pick_save_path, project_prompt_unsaved, project_recovery_clear,
+    graph_pick_target_param, graph_piece_catalog, graph_snapshot, history_redo, history_status,
+    history_undo, project_compile_preview, project_create, project_dirty_status, project_init_apply,
+    project_init_snapshot, project_new, project_open, project_open_path, project_pick_open_path,
+    project_pick_save_path, project_prompt_unsaved, project_recovery_clear,
     project_recovery_load, project_recovery_status, project_recovery_write, project_save,
     project_save_as, project_save_current, project_snapshot, runtime_commit,
     runtime_reset_on_project_swap, runtime_status, runtime_stop, ui_set_devtools_visible,
@@ -117,7 +119,7 @@ fn app_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     {
         let app_submenu = Submenu::with_items(
             app,
-            "GrooveAtlas",
+            "Cadence",
             true,
             &[
                 &PredefinedMenuItem::about(app, None, None)?,
@@ -151,7 +153,7 @@ fn emit_menu_action<R: Runtime>(app: &AppHandle<R>, action: &str) {
                 action: action.to_string(),
             },
         );
-        let _ = window.eval(format!("window.__GA_MENU_ACTION?.({action_json});").as_str());
+        let _ = window.eval(format!("window.__CADENCE_MENU_ACTION?.({action_json});").as_str());
     }
 }
 
@@ -185,7 +187,7 @@ fn toggle_dev_inspector_window<R: Runtime>(app: &AppHandle<R>) {
         DEV_INSPECTOR_LABEL,
         WebviewUrl::App("devtools.html".into()),
     )
-    .title("GrooveAtlas Dev Inspector")
+    .title("Cadence Dev Inspector")
     .resizable(true)
     .inner_size(920.0, 620.0)
     .min_inner_size(680.0, 420.0)
@@ -217,7 +219,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, menu_id: &str) {
 }
 
 fn main() {
-    eprintln!("starting GrooveAtlas Tauri shell");
+    eprintln!("starting Cadence Tauri shell");
 
     let app = tauri::Builder::default()
         .menu(app_menu)
@@ -242,9 +244,13 @@ fn main() {
             project_open,
             project_save,
             project_snapshot,
+            project_init_snapshot,
+            project_init_apply,
             graph_snapshot,
             graph_piece_catalog,
+            graph_pick_target_param,
             graph_compile_preview,
+            project_compile_preview,
             graph_apply_ops,
             runtime_commit,
             runtime_status,
@@ -260,7 +266,7 @@ fn main() {
         ]);
 
     if let Err(err) = app.run(tauri::generate_context!()) {
-        eprintln!("failed to run GrooveAtlas Tauri shell: {err}");
+        eprintln!("failed to run Cadence Tauri shell: {err}");
         std::process::exit(1);
     }
 }

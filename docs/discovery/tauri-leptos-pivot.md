@@ -1,11 +1,11 @@
-# GrooveAtlas Tauri + Leptos Pivot (Discovery)
+# Cadence Tauri + Leptos Pivot (Discovery)
 
 ## Objective
 Establish a clean Tauri + Leptos baseline with one proven backend↔UI command path before feature expansion.
 
 ## Current Root Layout
 ```text
-grooveatlas/
+cadence/
   src-tauri/
   ui/
   target/

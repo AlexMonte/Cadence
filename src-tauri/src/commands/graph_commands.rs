@@ -3,25 +3,34 @@ use serde::{Deserialize, Serialize};
 use crate::commands::project_commands::{
     SharedAppState, active_project, active_project_mut, mark_store_dirty,
 };
-use crate::core::code_expr::CodeExpr;
-use crate::core::compiler::compile_graph;
-use crate::core::diagnostics::{Diagnostic, SemanticResult};
-use crate::core::graph::{Edge, Graph, GraphOp, GraphOpRecord};
-use crate::core::ops::{ApplyOpsOutcome, apply_ops_to_graph};
-use crate::core::piece::PieceDef;
-use crate::core::piece_registry::PieceRegistry;
-use crate::core::semantic::semantic_pass;
-use crate::core::types::GridPos;
+use crate::commands::runtime_commands::render_terminals;
+use crate::commands::TerminalStrategy;
+use crate::core::piece_registry::{runtime_registry, trick_editor_registry};
+use crate::core::project_compile::compile_project;
+use crate::core::terminal_strategy::StackRenderer;
+use crate::model::{CadenceGraphTarget, ProjectCompilePreviewDto, TargetedGraphOpRecord};
 use crate::store::history::record_graph_mutation;
+use tile_graph::code_expr::CodeExpr;
+use tile_graph::compiler::{CompileMode, compile_graph};
+use tile_graph::diagnostics::{Diagnostic, SemanticResult};
+use tile_graph::graph::{Edge, Graph, GraphOp, GraphOpRecord};
+use tile_graph::ops::{
+    ApplyOpsOutcome, EdgeConnectProbeReason, EdgeTargetParamProbe, apply_ops_to_graph,
+    probe_edge_connect,
+};
+use tile_graph::piece::PieceDef;
+use tile_graph::piece_registry::PieceRegistry;
+use tile_graph::semantic::semantic_pass;
+use tile_graph::types::GridPos;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphCompilePreviewDto {
     pub can_compile: bool,
     pub code: Option<String>,
-    pub expr: Option<CodeExpr>,
+    pub exprs: Vec<CodeExpr>,
     pub diagnostics: Vec<Diagnostic>,
     pub eval_order: Vec<GridPos>,
-    pub terminal: Option<GridPos>,
+    pub terminals: Vec<GridPos>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,10 +45,64 @@ pub struct GraphApplyResultDto {
 pub struct GraphApplyArgs {
     pub ops: Vec<GraphOp>,
     pub request_id: Option<String>,
+    #[serde(default)]
+    pub target: CadenceGraphTarget,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphPickTargetParamArgs {
+    pub from: GridPos,
+    pub to_node: GridPos,
+    #[serde(default)]
+    pub to_param: Option<String>,
+    #[serde(default)]
+    pub target: CadenceGraphTarget,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GraphTargetArgs {
+    #[serde(default)]
+    pub target: CadenceGraphTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphPickTargetParamDto {
+    pub to_param: Option<String>,
+    pub reason: Option<EdgeConnectProbeReason>,
+    pub detail: Option<String>,
+}
+
+impl From<EdgeTargetParamProbe> for GraphPickTargetParamDto {
+    fn from(value: EdgeTargetParamProbe) -> Self {
+        Self {
+            to_param: value.to_param,
+            reason: value.reason,
+            detail: value.detail,
+        }
+    }
+}
+
+pub(crate) fn registry_for_target(
+    project: &crate::model::CadenceProjectDocument,
+    target: &CadenceGraphTarget,
+) -> PieceRegistry {
+    match target {
+        CadenceGraphTarget::Runtime => runtime_registry(project),
+        CadenceGraphTarget::Trick { .. } => trick_editor_registry(),
+    }
 }
 
 pub(crate) fn registry() -> PieceRegistry {
-    PieceRegistry::default_strudel()
+    crate::core::piece_registry::default_strudel_registry()
+}
+
+fn graph_for_target<'a>(
+    project: &'a crate::model::CadenceProjectDocument,
+    target: &CadenceGraphTarget,
+) -> Result<&'a Graph, String> {
+    project
+        .graph(target)
+        .ok_or_else(|| format!("unknown graph target: {:?}", target))
 }
 
 fn compile_preview(graph: &Graph, registry: &PieceRegistry) -> GraphCompilePreviewDto {
@@ -48,29 +111,32 @@ fn compile_preview(graph: &Graph, registry: &PieceRegistry) -> GraphCompilePrevi
         return GraphCompilePreviewDto {
             can_compile: false,
             code: None,
-            expr: None,
-            diagnostics: sem.errors,
+            exprs: Vec::new(),
+            diagnostics: sem.diagnostics,
             eval_order: sem.eval_order,
-            terminal: sem.terminal,
+            terminals: sem.terminals,
         };
     }
 
-    match compile_graph(graph, registry, &sem) {
-        Ok(expr) => GraphCompilePreviewDto {
+    match compile_graph(graph, registry, &sem, CompileMode::Preview) {
+        Ok(program) => GraphCompilePreviewDto {
             can_compile: true,
-            code: Some(expr.render()),
-            expr: Some(expr),
+            code: Some(render_terminals(
+                program.terminals.as_slice(),
+                &StackRenderer,
+            )),
+            exprs: program.terminals,
             diagnostics: Vec::new(),
             eval_order: sem.eval_order,
-            terminal: sem.terminal,
+            terminals: sem.terminals,
         },
         Err(errors) => GraphCompilePreviewDto {
             can_compile: false,
             code: None,
-            expr: None,
+            exprs: Vec::new(),
             diagnostics: errors,
             eval_order: sem.eval_order,
-            terminal: sem.terminal,
+            terminals: sem.terminals,
         },
     }
 }
@@ -84,9 +150,9 @@ fn apply_ops_transaction(
     let outcome = apply_ops_to_graph(&mut candidate, registry, ops)?;
     let sem = semantic_pass(&candidate, registry);
     let preview_code = if sem.is_valid() {
-        compile_graph(&candidate, registry, &sem)
+        compile_graph(&candidate, registry, &sem, CompileMode::Preview)
             .ok()
-            .map(|expr| expr.render())
+            .map(|program| render_terminals(program.terminals.as_slice(), &StackRenderer))
     } else {
         None
     };
@@ -94,34 +160,88 @@ fn apply_ops_transaction(
 }
 
 #[tauri::command]
-pub fn graph_snapshot(state: tauri::State<'_, SharedAppState>) -> Result<Graph, String> {
+pub fn graph_snapshot(
+    state: tauri::State<'_, SharedAppState>,
+    args: Option<GraphTargetArgs>,
+) -> Result<Graph, String> {
+    let target = args.unwrap_or_default().target;
     let store = state
         .store
         .lock()
         .map_err(|_| "app state lock poisoned".to_string())?;
     let project = active_project(&store).map_err(|err| err.to_string())?;
-    Ok(project.graph.clone())
+    Ok(graph_for_target(project, &target)?.clone())
 }
 
 #[tauri::command]
-pub fn graph_piece_catalog() -> Result<Vec<PieceDef>, String> {
-    let registry = registry();
+pub fn graph_piece_catalog(
+    state: tauri::State<'_, SharedAppState>,
+    args: Option<GraphTargetArgs>,
+) -> Result<Vec<PieceDef>, String> {
+    let target = args.unwrap_or_default().target;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "app state lock poisoned".to_string())?;
+    let project = active_project(&store).map_err(|err| err.to_string())?;
+    let registry = registry_for_target(project, &target);
     let mut defs = registry.all_defs();
     defs.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(defs)
 }
 
 #[tauri::command]
-pub fn graph_compile_preview(
+pub fn graph_pick_target_param(
     state: tauri::State<'_, SharedAppState>,
-) -> Result<GraphCompilePreviewDto, String> {
+    args: GraphPickTargetParamArgs,
+) -> Result<GraphPickTargetParamDto, String> {
     let store = state
         .store
         .lock()
         .map_err(|_| "app state lock poisoned".to_string())?;
     let project = active_project(&store).map_err(|err| err.to_string())?;
-    let registry = registry();
-    Ok(compile_preview(&project.graph, &registry))
+    let registry = registry_for_target(project, &args.target);
+    let probe = probe_edge_connect(
+        graph_for_target(project, &args.target)?,
+        &registry,
+        &args.from,
+        &args.to_node,
+        args.to_param.as_deref(),
+    );
+    Ok(GraphPickTargetParamDto::from(probe))
+}
+
+#[tauri::command]
+pub fn graph_compile_preview(
+    state: tauri::State<'_, SharedAppState>,
+    args: Option<GraphTargetArgs>,
+) -> Result<GraphCompilePreviewDto, String> {
+    let target = args.unwrap_or_default().target;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "app state lock poisoned".to_string())?;
+    let project = active_project(&store).map_err(|err| err.to_string())?;
+    let registry = registry_for_target(project, &target);
+    Ok(compile_preview(graph_for_target(project, &target)?, &registry))
+}
+
+#[tauri::command]
+pub fn project_compile_preview(
+    state: tauri::State<'_, SharedAppState>,
+) -> Result<ProjectCompilePreviewDto, String> {
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| "app state lock poisoned".to_string())?;
+    let project = active_project(&store).map_err(|err| err.to_string())?;
+    let compiled = compile_project(project, TerminalStrategy::Stack, CompileMode::Preview);
+    Ok(ProjectCompilePreviewDto {
+        can_render: compiled.can_render,
+        can_play: compiled.can_play,
+        code: compiled.full_code,
+        diagnostics: compiled.diagnostics,
+    })
 }
 
 #[tauri::command]
@@ -130,20 +250,25 @@ pub fn graph_apply_ops(
     args: GraphApplyArgs,
 ) -> Result<GraphApplyResultDto, Vec<Diagnostic>> {
     let mut store = state.store.lock().map_err(|_| Vec::<Diagnostic>::new())?;
-    let registry = registry();
+    let target = args.target.clone();
+    let registry = {
+        let project = active_project(&store).map_err(|_| Vec::<Diagnostic>::new())?;
+        registry_for_target(project, &target)
+    };
 
     if args.ops.is_empty() {
         let project = active_project(&store).map_err(|_| Vec::<Diagnostic>::new())?;
-        let sem = semantic_pass(&project.graph, &registry);
+        let graph = graph_for_target(project, &target).map_err(|_| Vec::<Diagnostic>::new())?;
+        let sem = semantic_pass(graph, &registry);
         let preview_code = if sem.is_valid() {
-            compile_graph(&project.graph, &registry, &sem)
+            compile_graph(graph, &registry, &sem, CompileMode::Preview)
                 .ok()
-                .map(|expr| expr.render())
+                .map(|program| render_terminals(program.terminals.as_slice(), &StackRenderer))
         } else {
             None
         };
         return Ok(GraphApplyResultDto {
-            graph: project.graph.clone(),
+            graph: graph.clone(),
             semantic: sem,
             preview_code,
             removed_edges: Vec::new(),
@@ -152,15 +277,18 @@ pub fn graph_apply_ops(
 
     let (graph, sem, preview_code, removed_edges, record, did_mutate) = {
         let project = active_project_mut(&mut store).map_err(|_| Vec::<Diagnostic>::new())?;
+        let current = project
+            .graph_mut(&target)
+            .ok_or_else(Vec::<Diagnostic>::new)?;
         let (candidate, outcome, sem, preview_code) =
-            apply_ops_transaction(&project.graph, &registry, args.ops.as_slice())?;
+            apply_ops_transaction(current, &registry, args.ops.as_slice())?;
         let did_mutate = !outcome.applied_ops.is_empty() || !outcome.removed_edges.is_empty();
         let record = GraphOpRecord {
             do_ops: outcome.applied_ops.clone(),
             undo_ops: outcome.undo_ops.clone(),
             removed_edges: outcome.removed_edges.clone(),
         };
-        project.graph = candidate.clone();
+        *current = candidate.clone();
         (
             candidate,
             sem,
@@ -173,7 +301,13 @@ pub fn graph_apply_ops(
 
     if did_mutate {
         mark_store_dirty(&mut store);
-        record_graph_mutation(&mut store, record);
+        record_graph_mutation(
+            &mut store,
+            TargetedGraphOpRecord {
+                target,
+                record,
+            },
+        );
     }
     if let Some(request_id) = args.request_id.as_ref() {
         store.push_diagnostic("graph_apply_ops", format!("request_id={request_id}"));
@@ -196,9 +330,9 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::core::diagnostics::DiagnosticKind;
-    use crate::core::graph::{Edge, Node, ProjectDocument};
-    use crate::core::types::EdgeId;
+    use tile_graph::diagnostics::DiagnosticKind;
+    use tile_graph::graph::{Edge, Node, ProjectDocument};
+    use tile_graph::types::{EdgeId, TileSide};
 
     fn sample_graph() -> Graph {
         let mut nodes = BTreeMap::new();
@@ -212,6 +346,8 @@ mod tests {
                 )]),
                 input_sides: Default::default(),
                 output_side: None,
+                label: None,
+                node_state: None,
             },
         );
         nodes.insert(
@@ -219,9 +355,11 @@ mod tests {
             Node {
                 piece_id: "strudel.output".to_string(),
                 inline_params: BTreeMap::new(),
-            input_sides: Default::default(),
-            output_side: None,
-},
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
         );
         let edge = Edge {
             id: EdgeId::new(),
@@ -233,11 +371,51 @@ mod tests {
             nodes,
             edges: BTreeMap::from([(edge.id.clone(), edge)]),
             name: "graph".to_string(),
+            cols: 9,
+            rows: 9,
         }
     }
 
     fn canonical_json(graph: &Graph) -> String {
         serde_json::to_string(graph).expect("serialize")
+    }
+
+    #[test]
+    fn node_place_accepts_piece_ids_from_catalog() {
+        let mut graph = Graph {
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            name: "catalog-node-place".to_string(),
+            cols: 9,
+            rows: 9,
+        };
+        let registry = registry();
+        let mut defs = registry.all_defs();
+        defs.sort_by(|left, right| left.id.cmp(&right.id));
+
+        for (index, def) in defs.iter().enumerate() {
+            let position = GridPos {
+                col: (index % 9) as i32,
+                row: (index / 9) as i32,
+            };
+            apply_ops_to_graph(
+                &mut graph,
+                &registry,
+                &[GraphOp::NodePlace {
+                    position,
+                    piece_id: def.id.clone(),
+                    inline_params: BTreeMap::new(),
+                }],
+            )
+            .unwrap_or_else(|errors| {
+                panic!(
+                    "node_place should accept catalog piece '{}' but got diagnostics: {:?}",
+                    def.id, errors
+                )
+            });
+        }
+
+        assert_eq!(graph.nodes.len(), defs.len());
     }
 
     #[test]
@@ -305,9 +483,11 @@ mod tests {
             Node {
                 piece_id: "strudel.fast".to_string(),
                 inline_params: BTreeMap::new(),
-            input_sides: Default::default(),
-            output_side: None,
-},
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
         );
         let extra = Edge {
             id: EdgeId::new(),
@@ -338,12 +518,40 @@ mod tests {
     }
 
     #[test]
+    fn node_swap_outcome_has_deterministic_do_and_undo_ops() {
+        let mut graph = sample_graph();
+        let registry = registry();
+
+        let outcome = apply_ops_to_graph(
+            &mut graph,
+            &registry,
+            &[GraphOp::NodeSwap {
+                a: GridPos { col: 0, row: 0 },
+                b: GridPos { col: 1, row: 0 },
+            }],
+        )
+        .expect("swap");
+
+        assert_eq!(outcome.applied_ops.len(), 1);
+        assert!(matches!(
+            outcome.applied_ops.first(),
+            Some(GraphOp::NodeSwap { a, b })
+            if *a == GridPos { col: 0, row: 0 } && *b == GridPos { col: 1, row: 0 }
+        ));
+        assert!(matches!(
+            outcome.undo_ops.first(),
+            Some(GraphOp::NodeSwap { a, b })
+            if *a == GridPos { col: 0, row: 0 } && *b == GridPos { col: 1, row: 0 }
+        ));
+    }
+
+    #[test]
     fn graph_snapshot_reflects_semantic_validity() {
         let project = ProjectDocument::new("demo".to_string(), sample_graph());
         let registry = registry();
         let sem = semantic_pass(&project.graph, &registry);
         assert!(sem.is_valid());
-        assert!(sem.errors.is_empty());
+        assert!(sem.diagnostics.is_empty());
     }
 
     #[test]
@@ -439,7 +647,7 @@ mod tests {
         )
         .expect("op-valid batch should commit even with semantic errors");
 
-        assert!(!sem.errors.is_empty());
+        assert!(!sem.diagnostics.is_empty());
         assert!(!sem.is_valid());
         assert!(preview.is_none());
         assert!(next_graph.nodes.contains_key(&GridPos { col: 2, row: 0 }));
@@ -466,6 +674,243 @@ mod tests {
                 .any(|diag| matches!(diag.kind, DiagnosticKind::InvalidOperation { .. }))
         );
         assert!(!graph.nodes.contains_key(&GridPos { col: -1, row: 0 }));
+    }
+
+    #[test]
+    fn probe_selects_pattern_param_for_chainable_links() {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            GridPos { col: 0, row: 0 },
+            Node {
+                piece_id: "strudel.sound".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        nodes.insert(
+            GridPos { col: 1, row: 0 },
+            Node {
+                piece_id: "strudel.fast".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        nodes.insert(
+            GridPos { col: 2, row: 0 },
+            Node {
+                piece_id: "strudel.gain".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        let graph = Graph {
+            nodes,
+            edges: BTreeMap::new(),
+            name: "probe-chain".to_string(),
+            cols: 9,
+            rows: 9,
+        };
+        let registry = registry();
+
+        let first = probe_edge_connect(
+            &graph,
+            &registry,
+            &GridPos { col: 0, row: 0 },
+            &GridPos { col: 1, row: 0 },
+            None,
+        );
+        assert_eq!(first.to_param.as_deref(), Some("pattern"));
+        assert!(first.reason.is_none());
+
+        let second = probe_edge_connect(
+            &graph,
+            &registry,
+            &GridPos { col: 1, row: 0 },
+            &GridPos { col: 2, row: 0 },
+            None,
+        );
+        assert_eq!(second.to_param.as_deref(), Some("pattern"));
+        assert!(second.reason.is_none());
+    }
+
+    #[test]
+    fn probe_rejects_type_mismatch_for_number_into_gain_pattern() {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            GridPos { col: 1, row: 1 },
+            Node {
+                piece_id: "strudel.number".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        nodes.insert(
+            GridPos { col: 1, row: 0 },
+            Node {
+                piece_id: "strudel.gain".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: BTreeMap::from([("pattern".to_string(), TileSide::South)]),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        let graph = Graph {
+            nodes,
+            edges: BTreeMap::new(),
+            name: "probe-type".to_string(),
+            cols: 9,
+            rows: 9,
+        };
+        let registry = registry();
+
+        let probe = probe_edge_connect(
+            &graph,
+            &registry,
+            &GridPos { col: 1, row: 1 },
+            &GridPos { col: 1, row: 0 },
+            Some("pattern"),
+        );
+        assert!(probe.to_param.is_none());
+        assert_eq!(probe.reason, Some(EdgeConnectProbeReason::TypeMismatch));
+    }
+
+    #[test]
+    fn probe_respects_adjacency_and_side_overrides() {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            GridPos { col: 1, row: 1 },
+            Node {
+                piece_id: "strudel.sound".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: Default::default(),
+                output_side: Some(TileSide::North),
+                label: None,
+                node_state: None,
+            },
+        );
+        nodes.insert(
+            GridPos { col: 1, row: 0 },
+            Node {
+                piece_id: "strudel.fast".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: BTreeMap::from([("pattern".to_string(), TileSide::South)]),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        nodes.insert(
+            GridPos { col: 4, row: 4 },
+            Node {
+                piece_id: "strudel.sound".to_string(),
+                inline_params: BTreeMap::new(),
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
+        );
+        let graph = Graph {
+            nodes,
+            edges: BTreeMap::new(),
+            name: "probe-side".to_string(),
+            cols: 9,
+            rows: 9,
+        };
+        let registry = registry();
+
+        let override_ok = probe_edge_connect(
+            &graph,
+            &registry,
+            &GridPos { col: 1, row: 1 },
+            &GridPos { col: 1, row: 0 },
+            None,
+        );
+        assert_eq!(override_ok.to_param.as_deref(), Some("pattern"));
+
+        let non_adjacent = probe_edge_connect(
+            &graph,
+            &registry,
+            &GridPos { col: 4, row: 4 },
+            &GridPos { col: 1, row: 0 },
+            None,
+        );
+        assert!(non_adjacent.to_param.is_none());
+        assert_eq!(
+            non_adjacent.reason,
+            Some(EdgeConnectProbeReason::NotAdjacent)
+        );
+    }
+
+    #[test]
+    fn probe_and_edge_connect_reject_with_same_outcome_for_invalid_link() {
+        let mut graph = Graph {
+            nodes: BTreeMap::from([
+                (
+                    GridPos { col: 1, row: 1 },
+                    Node {
+                        piece_id: "strudel.number".to_string(),
+                        inline_params: BTreeMap::new(),
+                        input_sides: Default::default(),
+                        output_side: None,
+                        label: None,
+                        node_state: None,
+                    },
+                ),
+                (
+                    GridPos { col: 1, row: 0 },
+                    Node {
+                        piece_id: "strudel.gain".to_string(),
+                        inline_params: BTreeMap::new(),
+                        input_sides: BTreeMap::from([("pattern".to_string(), TileSide::South)]),
+                        output_side: None,
+                        label: None,
+                        node_state: None,
+                    },
+                ),
+            ]),
+            edges: BTreeMap::new(),
+            name: "probe-vs-apply".to_string(),
+            cols: 9,
+            rows: 9,
+        };
+        let registry = registry();
+        let probe = probe_edge_connect(
+            &graph,
+            &registry,
+            &GridPos { col: 1, row: 1 },
+            &GridPos { col: 1, row: 0 },
+            Some("pattern"),
+        );
+        assert_eq!(probe.reason, Some(EdgeConnectProbeReason::TypeMismatch));
+
+        let apply = apply_ops_to_graph(
+            &mut graph,
+            &registry,
+            &[GraphOp::EdgeConnect {
+                edge_id: None,
+                from: GridPos { col: 1, row: 1 },
+                to_node: GridPos { col: 1, row: 0 },
+                to_param: "pattern".to_string(),
+            }],
+        );
+        assert!(
+            apply.is_err(),
+            "edge_connect should reject same invalid link"
+        );
     }
 
     #[test]

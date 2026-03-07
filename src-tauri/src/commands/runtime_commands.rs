@@ -1,12 +1,45 @@
 use serde::{Deserialize, Serialize};
 
-use crate::commands::project_commands::{SharedAppState, active_project};
-use crate::core::compiler::compile_graph;
-use crate::core::diagnostics::Diagnostic;
-use crate::core::piece_registry::PieceRegistry;
-use crate::core::semantic::semantic_pass;
-use crate::core::types::PortType;
+use crate::commands::project_commands::{SharedAppState, active_project, active_project_mut};
+use crate::core::project_compile::compile_project;
+use crate::core::terminal_strategy::{DollarRenderer, StackRenderer, TerminalRenderer};
+use crate::model::CadenceSampleLoad;
 use crate::store::app_state::AppStore;
+use tile_graph::code_expr::CodeExpr;
+use tile_graph::compiler::{CompileMode, NodeStateUpdate};
+use tile_graph::diagnostics::Diagnostic;
+
+/// Serializable strategy selector passed from the frontend per `runtime_commit`
+/// call. Maps to one of the built-in [`TerminalRenderer`] implementations via
+/// [`TerminalStrategy::as_renderer`].
+///
+/// To add a new output strategy, implement [`TerminalRenderer`] in
+/// `core/terminal_strategy.rs` and add a variant here.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalStrategy {
+    /// Wrap all terminals in `stack(a, b, ...)`. With a single terminal,
+    /// emits the expression directly.
+    Stack,
+    /// Emit one `$: expr` line per terminal — independent Strudel voices.
+    Dollar,
+}
+
+impl Default for TerminalStrategy {
+    fn default() -> Self {
+        Self::Stack
+    }
+}
+
+impl TerminalStrategy {
+    /// Return the corresponding [`TerminalRenderer`] for this strategy.
+    pub fn as_renderer(self) -> Box<dyn TerminalRenderer> {
+        match self {
+            TerminalStrategy::Stack => Box::new(StackRenderer),
+            TerminalStrategy::Dollar => Box::new(DollarRenderer),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuntimeCommitArgs {
@@ -14,6 +47,7 @@ pub struct RuntimeCommitArgs {
     pub force: Option<bool>,
     pub playing: Option<bool>,
     pub code_override: Option<String>,
+    pub terminal_strategy: Option<TerminalStrategy>,
     pub request_id: Option<u64>,
 }
 
@@ -24,6 +58,10 @@ pub struct RuntimeCommitDto {
     pub changed: bool,
     pub playing: bool,
     pub code: Option<String>,
+    pub cps_expr: Option<String>,
+    pub sample_loads: Vec<CadenceSampleLoad>,
+    pub declaration_code: Vec<String>,
+    pub runtime_code: Option<String>,
     pub voice_count: usize,
     pub play_elapsed_ms: u64,
     pub request_id: Option<u64>,
@@ -49,50 +87,115 @@ pub(crate) fn hard_stop_runtime_state(store: &mut AppStore, clear_program: bool)
     }
 }
 
-fn compile_runtime_code(
+fn compile_runtime_plan(
     store: &AppStore,
     code_override: Option<&str>,
-) -> Result<(String, usize), Vec<Diagnostic>> {
+    strategy: TerminalStrategy,
+) -> Result<(RuntimeCommitDto, Vec<NodeStateUpdate>), Vec<Diagnostic>> {
     if let Some(override_code) = code_override {
         let trimmed = override_code.trim();
         if trimmed.is_empty() {
             return Err(Vec::new());
         }
-        return Ok((trimmed.to_string(), 1));
+        return Ok((
+            RuntimeCommitDto {
+                success: true,
+                rev: 0,
+                changed: false,
+                playing: false,
+                code: Some(trimmed.to_string()),
+                cps_expr: None,
+                sample_loads: Vec::new(),
+                declaration_code: Vec::new(),
+                runtime_code: Some(trimmed.to_string()),
+                voice_count: 1,
+                play_elapsed_ms: 0,
+                request_id: None,
+                diagnostics: Vec::new(),
+                error: None,
+            },
+            Vec::new(),
+        ));
     }
 
     let project = active_project(store).map_err(|_| Vec::new())?;
-    let registry = PieceRegistry::default_strudel();
-    let sem = semantic_pass(&project.graph, &registry);
-    if !sem.is_valid() {
-        return Err(sem.errors);
+    let compiled = compile_project(project, strategy, CompileMode::Runtime);
+    let voice_count = compiled
+        .program
+        .runtime
+        .as_ref()
+        .map(|runtime| runtime.terminals.len())
+        .unwrap_or(0);
+    if !compiled.can_play {
+        return Err(compiled.diagnostics);
     }
-    let voice_count = project
-        .graph
-        .nodes
-        .values()
-        .filter_map(|node| registry.get(node.piece_id.as_str()))
-        .filter(|piece| matches!(piece.def().output_type, Some(PortType::Pattern)))
-        .count();
+    Ok((
+        RuntimeCommitDto {
+            success: true,
+            rev: 0,
+            changed: false,
+            playing: false,
+            code: compiled.full_code,
+            cps_expr: project.init_stage.cps_expr.clone(),
+            sample_loads: project.init_stage.sample_loads.clone(),
+            declaration_code: compiled.program.declaration_code(),
+            runtime_code: compiled.runtime_code,
+            voice_count,
+            play_elapsed_ms: 0,
+            request_id: None,
+            diagnostics: compiled.diagnostics,
+            error: None,
+        },
+        compiled.state_updates,
+    ))
+}
 
-    let expr = compile_graph(&project.graph, &registry, &sem)?;
-    Ok((expr.render(), voice_count))
+/// Render compiled terminal expressions into a program string using the
+/// supplied [`TerminalRenderer`]. Call [`TerminalStrategy::as_renderer`] to
+/// obtain a renderer from the serializable strategy enum, or provide any
+/// custom implementation of [`TerminalRenderer`] directly.
+pub(crate) fn render_terminals(terminals: &[CodeExpr], renderer: &dyn TerminalRenderer) -> String {
+    if terminals.is_empty() {
+        return String::new();
+    }
+    renderer.render(terminals)
 }
 
 fn commit_runtime(store: &mut AppStore, args: RuntimeCommitArgs) -> RuntimeCommitDto {
     let _ = args.cpm.unwrap_or(120.0);
     let force = args.force.unwrap_or(false);
+    let strategy = args.terminal_strategy.unwrap_or_default();
 
-    let compile = compile_runtime_code(store, args.code_override.as_deref());
-    let (success, code, voice_count, diagnostics, error) = match compile {
-        Ok((code, voice_count)) => (true, Some(code), voice_count, Vec::new(), None),
+    let compile = compile_runtime_plan(store, args.code_override.as_deref(), strategy);
+    let (success, mut commit, state_updates, error) = match compile {
+        Ok((commit, state_updates)) => (true, commit, state_updates, None),
         Err(diagnostics) => {
             let message = if diagnostics.is_empty() {
                 "compile failed: invalid override or missing project".to_string()
             } else {
                 format!("compile failed with {} diagnostics", diagnostics.len())
             };
-            (false, None, 0, diagnostics, Some(message))
+            (
+                false,
+                RuntimeCommitDto {
+                    success: false,
+                    rev: 0,
+                    changed: false,
+                    playing: false,
+                    code: None,
+                    cps_expr: None,
+                    sample_loads: Vec::new(),
+                    declaration_code: Vec::new(),
+                    runtime_code: None,
+                    voice_count: 0,
+                    play_elapsed_ms: 0,
+                    request_id: args.request_id,
+                    diagnostics,
+                    error: Some(message.clone()),
+                },
+                Vec::new(),
+                Some(message),
+            )
         }
     };
 
@@ -102,11 +205,20 @@ fn commit_runtime(store: &mut AppStore, args: RuntimeCommitArgs) -> RuntimeCommi
 
     let mut changed = false;
     if success {
-        if let Some(compiled_code) = code.as_ref() {
+        if let Some(compiled_code) = commit.code.as_ref() {
             changed = store.runtime.last_code != *compiled_code;
             if changed || force {
                 store.runtime.rev = store.runtime.rev.saturating_add(1);
                 store.runtime.last_code = compiled_code.clone();
+            }
+            if !state_updates.is_empty() {
+                if let Ok(project) = active_project_mut(store) {
+                    for update in state_updates {
+                        if let Some(node) = project.graph.nodes.get_mut(&update.position) {
+                            node.node_state = Some(update.state);
+                        }
+                    }
+                }
             }
             store.runtime.last_error = None;
         }
@@ -114,18 +226,14 @@ fn commit_runtime(store: &mut AppStore, args: RuntimeCommitArgs) -> RuntimeCommi
         store.runtime.last_error = error.clone();
     }
 
-    RuntimeCommitDto {
-        success,
-        rev: store.runtime.rev,
-        changed: changed || force,
-        playing: store.runtime.playing,
-        code,
-        voice_count,
-        play_elapsed_ms: store.runtime.elapsed_ms(),
-        request_id: args.request_id,
-        diagnostics,
-        error,
-    }
+    commit.success = success;
+    commit.rev = store.runtime.rev;
+    commit.changed = changed || force;
+    commit.playing = store.runtime.playing;
+    commit.play_elapsed_ms = store.runtime.elapsed_ms();
+    commit.request_id = args.request_id;
+    commit.error = error;
+    commit
 }
 
 #[tauri::command]
@@ -221,10 +329,12 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::core::graph::{Edge, Graph, Node, ProjectDocument};
-    use crate::core::types::{EdgeId, GridPos};
+    use crate::model::CadenceProjectDocument;
+    use tile_graph::code_expr::CodeExpr;
+    use tile_graph::graph::{Edge, Graph, Node};
+    use tile_graph::types::{EdgeId, GridPos};
 
-    fn valid_project() -> ProjectDocument {
+    fn valid_project() -> CadenceProjectDocument {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             GridPos { col: 0, row: 0 },
@@ -236,6 +346,8 @@ mod tests {
                 )]),
                 input_sides: Default::default(),
                 output_side: None,
+                label: None,
+                node_state: None,
             },
         );
         nodes.insert(
@@ -243,9 +355,11 @@ mod tests {
             Node {
                 piece_id: "strudel.output".to_string(),
                 inline_params: BTreeMap::new(),
-            input_sides: Default::default(),
-            output_side: None,
-},
+                input_sides: Default::default(),
+                output_side: None,
+                label: None,
+                node_state: None,
+            },
         );
         let edge = Edge {
             id: EdgeId::new(),
@@ -253,12 +367,14 @@ mod tests {
             to_node: GridPos { col: 1, row: 0 },
             to_param: "pattern".to_string(),
         };
-        ProjectDocument::new(
+        CadenceProjectDocument::new(
             "demo".to_string(),
             Graph {
                 nodes,
                 edges: BTreeMap::from([(edge.id.clone(), edge)]),
                 name: "runtime".to_string(),
+                cols: 9,
+                rows: 9,
             },
         )
     }
@@ -277,6 +393,7 @@ mod tests {
                 force: Some(false),
                 playing: Some(true),
                 code_override: None,
+                terminal_strategy: None,
                 request_id: None,
             },
         );
@@ -296,10 +413,44 @@ mod tests {
                 force: Some(false),
                 playing: Some(true),
                 code_override: None,
+                terminal_strategy: None,
                 request_id: None,
             },
         );
         assert!(!failed.success);
         assert_eq!(store.runtime.last_code, last_good);
+    }
+
+    #[test]
+    fn render_terminals_supports_stack_and_dollar_strategies() {
+        use crate::core::terminal_strategy::{DollarRenderer, SingleOutputRenderer, StackRenderer};
+
+        let terminals = vec![
+            CodeExpr::Call {
+                func: "note".to_string(),
+                args: vec![CodeExpr::Literal(Value::String("c3".to_string()))],
+            },
+            CodeExpr::Call {
+                func: "s".to_string(),
+                args: vec![CodeExpr::Literal(Value::String("bd".to_string()))],
+            },
+        ];
+
+        let stacked = render_terminals(terminals.as_slice(), &StackRenderer);
+        assert_eq!(stacked, "stack(note(\"c3\"), s(\"bd\"))");
+
+        let dollar = render_terminals(terminals.as_slice(), &DollarRenderer);
+        assert_eq!(dollar, "$: note(\"c3\")\n$: s(\"bd\")");
+
+        let single = render_terminals(terminals.as_slice(), &SingleOutputRenderer);
+        assert_eq!(single, "note(\"c3\")");
+
+        // Single terminal — Stack should not wrap in stack().
+        let one = vec![CodeExpr::Call {
+            func: "note".to_string(),
+            args: vec![CodeExpr::Literal(Value::String("e3".to_string()))],
+        }];
+        let stacked_one = render_terminals(one.as_slice(), &StackRenderer);
+        assert_eq!(stacked_one, "note(\"e3\")");
     }
 }

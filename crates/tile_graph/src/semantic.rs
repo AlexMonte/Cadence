@@ -2,19 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::core::diagnostics::{Diagnostic, DiagnosticKind, SemanticResult};
-use crate::core::graph::{Edge, Graph, Node};
-use crate::core::piece::PieceDef;
-use crate::core::piece_registry::PieceRegistry;
-use crate::core::types::{EdgeId, GridPos, TileSide, adjacent_in_direction};
-
-fn diagnostic(kind: DiagnosticKind, site: Option<GridPos>, edge_id: Option<EdgeId>) -> Diagnostic {
-    Diagnostic {
-        kind,
-        site,
-        edge_id,
-    }
-}
+use crate::diagnostics::{Diagnostic, DiagnosticKind, SemanticResult};
+use crate::graph::{Edge, Graph, Node};
+use crate::piece::PieceDef;
+use crate::piece_registry::PieceRegistry;
+use crate::types::{GridPos, TileSide, adjacent_in_direction};
 
 pub(crate) fn incoming_edge_for_param<'a>(
     graph: &'a Graph,
@@ -40,16 +32,15 @@ fn node_output_side(node: &Node, piece: &PieceDef) -> Option<TileSide> {
 }
 
 pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult {
-    let mut errors = Vec::<Diagnostic>::new();
+    let mut diagnostics = Vec::<Diagnostic>::new();
 
     for (pos, node) in &graph.nodes {
         if registry.get(node.piece_id.as_str()).is_none() {
-            errors.push(diagnostic(
+            diagnostics.push(Diagnostic::error(
                 DiagnosticKind::UnknownPiece {
                     piece_id: node.piece_id.clone(),
                 },
                 Some(pos.clone()),
-                None,
             ));
         }
     }
@@ -57,23 +48,27 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
     let mut incoming_slots = BTreeSet::<(GridPos, String)>::new();
     for edge in graph.edges.values() {
         let Some(from_node) = graph.nodes.get(&edge.from) else {
-            errors.push(diagnostic(
-                DiagnosticKind::UnknownNode {
-                    pos: edge.from.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::UnknownNode {
+                        pos: edge.from.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
             continue;
         };
         let Some(to_node) = graph.nodes.get(&edge.to_node) else {
-            errors.push(diagnostic(
-                DiagnosticKind::UnknownNode {
-                    pos: edge.to_node.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::UnknownNode {
+                        pos: edge.to_node.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
             continue;
         };
         let Some(from_piece) = registry.get(from_node.piece_id.as_str()) else {
@@ -84,14 +79,16 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
         };
 
         if !incoming_slots.insert((edge.to_node.clone(), edge.to_param.clone())) {
-            errors.push(diagnostic(
-                DiagnosticKind::DuplicateConnection {
-                    to_node: edge.to_node.clone(),
-                    to_param: edge.to_param.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::DuplicateConnection {
+                        to_node: edge.to_node.clone(),
+                        to_param: edge.to_param.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
         }
 
         let Some(param_def) = to_piece
@@ -100,66 +97,76 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
             .iter()
             .find(|param| param.id == edge.to_param)
         else {
-            errors.push(diagnostic(
-                DiagnosticKind::UnknownParam {
-                    piece_id: to_piece.def().id.clone(),
-                    param: edge.to_param.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::UnknownParam {
+                        piece_id: to_piece.def().id.clone(),
+                        param: edge.to_param.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
             continue;
         };
 
         let target_side = node_param_side(to_node, edge.to_param.as_str(), param_def.side);
         let expected_neighbor = adjacent_in_direction(&edge.to_node, &target_side);
         if expected_neighbor != edge.from {
-            errors.push(diagnostic(
-                DiagnosticKind::NotAdjacent {
-                    from_pos: edge.from.clone(),
-                    to_pos: edge.to_node.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::NotAdjacent {
+                        from_pos: edge.from.clone(),
+                        to_pos: edge.to_node.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
             continue;
         }
 
         if let Some(from_side) = node_output_side(from_node, from_piece.def()) {
             if !from_side.faces(target_side) {
-                errors.push(diagnostic(
-                    DiagnosticKind::SideMismatch {
-                        from_pos: edge.from.clone(),
-                        to_pos: edge.to_node.clone(),
-                        expected_side: target_side,
-                    },
-                    Some(edge.to_node.clone()),
-                    Some(edge.id.clone()),
-                ));
+                diagnostics.push(
+                    Diagnostic::error(
+                        DiagnosticKind::SideMismatch {
+                            from_pos: edge.from.clone(),
+                            to_pos: edge.to_node.clone(),
+                            expected_side: target_side,
+                        },
+                        Some(edge.to_node.clone()),
+                    )
+                    .with_edge(edge.id.clone()),
+                );
             }
         }
 
         let Some(from_output_type) = from_piece.def().output_type.as_ref() else {
-            errors.push(diagnostic(
-                DiagnosticKind::OutputFromTerminal {
-                    position: edge.from.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::OutputFromTerminal {
+                        position: edge.from.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
             continue;
         };
 
         if !param_def.schema.accepts(from_output_type) {
-            errors.push(diagnostic(
-                DiagnosticKind::TypeMismatch {
-                    expected: param_def.schema.expected_port_type(),
-                    got: from_output_type.clone(),
-                    param: edge.to_param.clone(),
-                },
-                Some(edge.to_node.clone()),
-                Some(edge.id.clone()),
-            ));
+            diagnostics.push(
+                Diagnostic::error(
+                    DiagnosticKind::TypeMismatch {
+                        expected: param_def.schema.expected_port_type(),
+                        got: from_output_type.clone(),
+                        param: edge.to_param.clone(),
+                    },
+                    Some(edge.to_node.clone()),
+                )
+                .with_edge(edge.id.clone()),
+            );
         }
     }
 
@@ -174,23 +181,21 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
                 .iter()
                 .find(|param| &param.id == inline_key)
             else {
-                errors.push(diagnostic(
+                diagnostics.push(Diagnostic::error(
                     DiagnosticKind::UnknownParam {
                         piece_id: piece.def().id.clone(),
                         param: inline_key.clone(),
                     },
                     Some(pos.clone()),
-                    None,
                 ));
                 continue;
             };
             if !param_def.schema.can_inline() {
-                errors.push(diagnostic(
+                diagnostics.push(Diagnostic::error(
                     DiagnosticKind::InlineNotAllowed {
                         param: inline_key.clone(),
                     },
                     Some(pos.clone()),
-                    None,
                 ));
                 continue;
             }
@@ -198,7 +203,7 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
                 .schema
                 .validate_inline_value(node.inline_params.get(inline_key).unwrap_or(&Value::Null))
             {
-                errors.push(diagnostic(
+                diagnostics.push(Diagnostic::error(
                     DiagnosticKind::InlineTypeMismatch {
                         param: inline_key.clone(),
                         expected: param_def.schema.expected_port_type(),
@@ -209,7 +214,6 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
                             .unwrap_or(Value::Null),
                     },
                     Some(pos.clone()),
-                    None,
                 ));
             }
         }
@@ -218,13 +222,12 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
             if piece.def().params.iter().any(|param| &param.id == side_key) {
                 continue;
             }
-            errors.push(diagnostic(
+            diagnostics.push(Diagnostic::error(
                 DiagnosticKind::UnknownParam {
                     piece_id: piece.def().id.clone(),
                     param: side_key.clone(),
                 },
                 Some(pos.clone()),
-                None,
             ));
         }
 
@@ -233,12 +236,11 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
             let has_inline = node.inline_params.contains_key(param.id.as_str());
             let has_default = param.schema.default_expr().is_some();
             if param.required && !has_edge && !has_inline && !has_default {
-                errors.push(diagnostic(
+                diagnostics.push(Diagnostic::error(
                     DiagnosticKind::MissingRequiredParam {
                         param: param.id.clone(),
                     },
                     Some(pos.clone()),
-                    None,
                 ));
             }
         }
@@ -300,12 +302,11 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
             .filter(|pos| !ordered.contains(*pos))
             .cloned()
             .collect::<Vec<_>>();
-        errors.push(diagnostic(
+        diagnostics.push(Diagnostic::error(
             DiagnosticKind::Cycle {
                 involved: involved.clone(),
             },
             involved.first().cloned(),
-            None,
         ));
         for pos in involved {
             if !eval_order.iter().any(|item| item == &pos) {
@@ -325,27 +326,26 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
         })
         .collect::<Vec<_>>();
 
-    let terminal = match terminals.len() {
+    match terminals.len() {
         0 => {
-            errors.push(diagnostic(DiagnosticKind::NoTerminalNode, None, None));
-            None
+            diagnostics.push(Diagnostic::error(DiagnosticKind::NoTerminalNode, None));
         }
-        1 => terminals.first().cloned(),
+        1 => {}
         _ => {
-            errors.push(diagnostic(
+            // Multiple terminals: allowed, but surface as a warning so the UI can inform the user.
+            diagnostics.push(Diagnostic::warning(
                 DiagnosticKind::MultipleTerminalNodes {
                     positions: terminals.clone(),
                 },
                 None,
-                None,
             ));
-            None
         }
-    };
+    }
 
-    if let Some(terminal_pos) = terminal.as_ref() {
+    // Backward reachability from all terminals simultaneously.
+    if !terminals.is_empty() {
         let mut reachable = BTreeSet::<GridPos>::new();
-        let mut frontier = vec![terminal_pos.clone()];
+        let mut frontier: Vec<GridPos> = terminals.clone();
         while let Some(next) = frontier.pop() {
             if !reachable.insert(next.clone()) {
                 continue;
@@ -359,20 +359,20 @@ pub fn semantic_pass(graph: &Graph, registry: &PieceRegistry) -> SemanticResult 
 
         for pos in graph.nodes.keys() {
             if !reachable.contains(pos) {
-                errors.push(diagnostic(
+                // UnreachableNode is a warning — isolated stub nodes should not block compilation.
+                diagnostics.push(Diagnostic::warning(
                     DiagnosticKind::UnreachableNode {
                         position: pos.clone(),
                     },
                     Some(pos.clone()),
-                    None,
                 ));
             }
         }
     }
 
     SemanticResult {
-        errors,
+        diagnostics,
         eval_order,
-        terminal,
+        terminals,
     }
 }

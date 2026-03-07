@@ -60,14 +60,54 @@ impl EdgeId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortType {
-    Pattern,
-    Number,
-    Rhythm,
-    Text,
-    Any,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PortType(String);
+
+impl PortType {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn number() -> Self {
+        Self::new("number")
+    }
+
+    pub fn text() -> Self {
+        Self::new("text")
+    }
+
+    pub fn bool() -> Self {
+        Self::new("bool")
+    }
+
+    pub fn any() -> Self {
+        Self::new("any")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_any(&self) -> bool {
+        self.as_str() == "any"
+    }
+
+    pub fn accepts(&self, other: &PortType) -> bool {
+        self.is_any() || other.is_any() || self == other
+    }
+}
+
+impl From<&str> for PortType {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for PortType {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
