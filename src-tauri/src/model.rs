@@ -80,7 +80,9 @@ pub struct CadenceTrickDef {
 pub enum CadenceGraphTarget {
     #[default]
     Runtime,
-    Trick { trick_id: String },
+    Trick {
+        trick_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]

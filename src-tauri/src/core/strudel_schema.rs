@@ -5,9 +5,7 @@ use tile_graph::types::PortType;
 
 const PATTERN_PORT: &str = "pattern";
 const RHYTHM_PORT: &str = "rhythm";
-#[allow(dead_code)]
 const TRIGGER_PORT: &str = "trigger";
-#[allow(dead_code)]
 const SIGNAL_PORT: &str = "signal";
 
 pub fn pattern_port() -> PortType {
@@ -18,25 +16,23 @@ pub fn rhythm_port() -> PortType {
     PortType::new(RHYTHM_PORT)
 }
 
-#[allow(dead_code)]
-pub fn trigger_port() -> PortType {
+fn trigger_port() -> PortType {
     PortType::new(TRIGGER_PORT)
 }
 
-#[allow(dead_code)]
-pub fn signal_port() -> PortType {
+fn signal_port() -> PortType {
     PortType::new(SIGNAL_PORT)
 }
 
-pub fn bool_port() -> PortType {
+fn bool_port() -> PortType {
     PortType::bool()
 }
 
-pub fn number_port() -> PortType {
+fn number_port() -> PortType {
     PortType::number()
 }
 
-pub fn text_port() -> PortType {
+fn text_port() -> PortType {
     PortType::text()
 }
 
@@ -58,32 +54,6 @@ pub fn rhythm_schema(default: impl Into<String>, can_inline: bool) -> ParamSchem
         value_kind: ParamValueKind::Text,
         default: Some(Value::String(default.into())),
         can_inline,
-        inline_mode: ParamInlineMode::Literal,
-        min: None,
-        max: None,
-    }
-}
-
-#[allow(dead_code)]
-pub fn trigger_schema() -> ParamSchema {
-    ParamSchema::Custom {
-        port_type: trigger_port(),
-        value_kind: ParamValueKind::None,
-        default: None,
-        can_inline: false,
-        inline_mode: ParamInlineMode::Literal,
-        min: None,
-        max: None,
-    }
-}
-
-#[allow(dead_code)]
-pub fn signal_schema() -> ParamSchema {
-    ParamSchema::Custom {
-        port_type: signal_port(),
-        value_kind: ParamValueKind::Number,
-        default: None,
-        can_inline: false,
         inline_mode: ParamInlineMode::Literal,
         min: None,
         max: None,

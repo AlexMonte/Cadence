@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::errors::{AppError, AppResult};
-use crate::model::{
-    CadenceProjectDocument, InitStageApplyArgs, InitStageOp, InitStageSnapshotDto,
-};
+use crate::model::{CadenceProjectDocument, InitStageApplyArgs, InitStageOp, InitStageSnapshotDto};
 use crate::store::app_state::AppStore;
 use crate::store::fs_store::{load_project, save_project};
 use crate::store::history::{capture_snapshot, clear_graph_history, record_successful_mutation};
@@ -296,9 +294,7 @@ pub(crate) fn project_open_path_internal(
         .get("schema_version")
         .and_then(Value::as_u64)
         .ok_or_else(|| {
-            AppError::InvalidInput(
-                "unsupported project format: missing schema_version".to_string(),
-            )
+            AppError::InvalidInput("unsupported project format: missing schema_version".to_string())
         })?;
 
     let graph = match schema_version as u32 {
@@ -316,7 +312,7 @@ pub(crate) fn project_open_path_internal(
             return Err(AppError::InvalidInput(format!(
                 "unsupported schema_version: {} (supported: 2, 3)",
                 other
-            )))
+            )));
         }
     };
     validate_project_document(&graph)?;
@@ -385,14 +381,22 @@ fn apply_init_stage_ops(
                     changed = true;
                 }
             }
-            InitStageOp::SampleLoadUpsert { id, source, aliases } => {
+            InitStageOp::SampleLoadUpsert {
+                id,
+                source,
+                aliases,
+            } => {
                 let trimmed_id = id.trim();
                 if trimmed_id.is_empty() {
-                    return Err(AppError::InvalidInput("sample load id cannot be empty".into()));
+                    return Err(AppError::InvalidInput(
+                        "sample load id cannot be empty".into(),
+                    ));
                 }
                 let trimmed_source = source.trim();
                 if trimmed_source.is_empty() {
-                    return Err(AppError::InvalidInput("sample load source cannot be empty".into()));
+                    return Err(AppError::InvalidInput(
+                        "sample load source cannot be empty".into(),
+                    ));
                 }
                 let next = crate::model::CadenceSampleLoad {
                     id: trimmed_id.to_string(),
@@ -431,17 +435,27 @@ fn apply_init_stage_ops(
                 if trimmed_name.is_empty() {
                     return Err(AppError::InvalidInput("trick name cannot be empty".into()));
                 }
-                if project.init_stage.tricks.iter().any(|trick| trick.id == trimmed_id) {
+                if project
+                    .init_stage
+                    .tricks
+                    .iter()
+                    .any(|trick| trick.id == trimmed_id)
+                {
                     return Err(AppError::InvalidInput(format!(
                         "trick id '{}' already exists",
                         trimmed_id
                     )));
                 }
-                project.init_stage.tricks.push(crate::model::CadenceTrickDef {
-                    id: trimmed_id.to_string(),
-                    name: trimmed_name.to_string(),
-                    graph: graph.clone().unwrap_or_else(|| default_trick_graph(trimmed_name)),
-                });
+                project
+                    .init_stage
+                    .tricks
+                    .push(crate::model::CadenceTrickDef {
+                        id: trimmed_id.to_string(),
+                        name: trimmed_name.to_string(),
+                        graph: graph
+                            .clone()
+                            .unwrap_or_else(|| default_trick_graph(trimmed_name)),
+                    });
                 changed = true;
             }
             InitStageOp::TrickRename { id, name } => {
@@ -603,7 +617,8 @@ pub fn project_init_apply(
     let history_snapshot = capture_snapshot(&store);
     let snapshot = {
         let project = active_project_mut(&mut store).map_err(|err| err.to_string())?;
-        let changed = apply_init_stage_ops(project, args.ops.as_slice()).map_err(|err| err.to_string())?;
+        let changed =
+            apply_init_stage_ops(project, args.ops.as_slice()).map_err(|err| err.to_string())?;
         if !changed {
             return Ok(init_stage_snapshot(project));
         }
@@ -722,7 +737,10 @@ mod tests {
     #[test]
     fn default_project_graph_uses_cadence_v3_shape() {
         let project = default_project_graph("demo");
-        assert_eq!(project.schema_version, CadenceProjectDocument::SCHEMA_VERSION);
+        assert_eq!(
+            project.schema_version,
+            CadenceProjectDocument::SCHEMA_VERSION
+        );
         assert!(project.init_stage.cps_expr.is_none());
         assert!(project.init_stage.sample_loads.is_empty());
         assert!(project.init_stage.tricks.is_empty());
@@ -876,7 +894,10 @@ mod tests {
         let dto = project_open_path_internal(&mut store, path.as_path()).expect("open migrated");
         assert_eq!(dto.name, "legacy");
         let opened = store.current_project.as_ref().expect("project");
-        assert_eq!(opened.schema_version, CadenceProjectDocument::SCHEMA_VERSION);
+        assert_eq!(
+            opened.schema_version,
+            CadenceProjectDocument::SCHEMA_VERSION
+        );
         assert!(opened.init_stage.sample_loads.is_empty());
         assert!(opened.init_stage.tricks.is_empty());
 

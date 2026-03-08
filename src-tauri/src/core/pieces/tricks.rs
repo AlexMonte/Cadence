@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::core::strudel_schema::{json_schema, pattern_port, pattern_schema, schema_for_port_type};
+use crate::core::strudel_schema::{json_schema, pattern_schema, schema_for_port_type};
 use crate::model::CadenceTrickInput;
 use tile_graph::code_expr::CodeExpr;
 use tile_graph::piece::{ParamDef, ParamSchema, Piece, PieceDef, PieceInputs};
@@ -14,13 +14,7 @@ pub const TRICK_INPUT_3_ID: &str = "cadence.trick_input_3";
 pub const TRICK_OUTPUT_ID: &str = "cadence.trick_output";
 
 const TRICK_PORT_OPTIONS: [&str; 7] = [
-    "pattern",
-    "number",
-    "text",
-    "rhythm",
-    "bool",
-    "trigger",
-    "signal",
+    "pattern", "number", "text", "rhythm", "bool", "trigger", "signal",
 ];
 
 pub struct TrickInputPiece {
@@ -182,7 +176,7 @@ impl GeneratedTrickPiece {
                 label: label.into(),
                 category: PieceCategory::Trick,
                 params,
-                output_type: Some(pattern_port()),
+                output_type: Some(PortType::any()),
                 output_side: Some(TileSide::East),
                 description: Some("User-defined Cadence trick.".into()),
             },
@@ -198,37 +192,92 @@ impl Piece for GeneratedTrickPiece {
     }
 
     fn compile(&self, inputs: &PieceInputs, inline_params: &BTreeMap<String, Value>) -> CodeExpr {
-        let mut args = Vec::<Option<CodeExpr>>::with_capacity(self.ordered_inputs.len());
+        let resolved = self
+            .ordered_inputs
+            .iter()
+            .map(|input| resolve_generated_input(input, inputs, inline_params))
+            .collect::<Vec<_>>();
 
-        for input in &self.ordered_inputs {
-            let param_id = format!("arg{}", input.slot);
-            let value = inputs
-                .get(param_id.as_str())
-                .cloned()
-                .or_else(|| {
-                    inline_params.get(param_id.as_str()).and_then(|value| {
-                        schema_for_port_type(&input.port_type, input.default_value.clone(), can_inline_for_port(&input.port_type))
-                            .inline_expr(value)
-                    })
-                })
-                .or_else(|| default_expr_for_input(input));
-            args.push(value);
-        }
+        let receiver = resolved.iter().find(|entry| entry.input.is_receiver);
+        if let Some(receiver) = receiver {
+            if receiver.expr.is_none() {
+                let has_explicit_partial_args = resolved
+                    .iter()
+                    .any(|entry| !entry.input.is_receiver && entry.is_explicit);
+                if !has_explicit_partial_args {
+                    return CodeExpr::Ident(self.binding_name.clone());
+                }
 
-        while matches!(args.last(), Some(None)) {
-            args.pop();
-        }
-
-        let mut rendered = Vec::with_capacity(args.len());
-        for value in args {
-            rendered.push(value.unwrap_or_else(|| CodeExpr::Ident("undefined".into())));
+                let placeholder = "pattern";
+                let args = render_call_args(resolved.iter().map(|entry| {
+                    if entry.input.is_receiver {
+                        Some(CodeExpr::Ident(placeholder.into()))
+                    } else {
+                        entry.expr.clone()
+                    }
+                }));
+                return CodeExpr::Raw(format!("({placeholder}) => {}({args})", self.binding_name));
+            }
         }
 
         CodeExpr::Call {
             func: self.binding_name.clone(),
-            args: rendered,
+            args: rendered_call_args(
+                resolved
+                    .into_iter()
+                    .map(|entry| entry.expr)
+                    .collect::<Vec<Option<CodeExpr>>>(),
+            ),
         }
     }
+}
+
+#[derive(Clone)]
+struct ResolvedGeneratedInput<'a> {
+    input: &'a CadenceTrickInput,
+    expr: Option<CodeExpr>,
+    is_explicit: bool,
+}
+
+fn resolve_generated_input<'a>(
+    input: &'a CadenceTrickInput,
+    inputs: &PieceInputs,
+    inline_params: &BTreeMap<String, Value>,
+) -> ResolvedGeneratedInput<'a> {
+    let param_id = format!("arg{}", input.slot);
+    let connected = inputs.get(param_id.as_str()).cloned();
+    let inline = inline_params.get(param_id.as_str()).and_then(|value| {
+        schema_for_port_type(
+            &input.port_type,
+            None,
+            can_inline_for_port(&input.port_type),
+        )
+        .inline_expr(value)
+    });
+    ResolvedGeneratedInput {
+        input,
+        expr: connected.or(inline),
+        is_explicit: inputs.get(param_id.as_str()).is_some()
+            || inline_params.contains_key(param_id.as_str()),
+    }
+}
+
+fn rendered_call_args(args: Vec<Option<CodeExpr>>) -> Vec<CodeExpr> {
+    let mut args = args;
+    while matches!(args.last(), Some(None)) {
+        args.pop();
+    }
+    args.into_iter()
+        .map(|value| value.unwrap_or_else(|| CodeExpr::Ident("undefined".into())))
+        .collect()
+}
+
+fn render_call_args(args: impl IntoIterator<Item = Option<CodeExpr>>) -> String {
+    rendered_call_args(args.into_iter().collect())
+        .into_iter()
+        .map(|arg| arg.render())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn build_generated_params(inputs: &[CadenceTrickInput]) -> Vec<ParamDef> {
@@ -243,8 +292,7 @@ fn build_generated_params(inputs: &[CadenceTrickInput]) -> Vec<ParamDef> {
         } else if !ordered.iter().any(|value| value.is_receiver) && index == 0 {
             TileSide::West
         } else {
-            extra_sides
-                .remove(0.min(extra_sides.len().saturating_sub(1)))
+            extra_sides.remove(0.min(extra_sides.len().saturating_sub(1)))
         };
         params.push(ParamDef {
             id: format!("arg{}", input.slot),
@@ -252,11 +300,11 @@ fn build_generated_params(inputs: &[CadenceTrickInput]) -> Vec<ParamDef> {
             side,
             schema: schema_for_port_type(
                 &input.port_type,
-                input.default_value.clone(),
+                None,
                 can_inline_for_port(&input.port_type),
             ),
             variadic_group: None,
-            required: input.required,
+            required: input.required && !input.is_receiver,
         });
     }
 
@@ -267,11 +315,138 @@ fn can_inline_for_port(port_type: &PortType) -> bool {
     !matches!(port_type.as_str(), "pattern" | "trigger" | "signal")
 }
 
-pub fn default_expr_for_input(input: &CadenceTrickInput) -> Option<CodeExpr> {
+pub(crate) fn default_expr_for_input(input: &CadenceTrickInput) -> Option<CodeExpr> {
     schema_for_port_type(
         &input.port_type,
         input.default_value.clone(),
         can_inline_for_port(&input.port_type),
     )
     .default_expr()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::{Number, Value};
+
+    use super::GeneratedTrickPiece;
+    use crate::core::pieces::transforms::ApplyPiece;
+    use crate::model::CadenceTrickInput;
+    use tile_graph::code_expr::CodeExpr;
+    use tile_graph::piece::{Piece, PieceInputs};
+    use tile_graph::types::{GridPos, PortType};
+
+    fn trick_input(
+        slot: u8,
+        port_type: &str,
+        required: bool,
+        is_receiver: bool,
+    ) -> CadenceTrickInput {
+        CadenceTrickInput {
+            slot,
+            pos: GridPos {
+                col: i32::from(slot),
+                row: 0,
+            },
+            label: format!("arg{slot}"),
+            port_type: PortType::from(port_type),
+            required,
+            is_receiver,
+            default_value: None,
+        }
+    }
+
+    fn sound_expr() -> CodeExpr {
+        CodeExpr::Call {
+            func: "s".into(),
+            args: vec![CodeExpr::Literal(Value::String("bd".into()))],
+        }
+    }
+
+    #[test]
+    fn generated_transform_trick_outputs_any_and_keeps_receiver_optional() {
+        let piece = GeneratedTrickPiece::new(
+            "ritmo",
+            "ritmo",
+            "ritmo",
+            &[trick_input(1, "pattern", true, true)],
+        );
+
+        assert_eq!(piece.def().output_type, Some(PortType::any()));
+        let receiver = piece
+            .def()
+            .params
+            .iter()
+            .find(|param| param.id == "arg1")
+            .expect("receiver param");
+        assert!(!receiver.required);
+    }
+
+    #[test]
+    fn generated_transform_trick_without_receiver_compiles_to_identifier() {
+        let piece = GeneratedTrickPiece::new(
+            "ritmo",
+            "ritmo",
+            "ritmo",
+            &[trick_input(1, "pattern", true, true)],
+        );
+
+        let expr = piece.compile(&PieceInputs::default(), &BTreeMap::new());
+        assert_eq!(expr.render(), "ritmo");
+    }
+
+    #[test]
+    fn generated_transform_trick_with_receiver_compiles_to_invocation() {
+        let piece = GeneratedTrickPiece::new(
+            "ritmo",
+            "ritmo",
+            "ritmo",
+            &[trick_input(1, "pattern", true, true)],
+        );
+        let mut inputs = PieceInputs::default();
+        inputs.scalar.insert("arg1".into(), sound_expr());
+
+        let expr = piece.compile(&inputs, &BTreeMap::new());
+        assert_eq!(expr.render(), "ritmo(s(\"bd\"))");
+    }
+
+    #[test]
+    fn generated_transform_trick_can_feed_apply_as_reference() {
+        let trick_piece = GeneratedTrickPiece::new(
+            "ritmo",
+            "ritmo",
+            "ritmo",
+            &[trick_input(1, "pattern", true, true)],
+        );
+        let trick_ref = trick_piece.compile(&PieceInputs::default(), &BTreeMap::new());
+        let apply = ApplyPiece::new();
+        let mut inputs = PieceInputs::default();
+        inputs.scalar.insert("pattern".into(), sound_expr());
+        inputs.scalar.insert("fn_name".into(), trick_ref);
+
+        let expr = apply.compile(&inputs, &BTreeMap::new());
+        assert_eq!(expr.render(), "s(\"bd\").apply(ritmo)");
+    }
+
+    #[test]
+    fn generated_transform_trick_without_receiver_can_partially_apply_other_args() {
+        let piece = GeneratedTrickPiece::new(
+            "shimmer",
+            "shimmer",
+            "shimmer",
+            &[
+                trick_input(1, "pattern", true, true),
+                trick_input(2, "number", false, false),
+            ],
+        );
+        let mut inputs = PieceInputs::default();
+        inputs.scalar.insert(
+            "arg2".into(),
+            CodeExpr::Literal(Value::Number(Number::from_f64(0.25).expect("number"))),
+        );
+
+        let expr = piece.compile(&inputs, &BTreeMap::new());
+        assert_eq!(expr.render(), "(pattern) => shimmer(pattern, 0.25)");
+    }
 }

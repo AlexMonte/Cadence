@@ -102,7 +102,7 @@ mod tests {
 
     use serde_json::Value;
 
-    use crate::model::{CadenceProjectDocument, CadenceGraphTarget};
+    use crate::model::{CadenceGraphTarget, CadenceProjectDocument};
     use tile_graph::graph::{Edge, Graph, GraphOpRecord, Node};
     use tile_graph::types::{EdgeId, GridPos};
 

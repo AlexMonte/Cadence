@@ -183,7 +183,7 @@
           label: input.label,
           side: input.is_receiver ? "west" : ["west", "south", "north", "east"][index] ?? "south",
           schema: input.port_type === "number" ? numberSchema() : textSchema(""),
-          required: input.required,
+          required: input.required && !input.is_receiver,
         }));
         if (inputs.some((input) => input.port_type === "pattern")) {
           for (const param of params) {
@@ -197,7 +197,7 @@
           label: trick.name,
           category: "trick",
           params,
-          output_type: "pattern",
+          output_type: "any",
           output_side: "east",
           description: "Generated trick tile.",
         };

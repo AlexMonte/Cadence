@@ -87,7 +87,12 @@ impl CadenceDecl {
             .map(CadenceParam::render)
             .collect::<Vec<_>>()
             .join(", ");
-        format!("const {} = ({}) => {}", self.name, params, self.body.render())
+        format!(
+            "const {} = ({}) => {}",
+            self.name,
+            params,
+            self.body.render()
+        )
     }
 }
 

@@ -487,10 +487,8 @@ mod tests {
         let graph = graph();
         let registry = registry();
         let sem = semantic_pass(&graph, &registry);
-        let overrides = BTreeMap::from([(
-            GridPos { col: 0, row: 0 },
-            CodeExpr::Ident("arg1".into()),
-        )]);
+        let overrides =
+            BTreeMap::from([(GridPos { col: 0, row: 0 }, CodeExpr::Ident("arg1".into()))]);
 
         let (expr, _) = compile_node_expr(
             &graph,
@@ -511,8 +509,8 @@ mod tests {
         let registry = registry();
         let sem = semantic_pass(&graph, &registry);
 
-        let program = compile_graph(&graph, &registry, &sem, CompileMode::Preview)
-            .expect("compile graph");
+        let program =
+            compile_graph(&graph, &registry, &sem, CompileMode::Preview).expect("compile graph");
 
         assert_eq!(program.terminals.len(), 1);
         assert_eq!(program.terminals[0].render(), "\"bd\".fast()");

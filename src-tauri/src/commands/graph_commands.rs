@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::commands::TerminalStrategy;
 use crate::commands::project_commands::{
     SharedAppState, active_project, active_project_mut, mark_store_dirty,
 };
 use crate::commands::runtime_commands::render_terminals;
-use crate::commands::TerminalStrategy;
 use crate::core::piece_registry::{runtime_registry, trick_editor_registry};
 use crate::core::project_compile::compile_project;
 use crate::core::terminal_strategy::StackRenderer;
@@ -223,7 +223,10 @@ pub fn graph_compile_preview(
         .map_err(|_| "app state lock poisoned".to_string())?;
     let project = active_project(&store).map_err(|err| err.to_string())?;
     let registry = registry_for_target(project, &target);
-    Ok(compile_preview(graph_for_target(project, &target)?, &registry))
+    Ok(compile_preview(
+        graph_for_target(project, &target)?,
+        &registry,
+    ))
 }
 
 #[tauri::command]
@@ -301,13 +304,7 @@ pub fn graph_apply_ops(
 
     if did_mutate {
         mark_store_dirty(&mut store);
-        record_graph_mutation(
-            &mut store,
-            TargetedGraphOpRecord {
-                target,
-                record,
-            },
-        );
+        record_graph_mutation(&mut store, TargetedGraphOpRecord { target, record });
     }
     if let Some(request_id) = args.request_id.as_ref() {
         store.push_diagnostic("graph_apply_ops", format!("request_id={request_id}"));
