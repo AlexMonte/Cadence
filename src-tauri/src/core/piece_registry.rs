@@ -1,10 +1,10 @@
 use tile_graph::piece_registry::PieceRegistry;
 
 use crate::core::pieces::{
-    ApplyPiece, BankPiece, CatPiece, ClipPiece, FastPiece, GainPiece, MaskPiece, NPiece,
-    NotePiece, NumberPiece, OutputPiece, PanPiece, ReleasePiece, RevPiece, RoomPiece, ScalePiece,
-    SizePiece, SlowPiece, SoundPiece, StackPiece, StructPiece, SustainPiece, TextPiece,
-    TransposePiece, TrickInputPiece, TrickOutputPiece,
+    ApplyPiece, BankPiece, CatPiece, ClipPiece, FastPiece, GainPiece, MaskPiece, NPiece, NotePiece,
+    NumberPiece, OutputPiece, PanPiece, ReleasePiece, RevPiece, RoomPiece, ScalePiece, SizePiece,
+    SlowPiece, SoundPiece, StackPiece, StructPiece, SustainPiece, TextPiece, TransposePiece,
+    TrickInputPiece, TrickOutputPiece,
 };
 use crate::core::tricks::{CompiledTrick, compile_tricks, runtime_trick_pieces};
 use crate::model::CadenceProjectDocument;

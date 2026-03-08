@@ -68,7 +68,10 @@ impl ParamSchema {
             ParamSchema::Bool { .. } => {
                 PortType::bool().accepts(port_type) || PortType::number().accepts(port_type)
             }
-            ParamSchema::Custom { port_type: expected, .. } => expected.accepts(port_type),
+            ParamSchema::Custom {
+                port_type: expected,
+                ..
+            } => expected.accepts(port_type),
         }
     }
 

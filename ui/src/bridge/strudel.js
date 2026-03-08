@@ -172,17 +172,6 @@ function normalizeLegacyScript(code) {
   return String(code ?? "");
 }
 
-function compactSnippet(code, maxLength = 180) {
-  const text = String(code ?? "").replace(/\s+/g, " ").trim();
-  if (!text) {
-    return "";
-  }
-  if (text.length <= maxLength) {
-    return text;
-  }
-  return `${text.slice(0, maxLength)}…`;
-}
-
 function resolveEvaluateFunction(api) {
   if (api && typeof api.evaluate === "function") {
     return api.evaluate.bind(api);
@@ -341,29 +330,6 @@ function setInitSampleStatus(id, next) {
   });
 }
 
-export async function evalProgram(code) {
-  await ensureRuntimeReady();
-  await resumeKnownAudioContexts();
-  const candidates = [normalizeLegacyScript(code)];
-  let lastError = null;
-  let lastSource = "";
-  for (const candidate of candidates) {
-    try {
-      await executeScript(candidate);
-      return;
-    } catch (error) {
-      lastError = error;
-      lastSource = candidate;
-    }
-  }
-  if (lastError) {
-    const message = lastError instanceof Error ? lastError.message : String(lastError);
-    const snippet = compactSnippet(lastSource);
-    const context = snippet ? ` | snippet: ${snippet}` : "";
-    throw new Error(`runtime_eval_failed: ${message}${context}`);
-  }
-}
-
 export async function runCadenceProgram(program) {
   await ensureRuntimeReady();
   await resumeKnownAudioContexts();
@@ -426,16 +392,19 @@ export async function runCadenceProgram(program) {
     }
   }
 
+  const runtimeSections = [];
   for (const declaration of declarationCode) {
-    const source = normalizeLegacyScript(declaration);
-    if (!source.trim()) {
-      continue;
+    const source = normalizeLegacyScript(declaration).trim();
+    if (source) {
+      runtimeSections.push(source);
     }
-    await executeScript(source);
+  }
+  if (runtimeCode) {
+    runtimeSections.push(runtimeCode);
   }
 
-  if (runtimeCode) {
-    await executeScript(runtimeCode);
+  if (runtimeSections.length > 0) {
+    await executeScript(runtimeSections.join("\n"));
   }
 }
 

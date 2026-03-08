@@ -2,13 +2,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
+use crate::core::pieces::tricks::default_expr_for_input;
 use crate::core::pieces::{
     GeneratedTrickPiece, TRICK_INPUT_1_ID, TRICK_INPUT_2_ID, TRICK_INPUT_3_ID, TRICK_OUTPUT_ID,
-    default_expr_for_input,
 };
 use crate::core::strudel_schema::pattern_port;
 use crate::model::{
-    CadenceProjectDocument, CadenceTrickInput, CadenceTrickSignature, CadenceTrickDef,
+    CadenceProjectDocument, CadenceTrickDef, CadenceTrickInput, CadenceTrickSignature,
 };
 use tile_graph::code_expr::CodeExpr;
 use tile_graph::compiler::{CompileMode, compile_node_expr};

@@ -7,9 +7,9 @@ mod store;
 use commands::{
     SharedAppState, diagnostics_snapshot, export_song, graph_apply_ops, graph_compile_preview,
     graph_pick_target_param, graph_piece_catalog, graph_snapshot, history_redo, history_status,
-    history_undo, project_compile_preview, project_create, project_dirty_status, project_init_apply,
-    project_init_snapshot, project_new, project_open, project_open_path, project_pick_open_path,
-    project_pick_save_path, project_prompt_unsaved, project_recovery_clear,
+    history_undo, project_compile_preview, project_create, project_dirty_status,
+    project_init_apply, project_init_snapshot, project_new, project_open, project_open_path,
+    project_pick_open_path, project_pick_save_path, project_prompt_unsaved, project_recovery_clear,
     project_recovery_load, project_recovery_status, project_recovery_write, project_save,
     project_save_as, project_save_current, project_snapshot, runtime_commit,
     runtime_reset_on_project_swap, runtime_status, runtime_stop, ui_set_devtools_visible,

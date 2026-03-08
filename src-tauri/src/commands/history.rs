@@ -55,9 +55,11 @@ fn undo_graph_op_internal(store: &mut AppStore) -> AppResult<HistoryStatusDto> {
         .ok_or_else(|| AppError::InvalidInput("unknown graph target".to_string()))?
         .clone();
     let piece_registry = registry_for_target(project, &record.target);
-    if let Err(errors) =
-        apply_ops_to_graph(&mut candidate, &piece_registry, record.record.undo_ops.as_slice())
-    {
+    if let Err(errors) = apply_ops_to_graph(
+        &mut candidate,
+        &piece_registry,
+        record.record.undo_ops.as_slice(),
+    ) {
         store.graph_history_past.push(record);
         return Err(AppError::InvalidInput(format!(
             "graph undo failed: {}",
@@ -97,9 +99,11 @@ fn redo_graph_op_internal(store: &mut AppStore) -> AppResult<HistoryStatusDto> {
         .ok_or_else(|| AppError::InvalidInput("unknown graph target".to_string()))?
         .clone();
     let piece_registry = registry_for_target(project, &record.target);
-    if let Err(errors) =
-        apply_ops_to_graph(&mut candidate, &piece_registry, record.record.do_ops.as_slice())
-    {
+    if let Err(errors) = apply_ops_to_graph(
+        &mut candidate,
+        &piece_registry,
+        record.record.do_ops.as_slice(),
+    ) {
         store.graph_history_future.push(record);
         return Err(AppError::InvalidInput(format!(
             "graph redo failed: {}",

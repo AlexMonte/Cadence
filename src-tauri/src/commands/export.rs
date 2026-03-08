@@ -77,7 +77,10 @@ pub fn export_song(
         if !compiled.can_render {
             return Ok(ExportSongResultDto {
                 exported: false,
-                message: format!("compile blocked by {} diagnostics", compiled.diagnostics.len()),
+                message: format!(
+                    "compile blocked by {} diagnostics",
+                    compiled.diagnostics.len()
+                ),
                 path: None,
                 diagnostics: compiled.diagnostics,
             });
