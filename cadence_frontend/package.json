@@ -1,0 +1,21 @@
+{
+  "name": "cadence-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "dx serve --web",
+    "build": "dx bundle --platform web --out-dir dist",
+    "preview": "dx serve --web --release",
+    "test:e2e": "npx @playwright/test test --config=playwright.config.mjs",
+    "test:e2e:headed": "npx @playwright/test test --config=playwright.config.mjs --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "vite": "^6.1.1"
+  },
+  "dependencies": {
+    "@codemirror/state": "^6.5.4",
+    "@codemirror/view": "^6.39.16"
+  }
+}

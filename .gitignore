@@ -5,17 +5,17 @@
 /test_project
 /.codex
 /current_project
-cargo.lock
+*.rs.bk
 /.tmp
-/ui/node_modules
-/ui/dist
-/ui/playwright-report
-/ui/test-results
-/node_modules
+/cadence_frontend/node_modules
+/cadence_frontend/dist
+/cadence_frontend/test-results
+/cadence_frontend/playwright-report
+/cadence_frontend/target
 /.claude
 /docs
-package-lock.json
-package.json
+/package-lock.json
+/package.json
 /scripts
 # Local Cadence export files
 /project.cadence.json

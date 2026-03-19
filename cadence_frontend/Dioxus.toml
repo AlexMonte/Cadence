@@ -1,0 +1,15 @@
+[application]
+name = "Cadence"
+
+[web.app]
+title = "Cadence"
+
+[web.watcher]
+reload_html = true
+watch_paths = ["src", "assets", "index.html"]
+
+[web.resource]
+script = []
+
+[web.resource.dev]
+script = []
