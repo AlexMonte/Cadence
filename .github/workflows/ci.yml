@@ -27,28 +27,24 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: ui/package-lock.json
+          cache-dependency-path: cadence_frontend/package-lock.json
 
-      - name: Install UI deps
-        run: npm --prefix ui ci
+      - name: Install Dioxus CLI
+        run: cargo install dioxus-cli --locked --version 0.7.1
 
-      - name: Build UI dist (freshness preflight)
-        run: npm --prefix ui run build
-
-      - name: Backend graph command tests
-        run: cargo test -p src-tauri graph_commands -- --nocapture
-
-      - name: Backend grid regression tests
-        run: cargo test -p src-tauri grid_tests -- --nocapture
+      - name: Install frontend deps
+        run: npm --prefix cadence_frontend ci
 
       - name: Install Playwright browser
-        run: npm --prefix ui exec --package @playwright/test playwright install --with-deps chromium
+        run: npm --prefix cadence_frontend exec playwright install --with-deps chromium
 
-      - name: UI smoke tests
-        run: npm --prefix ui run test:e2e
+      - name: Dev check
+        run: ./dev check

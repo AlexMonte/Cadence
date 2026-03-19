@@ -1,9 +1,11 @@
 [workspace]
-members = ["crates/tile_graph", "src-tauri", "ui"]
+members = ["cadence", "cadence_frontend"]
 resolver = "2"
 
 [workspace.package]
-edition = "2024"
 version = "0.1.0"
+authors = ["AlexMonte <alexmonte@outlook.com>"]
+edition = "2024"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 publish = false
