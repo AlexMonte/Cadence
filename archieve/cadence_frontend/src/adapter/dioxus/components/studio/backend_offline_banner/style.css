@@ -1,0 +1,5 @@
+.backend-unavailable {
+    border: 1px solid var(--color-border-warning);
+    background: var(--color-surface-warning);
+    color: var(--color-text-primary);
+}

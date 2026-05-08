@@ -1,0 +1,4 @@
+.editor-stage {
+    --composer-panel-border: var(--color-border-subtle);
+    --composer-panel-surface: var(--color-surface-primary);
+}

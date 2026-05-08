@@ -1,0 +1,10 @@
+.selection-banner-card,
+.selection-panel,
+.canvas-preview-rail,
+.grid-piece-picker,
+.init-workspace,
+.pixel-modal,
+.dock-panel {
+    border-radius: 0;
+    box-shadow: var(--panel-shadow);
+}

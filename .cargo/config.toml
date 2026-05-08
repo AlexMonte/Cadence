@@ -1,0 +1,2 @@
+[alias]
+check-wasm = "check -p cadence --target wasm32-unknown-unknown --no-default-features"

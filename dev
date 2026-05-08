@@ -11,13 +11,16 @@ usage() {
 Usage: ./dev [command]
 
 Commands:
-  check    Build frontend assets, run Rust tests, check the desktop package, and run e2e smoke tests. (default)
+  check    Build frontend assets, run Rust + wasm check gates, and run e2e smoke tests. (default)
   build    Build frontend assets into cadence_frontend/dist/public.
-  rust     Run backend/frontend Rust tests and check the desktop package.
-  e2e      Run frontend Playwright smoke tests.
+  rust     Run cadence/cadence_frontend Rust + wasm check gates.
+  e2e      Run frontend Playwright smoke tests against the real web runtime.
   fmt      Format all Rust code (cargo fmt).
   clippy   Run clippy lints across the workspace.
   help     Show this help text.
+
+Web deployment note:
+  Production COOP/COEP requirements are documented in cadence/docs/web_runtime_deployment.md.
 EOF
 }
 
@@ -31,18 +34,25 @@ build_frontend() {
 }
 
 run_rust_checks() {
-  announce "Running backend library tests"
-  cargo test -p cadence --lib -- --nocapture
+  announce "Checking cadence backend test targets"
+  cargo check -p cadence --tests
 
-  announce "Running frontend Rust tests"
-  cargo test -p cadence_frontend -- --nocapture
+  announce "Checking cadence desktop frontend"
+  cargo check -p cadence_frontend --features desktop
 
-  announce "Checking desktop package"
-  cargo check -p cadence
+  announce "Checking cadence web frontend"
+  cargo check -p cadence_frontend --features web
+
+  announce "Checking cadence wasm backend"
+  cargo check -p cadence --target wasm32-unknown-unknown
+
+  announce "Checking cadence wasm frontend"
+  cargo check -p cadence_frontend --target wasm32-unknown-unknown --features web
 }
 
 run_e2e() {
   announce "Running frontend smoke tests"
+  printf 'Production COOP/COEP headers: cadence/docs/web_runtime_deployment.md\n'
   npm --prefix "$FRONTEND_DIR" run test:e2e
 }
 

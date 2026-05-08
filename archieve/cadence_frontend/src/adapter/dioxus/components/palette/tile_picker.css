@@ -1,0 +1,285 @@
+.tile-picker,
+.grid-piece-picker {
+    position: fixed;
+    z-index: 1100;
+    width: min(420px, calc(100vw - 32px));
+    min-width: 280px;
+    max-width: calc(100vw - 32px);
+    max-height: min(60vh, 600px);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-2);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    overflow: hidden;
+    background: var(--material-panel-parchment-bg);
+    border: var(--pixel-border-md) solid var(--material-panel-parchment-border);
+    box-shadow: var(--panel-shadow);
+}
+
+.contextual-library-overlay {
+    display: none;
+}
+
+.contextual-library-floating {
+    pointer-events: auto;
+    left: clamp(16px, var(--contextual-left, 96px), calc(100vw - 436px));
+    top: clamp(72px, var(--contextual-top, 120px), calc(100vh - 620px));
+}
+
+.panel-head-copy {
+    display: grid;
+    gap: 4px;
+}
+
+.panel-head-subtitle {
+    color: var(--wood-dark);
+    font-size: var(--px-font-xs);
+    line-height: 1.4;
+}
+
+.compact-drawer-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.picker-category-tab {
+    min-height: 32px;
+    padding: 0 8px;
+    font-size: var(--px-font-xs);
+}
+
+.compact-drawer-search {
+    width: 100%;
+}
+
+.tile-drawer-list,
+.atom-drawer-list,
+.library-atom-drawer-list {
+    min-height: 0;
+}
+
+.tile-drawer-card,
+.atom-drawer-item {
+    height: auto;
+    min-height: 56px;
+    align-items: start;
+    padding: 8px;
+    display: grid;
+    gap: 6px;
+}
+
+.tile-card-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.library-item-title,
+.library-item-glyph,
+.tile-card-kind {
+    font-size: var(--px-font-xs);
+}
+
+.library-item-title,
+.grid-tile-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.library-item-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: var(--ink-muted);
+    font-size: 10px;
+}
+
+.library-item-description,
+.library-empty {
+    margin: 0;
+    color: var(--wood-dark);
+    font-size: var(--px-font-xs);
+    line-height: 1.4;
+}
+
+.library-item-glyph {
+    color: var(--paper-light);
+}
+
+.tile-card-kind {
+    color: var(--ink-muted);
+    text-transform: uppercase;
+}
+
+.tile-card-slot-badge {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 6px;
+    border: var(--pixel-border-sm) solid var(--material-chip-wood-border);
+    background: var(--material-chip-wood-bg);
+    font-size: 10px;
+}
+
+.tile-card-slot-badge strong {
+    color: var(--paper-light);
+}
+
+.tile-picker-head,
+.grid-piece-picker-head {
+    font-size: var(--px-font-xs);
+    color: var(--wood-dark);
+}
+
+.tile-picker-search,
+.grid-piece-picker-search {
+    height: 40px;
+    font-size: var(--px-font-xs);
+    background: var(--material-field-parchment-bg);
+    border: var(--pixel-border-sm) solid var(--material-field-parchment-border);
+    color: var(--wood-line);
+    padding: 0 8px;
+}
+
+.tile-picker-list,
+.grid-piece-picker-list {
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    gap: 4px;
+    align-content: start;
+}
+
+.container-tile-body {
+    display: grid;
+    gap: 6px;
+    width: 100%;
+}
+
+.container-tile-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.container-kind-pill,
+.container-slot-count {
+    font-size: 10px;
+    color: var(--ink-muted);
+}
+
+.container-slot-strip {
+    position: relative;
+    min-height: 28px;
+    width: 100%;
+    border: var(--pixel-border-sm) dashed color-mix(in srgb, var(--mana-blue) 54%, var(--stone-crack));
+    background: color-mix(in srgb, var(--paper-light) 82%, white 18%);
+}
+
+.container-slot-chip {
+    position: absolute;
+    top: 4px;
+    min-width: 20px;
+    height: 18px;
+    padding: 0 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    background: var(--material-chip-stone-bg);
+    border: var(--pixel-border-sm) solid var(--material-chip-stone-border);
+    color: var(--ink-strong);
+}
+
+.container-slot-insert-chip {
+    color: #e5f4db;
+    border-color: color-mix(in srgb, var(--life-green) 68%, black 32%);
+}
+
+.container-slot-filled-chip {
+    color: var(--paper-light);
+}
+
+.container-slot-chip.is-active {
+    border-color: var(--state-selected-outline);
+    color: var(--state-selected-outline);
+    background: color-mix(in srgb, var(--gold) 22%, var(--material-chip-stone-bg));
+}
+
+.tile-body-secondary,
+.container-structure-preview,
+.tile-preview-meta {
+    font-size: 10px;
+    color: var(--wood-dark);
+}
+
+.tile-picker-item,
+.grid-piece-picker-item {
+    width: 100%;
+    text-align: left;
+    height: auto;
+    min-height: 40px;
+    border: var(--pixel-border-sm) solid var(--material-chip-stone-border);
+    background: var(--material-chip-stone-bg);
+    color: var(--ink-strong);
+    font-size: var(--px-font-xs);
+    padding: 8px;
+    display: grid;
+    gap: 6px;
+    align-items: start;
+    cursor: grab;
+}
+
+.tile-picker-item:hover,
+.grid-piece-picker-item:hover {
+    border-color: var(--paper-light);
+}
+
+.tile-picker-item:focus-visible,
+.grid-piece-picker-item:focus-visible {
+    outline: 1px solid var(--select);
+    border-color: var(--select);
+}
+
+body.is-pointer-dragging {
+    user-select: none;
+}
+
+body.is-pointer-dragging .tile-picker-item,
+body.is-pointer-dragging .grid-piece-picker-item,
+body.is-pointer-dragging .voice-node,
+body.is-pointer-dragging .node-output-handle {
+    cursor: grabbing;
+}
+
+.tile-picker-item.piece-generator,
+.grid-piece-picker-item.piece-generator {
+    border-left: 4px solid var(--cat-gen);
+}
+.tile-picker-item.piece-transform,
+.grid-piece-picker-item.piece-transform {
+    border-left: 4px solid var(--cat-trf);
+}
+.tile-picker-item.piece-constant,
+.grid-piece-picker-item.piece-constant {
+    border-left: 4px solid var(--cat-cst);
+}
+.tile-picker-item.piece-output {
+    border-left: 4px solid var(--cat-out);
+}
+.tile-picker-item.piece-control {
+    border-left: 4px solid var(--cat-ctl);
+}
+.tile-picker-item.piece-trick {
+    border-left: 4px solid var(--cat-trk);
+}
+.tile-picker-item.piece-connector {
+    border-left: 4px solid var(--cat-conn);
+}

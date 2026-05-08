@@ -15,7 +15,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Linux dependencies for Tauri build/test
+      - name: Install Linux dependencies for native desktop build/test
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -46,5 +46,8 @@ jobs:
       - name: Install Playwright browser
         run: npm --prefix cadence_frontend exec playwright install --with-deps chromium
 
-      - name: Dev check
-        run: ./dev check
+      - name: Rust and wasm checks
+        run: ./dev rust
+
+      - name: Browser smoke (Chromium, cross-origin isolated)
+        run: ./dev e2e

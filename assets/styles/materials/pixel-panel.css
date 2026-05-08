@@ -1,0 +1,23 @@
+.pixel-panel {
+    border: var(--pixel-border-md) solid var(--pixel-panel-border, var(--material-panel-stone-border));
+    background: var(--pixel-panel-bg, var(--material-panel-stone-bg));
+    box-shadow: var(--panel-shadow);
+}
+
+.pixel-panel--parchment {
+    --pixel-panel-bg: var(--material-panel-parchment-bg);
+    --pixel-panel-border: var(--material-panel-parchment-border);
+    color: var(--wood-line);
+}
+
+.pixel-panel--stone {
+    --pixel-panel-bg: var(--material-panel-stone-bg);
+    --pixel-panel-border: var(--material-panel-stone-border);
+    color: var(--ink-strong);
+}
+
+.pixel-panel--wood {
+    --pixel-panel-bg: var(--material-panel-wood-bg);
+    --pixel-panel-border: var(--material-panel-wood-border);
+    color: var(--paper-light);
+}
