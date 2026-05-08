@@ -17,6 +17,7 @@
 /package-lock.json
 /package.json
 /scripts
+/cadence/assets/generated_samples
 # Local Cadence export files
 /project.cadence.json
 /project.grooveatlas.json

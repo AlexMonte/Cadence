@@ -1,0 +1,44 @@
+.pattern-editor-shell {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+}
+
+.pattern-editor-hero {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px;
+    border: var(--pixel-border-md) solid var(--material-panel-wood-border);
+    background: var(--material-panel-wood-bg);
+}
+
+.pattern-editor-hero-copy {
+    display: grid;
+    gap: 6px;
+}
+
+.pattern-editor-title {
+    margin: 0;
+    color: var(--paper-light);
+    font-size: 18px;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.pattern-editor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.pattern-editor-stage {
+    display: grid;
+    grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+    min-width: 0;
+}

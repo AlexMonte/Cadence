@@ -1,0 +1,79 @@
+.pattern-container-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 192px;
+    min-height: 112px;
+    padding: 12px;
+    border: var(--pixel-border-md) solid var(--material-tile-container-border);
+    background: var(--material-tile-container-bg);
+}
+
+.pattern-container-tile.is-selected {
+    border-color: var(--pattern-container-selected);
+    background: color-mix(in srgb, var(--gold) 16%, var(--material-tile-container-bg));
+}
+
+.pattern-container-tile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.pattern-container-tile-select {
+    min-height: 40px;
+    padding: 0 12px;
+    border: var(--pixel-border-sm) solid var(--material-chip-stone-border);
+    background: var(--material-chip-stone-bg);
+    color: var(--ink-strong);
+    font-size: var(--px-font-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.pattern-container-tile-body {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 10px;
+    min-height: 68px;
+    padding: 10px;
+    border: var(--pixel-border-sm) dashed color-mix(in srgb, var(--mana-blue) 54%, var(--stone-crack));
+    background: color-mix(in srgb, var(--paper-light) 82%, white 18%);
+}
+
+.pattern-container-empty {
+    color: var(--wood-dark);
+    font-size: var(--px-font-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.pattern-atom-tile,
+.pattern-atom-chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 2px 8px;
+    border: 1px solid var(--pattern-atom-border);
+    background: var(--pattern-atom-bg);
+    color: var(--pattern-atom-text);
+    font-size: 11px;
+    line-height: 1;
+    text-transform: lowercase;
+}
+
+.pattern-atom-tile {
+    min-width: 34px;
+}
+
+.pattern-atom-chip {
+    min-width: 0;
+}
+
+.pattern-container-tile .pattern-container-tile {
+    min-width: 192px;
+    min-height: 96px;
+    background: color-mix(in srgb, var(--material-tile-container-bg) 82%, var(--stone-dark) 18%);
+}

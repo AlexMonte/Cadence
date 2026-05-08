@@ -1,0 +1,98 @@
+:root {
+    color-scheme: dark;
+
+    /* Material palette */
+    --ink-strong: #f7f1d7;
+    --ink: #ddd2ab;
+    --ink-muted: #9d9476;
+    --ink-disabled: #675f4a;
+
+    --paper-light: #f4e7bb;
+    --paper: #ddc88f;
+    --paper-aged: #a99063;
+    --paper-shadow: #6f5b3d;
+
+    --wood-light: #b48958;
+    --wood: #8c603a;
+    --wood-dark: #5d3e27;
+    --wood-line: #3f2717;
+
+    --stone-light: #aeb0a9;
+    --stone: #85867f;
+    --stone-dark: #53544f;
+    --stone-crack: #32332f;
+
+    --metal-light: #d5d6d2;
+    --metal: #9c9f9e;
+    --metal-dark: #5f6365;
+
+    --moss: #5e8450;
+    --grass: #86a55a;
+    --gold: #d2ad58;
+    --ruby: #b15a4a;
+    --mana-blue: #628cae;
+    --life-green: #669257;
+
+    /* Semantic categories */
+    --category-generator: var(--life-green);
+    --category-transform: var(--mana-blue);
+    --category-constant: var(--stone);
+    --category-output: var(--gold);
+    --category-control: var(--ruby);
+    --category-container: var(--wood);
+    --category-atom: var(--moss);
+
+    /* App aliases */
+    --bg: #1a120d;
+    --canvas-bg: #2a2218;
+    --grid-line: rgba(74, 62, 47, 0.46);
+    --pattern-container-bg: rgba(112, 85, 54, 0.28);
+    --pattern-container-border: color-mix(in srgb, var(--category-container) 68%, black 20%);
+    --pattern-container-selected: var(--gold);
+    --pattern-atom-bg: rgba(94, 132, 80, 0.24);
+    --pattern-atom-border: color-mix(in srgb, var(--category-atom) 70%, black 16%);
+    --pattern-atom-text: var(--ink-strong);
+
+    --surface: #241a12;
+    --surface-1: #2d2117;
+    --surface-2: #38291d;
+    --border: #59432e;
+    --border-soft: #433121;
+
+    --text: var(--ink);
+    --text-strong: var(--ink-strong);
+    --text-muted: var(--ink-muted);
+    --text-dim: var(--ink-disabled);
+    --text-soft: #cdbf99;
+
+    --select: var(--gold);
+    --select-bg: rgba(210, 173, 88, 0.18);
+    --armed: var(--life-green);
+    --edge: #aab09f;
+    --edge-select: #ede7cf;
+    --edge-invalid: #bb6a55;
+    --drop-valid: #7da464;
+    --drop-invalid: #b35a49;
+    --move-valid: #6f9bad;
+    --move-swap: #d19f5c;
+
+    --port-in: #c06f5e;
+    --port-out: #6fa261;
+
+    /* Compatibility aliases for existing component CSS */
+    --color-app-bg: var(--bg);
+    --color-surface-primary: var(--surface-1);
+    --color-surface-secondary: var(--surface-2);
+    --color-surface-warning: color-mix(in srgb, var(--wood) 44%, var(--paper-aged));
+    --color-border-subtle: color-mix(in srgb, var(--stone-dark) 72%, transparent);
+    --color-border-warning: color-mix(in srgb, var(--gold) 65%, var(--wood-dark));
+    --color-text-primary: var(--text-strong);
+    --color-text-secondary: var(--text);
+    --color-text-muted: var(--text-muted);
+    --color-accent: var(--gold);
+    --color-accent-muted: color-mix(in srgb, var(--gold) 22%, transparent);
+    --color-success-muted: color-mix(in srgb, var(--life-green) 24%, transparent);
+    --color-warning-muted: color-mix(in srgb, var(--gold) 24%, transparent);
+    --color-info-muted: color-mix(in srgb, var(--mana-blue) 22%, transparent);
+    --color-danger-muted: color-mix(in srgb, var(--ruby) 24%, transparent);
+}

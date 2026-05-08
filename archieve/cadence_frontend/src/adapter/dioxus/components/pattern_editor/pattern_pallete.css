@@ -1,0 +1,101 @@
+.pattern-palette-column {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+}
+
+.pattern-palette-section {
+    display: grid;
+    gap: 10px;
+    padding: 14px;
+    border: var(--pixel-border-md) solid var(--material-panel-stone-border);
+    background: var(--material-panel-stone-bg);
+}
+
+.pattern-palette-header {
+    display: grid;
+    gap: 6px;
+}
+
+.pattern-tile-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.pattern-atom-palette {
+    max-height: 320px;
+    overflow: auto;
+    align-content: flex-start;
+    padding-right: 4px;
+}
+
+.pattern-palette-tile {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 52px;
+    min-height: 52px;
+    padding: 8px 12px;
+    border: var(--pixel-border-sm) solid var(--material-chip-stone-border);
+    background: var(--material-chip-stone-bg);
+    color: var(--ink-strong);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.pattern-palette-tile:hover {
+    border-color: var(--state-selected-outline);
+    color: var(--paper-light);
+}
+
+.pattern-palette-container {
+    min-width: 120px;
+    min-height: 72px;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: space-between;
+    background: var(--material-tile-container-bg);
+}
+
+.pattern-palette-tile-glyph {
+    font-size: 24px;
+    line-height: 1;
+    color: var(--paper-light);
+}
+
+.pattern-palette-tile-name {
+    font-size: var(--px-font-xs);
+    color: var(--ink-strong);
+}
+
+.pattern-palette-atom {
+    min-width: 40px;
+    min-height: 32px;
+    padding: 4px 8px;
+    border-width: 1px;
+    border-color: var(--pattern-atom-border);
+    background: var(--pattern-atom-bg);
+    color: var(--pattern-atom-text);
+    font-size: var(--px-font-xs);
+    line-height: 1;
+    text-transform: lowercase;
+}
+
+.pattern-palette-scalar {
+    min-width: 120px;
+    min-height: 52px;
+    justify-content: center;
+}
+.pattern-scalar-tile {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+}
+
+.pattern-scalar-input {
+    min-height: 48px;
+    border: var(--pixel-border-sm) solid var(--material-field-parchment-border);
+    background: var(--material-field-parchment-bg);
+}

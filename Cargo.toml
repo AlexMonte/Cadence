@@ -1,11 +1,139 @@
-[workspace]
-members = ["cadence", "cadence_frontend"]
-resolver = "2"
-
-[workspace.package]
+[package]
+name = "cadence"
 version = "0.1.0"
 authors = ["AlexMonte <alexmonte@outlook.com>"]
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 publish = false
+
+
+
+[dependencies]
+bevy = { version = "0.17", features = ["webgl2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tessera = { path = "../tessera" }
+cadence_core = { path = "../cadence_core", package = "cadence_core" }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+rfd = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.15"
+directories = "5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+manganis = "0.7.3"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "DedicatedWorkerGlobalScope",
+    "Document",
+    "Event",
+    "File",
+    "FileList",
+    "FileReader",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Storage",
+    "Url",
+    "Window",
+] }
+
+[dev-dependencies]
+proptest = "1.6.0"
+
+[features]
+default = [
+    # Default to a native dev build.
+    # Use `cargo check-wasm` for the wasm-safe path, because native hot-reload
+    # watchers in `dev_native` do not compile for wasm targets.
+    "dev_native",
+]
+dev = [
+    # Improve compile times for dev builds by linking Bevy as a dynamic library.
+    "bevy/dynamic_linking",
+    "bevy/bevy_dev_tools",
+    "bevy/bevy_ui_debug",
+    # Improve error messages coming from Bevy
+    "bevy/track_location",
+]
+dev_native = [
+    "dev",
+    # Enable asset hot reloading for native dev builds.
+    "bevy/file_watcher",
+    # Enable embedded asset hot reloading for native dev builds.
+    "bevy/embedded_watcher",
+]
+
+[package.metadata.bevy_cli.release]
+# Disable debug functionality in release builds.
+default_features = false
+
+[package.metadata.bevy_cli.web]
+# Tell the random providing crates to use the wasm_js backend on Web.
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
+[package.metadata.bevy_cli.web.dev]
+# Disable native-only debug functionality in web builds.
+default_features = false
+features = ["dev"]
+
+[lints.rust]
+# Mark `bevy_lint` as a valid `cfg`, as it is set when the Bevy linter runs.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bevy_lint)"] }
+
+[lints.clippy]
+# Bevy supplies arguments to systems via dependency injection, so it's natural for systems to
+# request more than 7 arguments, which would undesirably trigger this lint.
+too_many_arguments = "allow"
+# Queries may access many components, which would undesirably trigger this lint.
+type_complexity = "allow"
+# Make sure macros use their standard braces, such as `[]` for `bevy_ecs::children!`.
+nonstandard_macro_braces = "warn"
+
+# You can configure the warning levels of Bevy lints here. For a list of all lints, see:
+# <https://thebevyflock.github.io/bevy_cli/bevy_lint/lints/>
+[package.metadata.bevy_lint]
+# panicking_methods = "deny"
+# pedantic = "warn"
+
+# Compile with Performance Optimizations:
+# <https://bevyengine.org/learn/quick-start/getting-started/setup/#compile-with-performance-optimizations>
+
+# Enable a small amount of optimization in the dev profile.
+[profile.dev]
+opt-level = 1
+
+# Enable a large amount of optimization in the dev profile for dependencies.
+[profile.dev.package."*"]
+opt-level = 3
+
+# Remove expensive debug assertions due to <https://github.com/bevyengine/bevy/issues/14291>
+[profile.dev.package.wgpu-types]
+debug-assertions = false
+
+[profile.release]
+# Compile the entire crate as one unit.
+# Slows compile times, marginal improvements.
+codegen-units = 1
+# Do a second optimization pass over the entire program, including dependencies.
+# Slows compile times, marginal improvements.
+lto = "thin"
+
+# This profile will be used for `bevy run web` automatically
+[profile.web-release]
+# Default to release profile values.
+inherits = "release"
+# Optimize with size in mind (also try "z", sometimes it is better).
+# Slightly slows compile times, great improvements to file size and runtime performance.
+opt-level = "s"
+# Strip all debugging information from the binary to slightly reduce file size.
+strip = "debuginfo"

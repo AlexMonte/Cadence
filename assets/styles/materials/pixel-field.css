@@ -1,0 +1,8 @@
+.pixel-field {
+    min-height: var(--control-h-md);
+    padding: 0 var(--space-2);
+    border: var(--pixel-border-sm) solid var(--material-field-parchment-border);
+    background: var(--material-field-parchment-bg);
+    color: var(--wood-line);
+    box-shadow: inset 0 var(--pixel-unit) 0 rgba(255, 255, 255, 0.2);
+}
