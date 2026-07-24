@@ -1,2 +1,11 @@
 [alias]
-check-wasm = "check -p cadence --target wasm32-unknown-unknown --no-default-features"
+check-wasm = "check -p musaic --target wasm32-unknown-unknown --no-default-features"
+# Unoptimized local crates + parallel codegen; use while iterating on musaic/cadence/tessera.
+check-fast = "check -p musaic --profile dev-fast"
+run-fast = "run -p musaic --profile dev-fast"
+
+[build]
+# Mark `bevy_lint` as a valid `cfg`, as it is set when the Bevy linter runs.
+rustflags = ["--check-cfg=cfg(bevy_lint)"]
+# Share build cache across workspace members (default target dir is already workspace-root/target).
+incremental = true

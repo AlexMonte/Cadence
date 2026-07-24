@@ -1,96 +1,29 @@
-[package]
-name = "cadence"
-version = "0.1.0"
-authors = ["AlexMonte <alexmonte@outlook.com>"]
+[workspace]
+resolver = "3"
+members = ["cadence", "musaic", "tessera"]
+
+[workspace.package]
 edition = "2024"
-rust-version = "1.85"
+authors = ["AlexMonte <alexmonte@outlook.com>"]
 license = "MIT OR Apache-2.0"
-publish = false
+rust-version = "1.85"
 
+[workspace.dependencies]
+# Internal crates: depend on these from members via `{ workspace = true }`.
+cadence = { path = "cadence" }
+tessera = { path = "tessera" }
+# `load_up` lives outside this workspace; the path is resolved from the workspace root.
+load_up = { path = "../load_up/crates/load_up" }
 
-
-[dependencies]
-bevy = { version = "0.17", features = ["webgl2"] }
-serde = { version = "1", features = ["derive"] }
+# Shared third-party dependencies, unified across all member crates.
+serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
-tessera = { path = "../tessera" }
-cadence_core = { path = "../cadence_core", package = "cadence_core" }
-uuid = { version = "1", features = ["v4", "serde", "js"] }
-rfd = "0.15"
-symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+thiserror = "2.0.18"
+bevy_app = { version = "0.18.1", default-features = false, features = ["bevy_reflect"] }
+bevy_ecs = { version = "0.18.1", default-features = false, features = ["bevy_reflect"] }
+bevy_reflect = { version = "0.18.1", default-features = false }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-cpal = "0.15"
-directories = "5"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "0.3"
-manganis = "0.7.3"
-serde-wasm-bindgen = "0.6"
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = [
-    "Blob",
-    "BlobPropertyBag",
-    "DedicatedWorkerGlobalScope",
-    "Document",
-    "Event",
-    "File",
-    "FileList",
-    "FileReader",
-    "HtmlAnchorElement",
-    "HtmlElement",
-    "HtmlInputElement",
-    "Storage",
-    "Url",
-    "Window",
-] }
-
-[dev-dependencies]
-proptest = "1.6.0"
-
-[features]
-default = [
-    # Default to a native dev build.
-    # Use `cargo check-wasm` for the wasm-safe path, because native hot-reload
-    # watchers in `dev_native` do not compile for wasm targets.
-    "dev_native",
-]
-dev = [
-    # Improve compile times for dev builds by linking Bevy as a dynamic library.
-    "bevy/dynamic_linking",
-    "bevy/bevy_dev_tools",
-    "bevy/bevy_ui_debug",
-    # Improve error messages coming from Bevy
-    "bevy/track_location",
-]
-dev_native = [
-    "dev",
-    # Enable asset hot reloading for native dev builds.
-    "bevy/file_watcher",
-    # Enable embedded asset hot reloading for native dev builds.
-    "bevy/embedded_watcher",
-]
-
-[package.metadata.bevy_cli.release]
-# Disable debug functionality in release builds.
-default_features = false
-
-[package.metadata.bevy_cli.web]
-# Tell the random providing crates to use the wasm_js backend on Web.
-rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
-
-[package.metadata.bevy_cli.web.dev]
-# Disable native-only debug functionality in web builds.
-default_features = false
-features = ["dev"]
-
-[lints.rust]
-# Mark `bevy_lint` as a valid `cfg`, as it is set when the Bevy linter runs.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bevy_lint)"] }
-
-[lints.clippy]
+[workspace.lints.clippy]
 # Bevy supplies arguments to systems via dependency injection, so it's natural for systems to
 # request more than 7 arguments, which would undesirably trigger this lint.
 too_many_arguments = "allow"
@@ -99,22 +32,62 @@ type_complexity = "allow"
 # Make sure macros use their standard braces, such as `[]` for `bevy_ecs::children!`.
 nonstandard_macro_braces = "warn"
 
-# You can configure the warning levels of Bevy lints here. For a list of all lints, see:
-# <https://thebevyflock.github.io/bevy_cli/bevy_lint/lints/>
-[package.metadata.bevy_lint]
-# panicking_methods = "deny"
-# pedantic = "warn"
+# Profiles are only honored at the workspace root, so they live here rather than
+# in any member crate.
+#
+# Dev strategy (Bevy-style):
+# - Dependencies compile with opt-level 3 so hot paths in Bevy/crates.io stay fast.
+# - Workspace members (musaic/cadence/tessera) also use opt-level 3 — they run every
+#   frame (board sync, lowering, projection) and opt-level 1 made that painfully slow.
+# - Use `--profile dev-fast` when iterating on local code and you want quicker rebuilds.
 
-# Compile with Performance Optimizations:
-# <https://bevyengine.org/learn/quick-start/getting-started/setup/#compile-with-performance-optimizations>
-
-# Enable a small amount of optimization in the dev profile.
 [profile.dev]
 opt-level = 1
+# Line tables only: enough for backtraces, faster than full debug info.
+debug = 1
+# On macOS, unpacked split debug info links much faster than bundled dSYM.
+split-debuginfo = "unpacked"
 
-# Enable a large amount of optimization in the dev profile for dependencies.
+# All dependencies compile optimized even in dev builds.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Hot workspace crates: keep fully optimized in the default dev profile.
+[profile.dev.package.musaic]
+opt-level = 3
+
+[profile.dev.package.cadence]
+opt-level = 3
+
+[profile.dev.package.tessera]
+opt-level = 3
+
+[profile.dev.package.bevy]
+opt-level = 3
+
+[profile.dev.package.bevy_internal]
+opt-level = 3
+
+# Build scripts and proc-macros: compile optimized so they don't slow every rebuild.
+[profile.dev.build-override]
+opt-level = 3
+
+# Faster iteration when editing local code; deps stay optimized via inherits = "dev".
+[profile.dev-fast]
+inherits = "dev"
+codegen-units = 256
+
+[profile.dev-fast.package.musaic]
+opt-level = 0
+codegen-units = 256
+
+[profile.dev-fast.package.cadence]
+opt-level = 0
+codegen-units = 256
+
+[profile.dev-fast.package.tessera]
+opt-level = 0
+codegen-units = 256
 
 # Remove expensive debug assertions due to <https://github.com/bevyengine/bevy/issues/14291>
 [profile.dev.package.wgpu-types]
