@@ -2,6 +2,8 @@
 
 use bevy::prelude::*;
 
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+
 #[derive(Component)]
 pub struct PrimaryWindowCamera;
 
@@ -13,13 +15,13 @@ impl Plugin for AppWindowPlugin {
     }
 }
 
-fn spawn_primary_window_camera(mut commands: Commands) {
+fn spawn_primary_window_camera(mut commands: Commands, theme: Res<MusaicUiTheme>) {
     commands.spawn((
         PrimaryWindowCamera,
         Camera2d,
         Camera {
             order: 0,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.08, 0.09, 0.12)),
+            clear_color: ClearColorConfig::Custom(theme.chrome.window_bg),
             ..default()
         },
     ));

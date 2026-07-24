@@ -14,6 +14,43 @@ an exception.
 
 ---
 
+## Frame schedule — `MusaicSet`
+
+**Pattern:** Host-owned pipeline order. Kernel Bevy glue exposes nestable
+sets; Musaic places them inside `MusaicSet` so compile/tick cannot race
+bare `Update`.
+
+| Stage | `MusaicSet` | Who runs |
+|-------|-------------|----------|
+| Input | `Input` | editor interaction |
+| Commands | `Commands` | `dispatch_commands` (+ staging) |
+| Document mutation | `DocumentMutation` | graph mutations after commands |
+| Compile | `Compile` | document→`TesseraBoard` → nested `TesseraSystems` → collect IR |
+| Lower | `Lower` | Pattern IR → Cadence `Score` / `ActiveScores` |
+| Runtime | `Runtime` | nested `CadenceSet::{ReplaceScores, Tick}` + transport/preview/audio pump |
+| Scene sync | `SceneSync` | `VisibleBoardState` + UI projection |
+| Render UI | `RenderUi` | shell / inspector paint |
+
+**Compile order (same frame):**
+`sync_document_to_tessera_board` → `TesseraSystems` (authored sync →
+`compile_on_request` → tile sync) → `collect_tessera_compile_output`.
+
+**Runtime order (same frame):**
+`CadenceSet::ReplaceScores` → `sync_transport_to_playback` →
+`CadenceSet::Tick` → transport clock readback → preview dirty/project →
+audio pump (after `Tick`).
+
+Nesting is configured in `MusaicPlugin` after `TesseraPlugin` /
+`PlaybackPlugin` (`CadencePlugin`) are added:
+`TesseraSystems.in_set(Compile)`, both `CadenceSet` variants
+`.in_set(Runtime)`.
+
+**Forbidden:** scheduling Tessera compile or Cadence tick in bare `Update`
+from Musaic host code; relying on accidental plugin registration order for
+correctness.
+
+---
+
 ## Board camera — `infrastructure/ui/camera_rig.rs`
 
 **Pattern:** Camera rig (dolly-style): request queue → single arbitrator →
@@ -36,6 +73,8 @@ modes. Never a fixed per-frame lerp.
 
 **Producers (emit requests only):**
 
+- `OnEnter(AppState::Editor)` — `CameraRequest::FrameSurface(OpenDocument)`
+  (never poke `BoardCameraRig` directly).
 - `board_camera_nav.rs` — pointer pan / orbit / edge scroll (screen deltas;
   the rig converts to plane units using its own yaw, never the smoothed
   transform).

@@ -7,7 +7,7 @@ use super::types::{EditorCommand, EditorInverse};
 use crate::application::editor::transaction::{
     self, EditorTransactionResult, Invalidation, TimelineSourceResolver,
 };
-use crate::application::editor::workspace::{FocusTarget, NavigationMode};
+use crate::application::editor::workspace::FocusTarget;
 use crate::application::editor::{EditorAttention, SelectionState};
 use crate::domain::DomainError;
 use crate::domain::document::{DocumentQueries, MusaicDocument, apply_document_patch};
@@ -48,15 +48,6 @@ where
                 .expect("FocusTarget::None is always valid");
             EditorTransactionResult::accepted(Invalidation::none())
         }
-        EditorCommand::EnterTimelineMode => {
-            attention.enter_navigation(NavigationMode::Timeline);
-            EditorTransactionResult::accepted(Invalidation::none())
-        }
-        EditorCommand::EnterCompose => {
-            attention.enter_compose();
-            EditorTransactionResult::accepted(Invalidation::none())
-        }
-
         // ── Durable document mutations ──
         EditorCommand::PlaceTile { target, tile } => {
             transaction::place_tile(document, board, attention, selection, *target, tile.clone())
@@ -103,6 +94,8 @@ where
         | EditorCommand::AbortConnection
         | EditorCommand::ToggleDrawer
         | EditorCommand::ToggleMinimap
+        | EditorCommand::EnterTimelineMode
+        | EditorCommand::EnterCompose
         | EditorCommand::SetViewSettings { .. }
         | EditorCommand::NewProject
         | EditorCommand::OpenProject { .. }

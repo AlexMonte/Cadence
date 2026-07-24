@@ -8,10 +8,10 @@ use crate::{
     application::pipeline::runtime::{RuntimePreviewSnapshot, TimelineEventKind},
 };
 
-use super::{
-    InspectorButtonAction, artist_palette::ArtistPalette, controls::musaic_clickable,
-    tile_shell::PANEL_INSET_BG,
-};
+use crate::infrastructure::ui::theme::{ArtistPalette, MusaicUiTheme};
+use crate::infrastructure::ui::widgets::musaic_button;
+
+use super::InspectorButtonAction;
 
 const TRACK_LABEL_WIDTH: f32 = 72.0;
 const TRACK_ROW_HEIGHT: f32 = 28.0;
@@ -35,8 +35,6 @@ pub struct TimelinePanHandle;
 #[derive(Component)]
 pub struct TimelinePlayhead;
 
-const PLAYHEAD_COLOR: Color = Color::srgba(1.0, 0.85, 0.2, 0.9);
-
 #[derive(Resource, Default)]
 pub struct TimelinePanState {
     pub offset_x: f32,
@@ -45,6 +43,7 @@ pub struct TimelinePanState {
 
 pub fn spawn_timeline_content(
     band: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     preview_snapshot: &RuntimePreviewSnapshot,
 ) {
     band.spawn((UiText::new("Piano roll"), ThemedText));
@@ -65,10 +64,10 @@ pub fn spawn_timeline_content(
             min_height: px(56.0),
             position_type: PositionType::Relative,
             overflow: Overflow::clip(),
-            border_radius: BorderRadius::all(px(6.0)),
+            border_radius: BorderRadius::all(px(theme.radii.md)),
             ..default()
         },
-        BackgroundColor(PANEL_INSET_BG),
+        BackgroundColor(theme.chrome.panel_inset),
         Pickable::default(),
     ))
     .observe(on_timeline_pan_drag_start)
@@ -85,7 +84,7 @@ pub fn spawn_timeline_content(
                 left: px(0.0),
                 ..default()
             },
-            BackgroundColor(PLAYHEAD_COLOR),
+            BackgroundColor(theme.chrome.playhead),
             GlobalZIndex(5),
         ));
         viewport
@@ -188,7 +187,7 @@ fn spawn_timeline_tracks(
                             };
 
                             lane.spawn((
-                                musaic_clickable(
+                                musaic_button(
                                     Node {
                                         position_type: PositionType::Absolute,
                                         left: px(left),
@@ -275,6 +274,7 @@ pub fn apply_timeline_pan(scroll: &mut Node, pan: &TimelinePanState) {
 
 pub fn sync_timeline_content(
     mut commands: Commands,
+    theme: Res<'_, MusaicUiTheme>,
     preview: Res<'_, RuntimePreviewSnapshot>,
     dirty: Res<'_, crate::application::pipeline::ui_projection::UiDirty>,
     content_roots: Query<Entity, With<UiTimelineContent>>,
@@ -288,7 +288,7 @@ pub fn sync_timeline_content(
     for root in content_roots.iter() {
         commands.entity(root).despawn_children();
         commands.entity(root).with_children(|band| {
-            spawn_timeline_content(band, &preview);
+            spawn_timeline_content(band, &theme, &preview);
         });
     }
 }

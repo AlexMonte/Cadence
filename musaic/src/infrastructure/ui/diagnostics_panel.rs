@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::application::pipeline::ui_projection::{EditorUiProjection, UiDirty};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
 
 #[derive(Component)]
 pub struct DiagnosticsBanner;
@@ -24,7 +25,7 @@ pub fn sync_diagnostics_banner(
     }
 }
 
-pub fn spawn_diagnostics_banner(mut commands: Commands) {
+pub fn spawn_diagnostics_banner(mut commands: Commands, theme: Res<MusaicUiTheme>) {
     // Anchored above the bottom tab bar, right-aligned, so it never covers
     // the breadcrumbs.
     commands.spawn((
@@ -36,10 +37,10 @@ pub fn spawn_diagnostics_banner(mut commands: Commands) {
             bottom: Val::Px(58.0),
             right: Val::Px(12.0),
             max_width: Val::Percent(60.0),
-            padding: UiRect::all(Val::Px(6.0)),
+            padding: UiRect::all(Val::Px(theme.spacing.sm)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.1, 0.1, 0.12, 0.85)),
+        BackgroundColor(theme.chrome.diagnostics_bg),
         GlobalZIndex(200),
     ));
 }

@@ -9,9 +9,10 @@ use super::launch::EditorLaunchIntent;
 use super::ui::{EditorLaunchIntentHolder, MainMenuUiPlugin};
 use super::unsaved_dialog::{ExitTarget, UnsavedChangesPrompt, UnsavedDialogPlugin, request_exit};
 
-pub struct MenuPlugin;
+/// Boot MainMenu + Esc-to-leave / save shortcuts — not editor shell chrome.
+pub struct MainMenuPlugin;
 
-impl Plugin for MenuPlugin {
+impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((MainMenuUiPlugin, UnsavedDialogPlugin))
             .add_systems(OnEnter(AppState::Boot), advance_from_boot)

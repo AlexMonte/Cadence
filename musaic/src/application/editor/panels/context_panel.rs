@@ -507,6 +507,44 @@ pub fn placement_target_label(target: &PlacementTarget) -> String {
     }
 }
 
+/// Short catalog label for an armed / palette spawn kind.
+pub fn drawer_item_short_label(spawn: &TileSpawnKind) -> String {
+    labeled_tile_drawer_items()
+        .into_iter()
+        .find(|item| &item.spawn == spawn)
+        .map(|item| item.label)
+        .or_else(|| {
+            atom_tile_drawer_rows()
+                .into_iter()
+                .flat_map(|(_, row)| row)
+                .find(|item| &item.spawn == spawn)
+                .map(|item| item.label)
+        })
+        .unwrap_or_else(|| format!("{spawn:?}"))
+}
+
+/// Minimap surface navigation buttons (Home + active container).
+pub fn minimap_surface_buttons(
+    queries: &DocumentQueries<'_>,
+    active_surface: BoardSurfaceId,
+) -> Vec<(String, BoardSurfaceId)> {
+    let mut out = Vec::new();
+    let root = queries.document.root_surface;
+    out.push(("Home".to_string(), root));
+    if active_surface != root {
+        if let Some(kind) = queries.surface_kind(active_surface) {
+            let label = match kind {
+                BoardSurfaceKind::RootBoard => "Home".to_string(),
+                BoardSurfaceKind::ContainerStack { container } => container.0.to_string(),
+            };
+            if !out.iter().any(|(_, s)| *s == active_surface) {
+                out.push((label, active_surface));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use tessera::prelude::{ContainerId, NodeId};

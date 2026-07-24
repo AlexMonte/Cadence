@@ -9,7 +9,7 @@ mod systems;
 
 pub use components::*;
 pub use events::*;
-pub use plugin::TesseraPlugin;
+pub use plugin::{TesseraPlugin, TesseraSystems};
 pub use reflect::{register_tessera_types, type_registry_contains};
 pub use resources::*;
 pub use systems::*;

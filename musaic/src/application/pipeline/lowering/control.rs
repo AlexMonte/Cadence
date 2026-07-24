@@ -1,15 +1,15 @@
 use cadence::prelude::{
-    ControlKey, ControlScore, ControlTile, ControlTrack, ControlValue, SignedUnitValue, Symbol,
-    Time as CycleTime, UnitValue,
+    ControlKey, ControlScore, ControlTile, ControlTrack, ControlValue, Score, SignedUnitValue,
+    Symbol, Time as CycleTime, UnitValue, WeightedControlScore, WeightedScore,
 };
 use tessera::prelude::{
     ControlEvent, ControlKeyIr, ControlStream, ControlValueIr, EventField, FieldValue,
-    PatternNodeIr, Rational, ScalarStream,
+    PatternNodeIr, Rational, ScalarStream, WeightedPatternIr,
 };
 
 use crate::infrastructure::diagnostics::{AppDiagnostic, LoweringDiagnostic};
 
-use super::{LoweringCtx, rational_to_time};
+use super::{LoweringCtx, lower_priority_merge_policy, rational_to_time};
 
 /// Event-shaped and/or control-shaped lowering result.
 pub(super) struct LoweredPattern {
@@ -235,24 +235,22 @@ pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) ->
                 .collect(),
             ctx,
         ),
-        PatternNodeIr::CycleRoute { children } => LoweredPattern {
-            events: None,
-            controls: Some(ControlScore::cycle_route(
-                children
-                    .iter()
-                    .filter_map(|child| lower_control_node(child, ctx).controls)
-                    .collect(),
-            )),
-        },
-        PatternNodeIr::CycleSlots { children } => LoweredPattern {
-            events: None,
-            controls: Some(ControlScore::cycle_slots(
-                children
-                    .iter()
-                    .filter_map(|child| lower_control_node(child, ctx).controls)
-                    .collect(),
-            )),
-        },
+        PatternNodeIr::CycleRoute { children } => zip_structural(
+            children
+                .iter()
+                .map(|child| lower_control_node(child, ctx))
+                .collect(),
+            Score::cycle_route,
+            ControlScore::cycle_route,
+        ),
+        PatternNodeIr::CycleSlots { children } => zip_structural(
+            children
+                .iter()
+                .map(|child| lower_control_node(child, ctx))
+                .collect(),
+            Score::cycle_slots,
+            ControlScore::cycle_slots,
+        ),
         PatternNodeIr::TimeScale { inner, factor } => {
             let inner = lower_control_node(inner, ctx);
             LoweredPattern {
@@ -283,15 +281,37 @@ pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) ->
         PatternNodeIr::SpaceShift { inner, .. }
         | PatternNodeIr::SpaceScale { inner, .. }
         | PatternNodeIr::SpaceReflect { inner, .. } => lower_control_node(inner, ctx),
-        PatternNodeIr::Degrade { .. }
-        | PatternNodeIr::Deduplicate { .. }
-        | PatternNodeIr::PriorityMerge { .. }
-        | PatternNodeIr::WeightedChoice { .. } => {
-            ctx.push_unsupported(format!("control lowering for {node:?}"));
+        PatternNodeIr::Degrade { .. } => {
+            ctx.push_unsupported(
+                "control-tree Degrade (Score-only; ControlScore has no Degrade variant)",
+            );
             LoweredPattern {
                 events: None,
                 controls: None,
             }
+        }
+        PatternNodeIr::Deduplicate { .. } => {
+            ctx.push_unsupported(
+                "control-tree Deduplicate (Score-only; ControlScore has no Deduplicate variant)",
+            );
+            LoweredPattern {
+                events: None,
+                controls: None,
+            }
+        }
+        PatternNodeIr::PriorityMerge { children, policy } => {
+            let policy = lower_priority_merge_policy(*policy);
+            zip_structural(
+                children
+                    .iter()
+                    .map(|child| lower_control_node(child, ctx))
+                    .collect(),
+                |scores| Score::priority_merge(scores, policy),
+                |controls| ControlScore::priority_merge(controls, policy),
+            )
+        }
+        PatternNodeIr::WeightedChoice { options, seed } => {
+            lower_weighted_choice_parts(options, *seed, ctx, lower_control_node)
         }
         PatternNodeIr::EventStream(_) => LoweredPattern {
             events: None,
@@ -299,31 +319,133 @@ pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) ->
         },
         PatternNodeIr::MaskClip { source, mask } => {
             let source = lower_control_node(source, ctx);
-            let mask = lower_control_node(mask, ctx);
-            LoweredPattern {
-                events: None,
-                controls: match (source.controls, mask.controls) {
-                    (Some(source), Some(mask)) => Some(ControlScore::merge(vec![source, mask])),
-                    (None, Some(mask)) => Some(mask),
-                    (Some(source), None) => Some(source),
-                    (None, None) => None,
+            let mask_controls = source_mask_controls(mask, ctx);
+            match (source.controls, mask_controls) {
+                (Some(source), Some(mask)) => LoweredPattern {
+                    events: None,
+                    controls: Some(ControlScore::mask_clip(source, mask)),
                 },
+                (None, _) => {
+                    ctx.diagnostics.push(AppDiagnostic::Lowering(
+                        LoweringDiagnostic::InvalidControlMapping {
+                            key: "mask_clip control source produced no controls".into(),
+                        },
+                    ));
+                    LoweredPattern {
+                        events: None,
+                        controls: None,
+                    }
+                }
+                (Some(_), None) => {
+                    // Diagnostic already emitted by source_mask_controls.
+                    LoweredPattern {
+                        events: None,
+                        controls: None,
+                    }
+                }
             }
         }
-        PatternNodeIr::Concat { children } => {
-            let controls: Vec<_> = children
+        PatternNodeIr::Concat { children } => zip_structural(
+            children
                 .iter()
-                .filter_map(|child| lower_control_node(child, ctx).controls)
-                .collect();
-            LoweredPattern {
-                events: None,
-                controls: if controls.is_empty() {
-                    None
-                } else {
-                    Some(ControlScore::concat(controls))
+                .map(|child| lower_control_node(child, ctx))
+                .collect(),
+            Score::concat,
+            ControlScore::concat,
+        ),
+    }
+}
+
+fn source_mask_controls(mask: &PatternNodeIr, ctx: &mut LoweringCtx) -> Option<ControlScore> {
+    let mask = lower_control_node(mask, ctx);
+    match mask.controls {
+        Some(controls) => Some(controls),
+        None => {
+            ctx.diagnostics.push(AppDiagnostic::Lowering(
+                LoweringDiagnostic::InvalidControlMapping {
+                    key: "mask_clip requires gate control mask".into(),
                 },
-            }
+            ));
+            None
         }
+    }
+}
+
+/// Preserve child cardinality on both event and control trees so structural
+/// ops (cycle route/slots, concat, priority merge) stay aligned.
+pub(super) fn zip_structural(
+    parts: Vec<LoweredPattern>,
+    wrap_events: impl FnOnce(Vec<Score>) -> Score,
+    wrap_controls: impl FnOnce(Vec<ControlScore>) -> ControlScore,
+) -> LoweredPattern {
+    let has_events = parts.iter().any(|part| part.events.is_some());
+    let has_controls = parts.iter().any(|part| part.controls.is_some());
+    LoweredPattern {
+        events: has_events.then(|| {
+            wrap_events(
+                parts
+                    .iter()
+                    .map(|part| part.events.clone().unwrap_or_else(Score::empty))
+                    .collect(),
+            )
+        }),
+        controls: has_controls.then(|| {
+            wrap_controls(
+                parts
+                    .iter()
+                    .map(|part| part.controls.clone().unwrap_or_else(ControlScore::empty))
+                    .collect(),
+            )
+        }),
+    }
+}
+
+pub(super) fn lower_weighted_choice_parts(
+    options: &[WeightedPatternIr],
+    seed: u64,
+    ctx: &mut LoweringCtx,
+    lower_child: impl Fn(&PatternNodeIr, &mut LoweringCtx) -> LoweredPattern,
+) -> LoweredPattern {
+    let parts: Vec<(LoweredPattern, CycleTime)> = options
+        .iter()
+        .map(|option| {
+            (
+                lower_child(&option.node, ctx),
+                rational_to_time(option.weight),
+            )
+        })
+        .collect();
+    let has_events = parts.iter().any(|(part, _)| part.events.is_some());
+    let has_controls = parts.iter().any(|(part, _)| part.controls.is_some());
+    LoweredPattern {
+        events: has_events.then(|| {
+            Score::weighted_choice(
+                parts
+                    .iter()
+                    .map(|(part, weight)| {
+                        WeightedScore::new(
+                            part.events.clone().unwrap_or_else(Score::empty),
+                            *weight,
+                        )
+                    })
+                    .collect(),
+                seed,
+            )
+        }),
+        controls: has_controls.then(|| {
+            ControlScore::weighted_choice(
+                parts
+                    .iter()
+                    .map(|(part, weight)| {
+                        WeightedControlScore::new(
+                            part.controls.clone().unwrap_or_else(ControlScore::empty),
+                            *weight,
+                        )
+                    })
+                    .collect(),
+                seed,
+            )
+        }),
     }
 }
 

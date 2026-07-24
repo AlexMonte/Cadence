@@ -13,10 +13,11 @@ use super::{
 use crate::{
     application::editor::{
         AtomCompoundSemantic, AtomCompoundView, EditorAttention, PickHit, SelectionState,
+        connection_endpoint_view,
     },
     application::session::MusaicProject,
     domain::board::{BoardSlot, BoardSurfaceId, SurfaceLayoutKind},
-    domain::document::{DocumentQueries, PlacementAddress, StackIndex},
+    domain::document::{AtomValue, DocumentNodeKind, DocumentQueries, PlacementAddress, StackIndex},
 };
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -100,13 +101,31 @@ pub(super) fn rebuild_visible_board_state(
     let queries = DocumentQueries::new(&project.document);
     let scene = project_board_scene(&queries, &attention, &selection, *view_settings);
 
-    let icon_for_node = |node_id: &NodeId| -> Option<crate::adapter::tile_icons::TileIconId> {
-        match queries.node_kind(node_id)? {
-            crate::domain::document::DocumentNodeKind::TrickInstance(trick) => Some(
+    let chrome_for_node = |node_id: &NodeId,
+                           address: PlacementAddress|
+     -> (
+        Option<crate::adapter::tile_icons::TileIconId>,
+        Option<AtomValue>,
+        Option<crate::application::editor::ConnectionEndpointView>,
+    ) {
+        let kind = queries.node_kind(node_id);
+        let icon = match &kind {
+            Some(DocumentNodeKind::TrickInstance(trick)) => Some(
                 crate::adapter::tile_icons::icon_for_trick_prototype(trick.prototype),
             ),
             _ => None,
-        }
+        };
+        let atom = match &kind {
+            Some(DocumentNodeKind::Atom(atom)) => Some(atom.atom.clone()),
+            _ => None,
+        };
+        let ports = match address {
+            PlacementAddress::BoardSlot(slot) => {
+                connection_endpoint_view(&queries, node_id, Some(slot), None)
+            }
+            PlacementAddress::StackIndex(_) => None,
+        };
+        (icon, atom, ports)
     };
     visible.active_surface = Some(scene.surface);
     visible.layout = scene.layout;
@@ -126,38 +145,52 @@ pub(super) fn rebuild_visible_board_state(
     visible.nodes = scene
         .tiles
         .into_iter()
-        .map(|tile| VisibleBoardNode {
-            node: tile.node.clone(),
-            address: tile.address,
-            tessera_footprint: tile.tessera_footprint,
-            kind: match tile.visual_kind {
-                super::TileVisualKind::Container(_) => VisibleNodeKind::Container,
-                super::TileVisualKind::Atom => VisibleNodeKind::Atom,
-                super::TileVisualKind::Output => VisibleNodeKind::Output,
-                super::TileVisualKind::Trick => VisibleNodeKind::TrickInstance,
-                super::TileVisualKind::Generic => VisibleNodeKind::Tile,
-            },
-            selected: tile.selected,
-            focused: tile.focused,
-            icon: icon_for_node(&tile.node),
-            surface_content: surface_content_for_node(
-                &queries,
-                &tile.node,
-                &compound_by_member,
-                &compound_members,
-            ),
+        .map(|tile| {
+            let (icon, atom, ports) = chrome_for_node(&tile.node, tile.address);
+            VisibleBoardNode {
+                node: tile.node.clone(),
+                address: tile.address,
+                tessera_footprint: tile.tessera_footprint,
+                kind: match tile.visual_kind {
+                    super::TileVisualKind::Container(_) => VisibleNodeKind::Container,
+                    super::TileVisualKind::Atom => VisibleNodeKind::Atom,
+                    super::TileVisualKind::Output => VisibleNodeKind::Output,
+                    super::TileVisualKind::Trick => VisibleNodeKind::TrickInstance,
+                    super::TileVisualKind::Generic => VisibleNodeKind::Tile,
+                },
+                selected: tile.selected,
+                focused: tile.focused,
+                icon,
+                atom,
+                ports,
+                surface_content: surface_content_for_node(
+                    &queries,
+                    &tile.node,
+                    &compound_by_member,
+                    &compound_members,
+                ),
+            }
         })
         .collect();
     visible.atom_compounds = scene
         .compounds
         .into_iter()
-        .map(|compound| VisibleAtomCompound {
-            slot: compound.anchor_slot,
-            compound: AtomCompoundView {
-                members: compound.members,
-                display: compound.display,
-                semantic: AtomCompoundSemantic::Single,
-            },
+        .map(|compound| {
+            let primary_atom = compound.members.first().and_then(|member| {
+                match queries.node_kind(member) {
+                    Some(DocumentNodeKind::Atom(atom)) => Some(atom.atom.clone()),
+                    _ => None,
+                }
+            });
+            VisibleAtomCompound {
+                slot: compound.anchor_slot,
+                compound: AtomCompoundView {
+                    members: compound.members,
+                    display: compound.display,
+                    semantic: AtomCompoundSemantic::Single,
+                },
+                primary_atom,
+            }
         })
         .collect();
     visible.stack_inserts = scene.stack_inserts;
@@ -306,6 +339,70 @@ mod tests {
     }
 
     #[test]
+    fn visible_board_projects_port_chrome_for_root_board_tiles() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<AppState>()
+            .init_state::<TransportMode>()
+            .add_plugins(MinimalPlugins)
+            .add_plugins((
+                TesseraPlugin,
+                crate::application::editor::EditorPlugin,
+                PlaybackPlugin,
+            ));
+        app.insert_state(AppState::Editor);
+
+        let provenance = TimelineProvenanceStore::default();
+        let root_surface = app
+            .world()
+            .resource::<MusaicProject>()
+            .document
+            .root_surface;
+        app.world_mut()
+            .resource_scope(|world, mut project: Mut<'_, MusaicProject>| {
+                world.resource_scope(|world, mut board: Mut<'_, TesseraBoard>| {
+                    world.resource_scope(|world, mut attention: Mut<'_, EditorAttention>| {
+                        world.resource_scope(|_world, mut selection: Mut<'_, SelectionState>| {
+                            let _ = execute_command(
+                                &mut project.document,
+                                &mut board,
+                                &mut attention,
+                                &mut selection,
+                                &provenance,
+                                &EditorCommand::PlaceTile {
+                                    target: PlacementTarget::BoardSlot {
+                                        surface: root_surface,
+                                        slot: BoardSlot::new(0, 0),
+                                    },
+                                    tile: TileSpawnKind::Container {
+                                        kind: ContainerKind::Sequence,
+                                    },
+                                },
+                            );
+                        });
+                    });
+                });
+            });
+        app.world_mut()
+            .resource_mut::<crate::application::pipeline::runtime::RuntimeState>()
+            .dirty
+            .scene = true;
+        app.update();
+
+        let visible = app.world().resource::<VisibleBoardState>();
+        let node = visible
+            .nodes
+            .iter()
+            .find(|n| n.kind == VisibleNodeKind::Container)
+            .expect("container tile on visible board");
+        assert!(node.atom.is_none());
+        assert!(
+            node.ports.is_some(),
+            "root-board tiles must project port compass view data"
+        );
+    }
+
+    #[test]
     fn pick_at_prefers_atom_compound_over_underlying_atom_tile() {
         let visible = VisibleBoardState {
             active_surface: Some(BoardSurfaceId(7)),
@@ -318,6 +415,8 @@ mod tests {
                 selected: false,
                 focused: false,
                 icon: None,
+                atom: Some(AtomValue::NoteName(NoteName::A)),
+                ports: None,
                 surface_content: TileSurfaceContent::Empty,
             }],
             atom_compounds: vec![VisibleAtomCompound {
@@ -327,6 +426,7 @@ mod tests {
                     display: "A2".into(),
                     semantic: AtomCompoundSemantic::Pitch,
                 },
+                primary_atom: Some(AtomValue::NoteName(NoteName::A)),
             }],
             stack_inserts: Vec::new(),
             stack_locked_slots: Vec::new(),
@@ -357,6 +457,8 @@ mod tests {
                 selected: false,
                 focused: false,
                 icon: None,
+                atom: None,
+                ports: None,
                 surface_content: TileSurfaceContent::Empty,
             }],
             ..Default::default()

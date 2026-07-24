@@ -7,17 +7,18 @@ use bevy::state::condition::in_state;
 use cadence::prelude::{
     Axis, ConflictPolicy, ControlScore, ControlTile, ControlTrack, Coord, DeduplicateKey,
     DeduplicatePolicy, DeduplicateWinner, DegradePolicy, Intent, Moment, Mosaic, Point3,
-    PriorityMergePolicy, Score, SpatialMotion, Time as CycleTime, WeightedScore, reflect, sample,
+    PriorityMergePolicy, Score, SpatialMotion, Time as CycleTime, reflect, sample,
 };
 use tessera::prelude::{
     AxisIr, DeduplicateKeyIr, DeduplicatePolicyIr, DeduplicateWinnerIr, EventField, EventValue,
     FieldValue, NodeId, PatternEvent, PatternIr, PatternNodeIr, PatternStream, Point3Ir,
-    PriorityConflictIr, PriorityMergePolicyIr, Rational, SpatialMotionIr, WeightedPatternIr,
+    PriorityConflictIr, PriorityMergePolicyIr, Rational, SpatialMotionIr,
 };
 
 use control::{
     LoweredPattern, combine_lowered, lower_control_stream, lower_event_field,
-    lower_pattern_node_as_control, lower_scalar_stream_as_gate, lowered_to_score, shift_lowered,
+    lower_pattern_node_as_control, lower_scalar_stream_as_gate, lower_weighted_choice_parts,
+    lowered_to_score, shift_lowered, zip_structural,
 };
 
 use crate::{
@@ -85,24 +86,22 @@ fn lower_pattern_node_lowered(node: &PatternNodeIr, ctx: &mut LoweringCtx) -> Lo
                 .collect(),
             ctx,
         ),
-        PatternNodeIr::CycleRoute { children } => LoweredPattern {
-            events: Some(Score::cycle_route(
-                children
-                    .iter()
-                    .map(|child| lower_pattern_node(child, ctx))
-                    .collect(),
-            )),
-            controls: None,
-        },
-        PatternNodeIr::CycleSlots { children } => LoweredPattern {
-            events: Some(Score::cycle_slots(
-                children
-                    .iter()
-                    .map(|child| lower_pattern_node(child, ctx))
-                    .collect(),
-            )),
-            controls: None,
-        },
+        PatternNodeIr::CycleRoute { children } => zip_structural(
+            children
+                .iter()
+                .map(|child| lower_pattern_node_lowered(child, ctx))
+                .collect(),
+            Score::cycle_route,
+            ControlScore::cycle_route,
+        ),
+        PatternNodeIr::CycleSlots { children } => zip_structural(
+            children
+                .iter()
+                .map(|child| lower_pattern_node_lowered(child, ctx))
+                .collect(),
+            Score::cycle_slots,
+            ControlScore::cycle_slots,
+        ),
         PatternNodeIr::TimeScale { inner, factor } => {
             let inner = lower_pattern_node_lowered(inner, ctx);
             LoweredPattern {
@@ -155,6 +154,17 @@ fn lower_pattern_node_lowered(node: &PatternNodeIr, ctx: &mut LoweringCtx) -> Lo
             seed,
         } => {
             let inner = lower_pattern_node_lowered(inner, ctx);
+            // Degrade is Score-only in Cadence; control-only trees must not
+            // silently pass through as if degrade applied.
+            if inner.events.is_none() && inner.controls.is_some() {
+                ctx.push_unsupported(
+                    "control-tree Degrade (Score-only; ControlScore has no Degrade variant)",
+                );
+                return LoweredPattern {
+                    events: None,
+                    controls: None,
+                };
+            }
             LoweredPattern {
                 events: inner.events.map(|score| {
                     Score::degrade(
@@ -167,6 +177,15 @@ fn lower_pattern_node_lowered(node: &PatternNodeIr, ctx: &mut LoweringCtx) -> Lo
         }
         PatternNodeIr::Deduplicate { inner, policy } => {
             let inner = lower_pattern_node_lowered(inner, ctx);
+            if inner.events.is_none() && inner.controls.is_some() {
+                ctx.push_unsupported(
+                    "control-tree Deduplicate (Score-only; ControlScore has no Deduplicate variant)",
+                );
+                return LoweredPattern {
+                    events: None,
+                    controls: None,
+                };
+            }
             LoweredPattern {
                 events: inner
                     .events
@@ -174,53 +193,81 @@ fn lower_pattern_node_lowered(node: &PatternNodeIr, ctx: &mut LoweringCtx) -> Lo
                 controls: inner.controls,
             }
         }
-        PatternNodeIr::PriorityMerge { children, policy } => LoweredPattern {
-            events: Some(Score::priority_merge(
+        PatternNodeIr::PriorityMerge { children, policy } => {
+            let policy = lower_priority_merge_policy(*policy);
+            zip_structural(
                 children
                     .iter()
-                    .map(|child| lower_pattern_node(child, ctx))
+                    .map(|child| lower_pattern_node_lowered(child, ctx))
                     .collect(),
-                lower_priority_merge_policy(*policy),
-            )),
-            controls: None,
-        },
-        PatternNodeIr::WeightedChoice { options, seed } => LoweredPattern {
-            events: Some(Score::weighted_choice(
-                lower_weighted_options(options, ctx),
-                *seed,
-            )),
-            controls: None,
-        },
+                |scores| Score::priority_merge(scores, policy),
+                |controls| ControlScore::priority_merge(controls, policy),
+            )
+        }
+        PatternNodeIr::WeightedChoice { options, seed } => {
+            lower_weighted_choice_parts(options, *seed, ctx, lower_pattern_node_lowered)
+        }
         PatternNodeIr::MaskClip { source, mask } => {
-            let source = lower_pattern_node(source, ctx);
+            let source = lower_pattern_node_lowered(source, ctx);
             let mask_controls = lower_pattern_node_as_control(mask, ctx);
-            match mask_controls {
-                Some(mask) => LoweredPattern {
-                    events: Some(Score::mask_clip(source, mask)),
-                    controls: None,
+            match (source.events, source.controls, mask_controls) {
+                (Some(events), controls, Some(mask)) => {
+                    let source_score = match controls {
+                        Some(controls) => Score::with_controls(events, controls),
+                        None => events,
+                    };
+                    LoweredPattern {
+                        events: Some(Score::mask_clip(source_score, mask)),
+                        controls: None,
+                    }
+                }
+                (None, Some(controls), Some(mask)) => LoweredPattern {
+                    events: None,
+                    controls: Some(ControlScore::mask_clip(controls, mask)),
                 },
-                None => {
+                (Some(events), controls, None) => {
                     ctx.diagnostics.push(AppDiagnostic::Lowering(
                         LoweringDiagnostic::InvalidControlMapping {
                             key: "mask_clip requires gate control mask".into(),
                         },
                     ));
                     LoweredPattern {
-                        events: Some(source),
+                        events: Some(events),
+                        controls,
+                    }
+                }
+                (None, Some(controls), None) => {
+                    ctx.diagnostics.push(AppDiagnostic::Lowering(
+                        LoweringDiagnostic::InvalidControlMapping {
+                            key: "mask_clip requires gate control mask".into(),
+                        },
+                    ));
+                    LoweredPattern {
+                        events: None,
+                        controls: Some(controls),
+                    }
+                }
+                (None, None, _) => {
+                    ctx.diagnostics.push(AppDiagnostic::Lowering(
+                        LoweringDiagnostic::InvalidControlMapping {
+                            key: "mask_clip source produced no events or controls".into(),
+                        },
+                    ));
+                    LoweredPattern {
+                        events: None,
                         controls: None,
                     }
                 }
             }
         }
-        PatternNodeIr::Concat { children } => LoweredPattern {
-            events: Some(Score::concat(
-                children
-                    .iter()
-                    .map(|child| lower_pattern_node(child, ctx))
-                    .collect(),
-            )),
-            controls: None,
-        },
+        PatternNodeIr::Concat { children } => zip_structural(
+            children
+                .iter()
+                .map(|child| lower_pattern_node_lowered(child, ctx))
+                .collect(),
+            Score::concat,
+            ControlScore::concat,
+        ),
     }
 }
 
@@ -365,21 +412,6 @@ fn lower_event_value(value: &EventValue, ctx: &mut LoweringCtx) -> Option<Intent
     }
 }
 
-fn lower_weighted_options(
-    options: &[WeightedPatternIr],
-    ctx: &mut LoweringCtx,
-) -> Vec<WeightedScore> {
-    options
-        .iter()
-        .map(|option| {
-            WeightedScore::new(
-                lower_pattern_node(&option.node, ctx),
-                rational_to_time(option.weight),
-            )
-        })
-        .collect()
-}
-
 pub(super) fn lower_deduplicate_policy(policy: DeduplicatePolicyIr) -> DeduplicatePolicy {
     let key = match policy.key {
         DeduplicateKeyIr::Lifecycle => DeduplicateKey::Lifecycle,
@@ -393,7 +425,7 @@ pub(super) fn lower_deduplicate_policy(policy: DeduplicatePolicyIr) -> Deduplica
     DeduplicatePolicy::new(key, winner)
 }
 
-fn lower_priority_merge_policy(policy: PriorityMergePolicyIr) -> PriorityMergePolicy {
+pub(super) fn lower_priority_merge_policy(policy: PriorityMergePolicyIr) -> PriorityMergePolicy {
     let conflict = match policy.conflict {
         PriorityConflictIr::SameWholeStartAndValue => ConflictPolicy::SameWholeStartAndIntent,
         PriorityConflictIr::SameWholeSpanAndValue => ConflictPolicy::SameWholeSpanAndIntent,
@@ -676,6 +708,162 @@ mod tests {
         assert_eq!(sample_ids_in_window(score, (0, 1), (1, 1)), vec!["a"]);
         assert_eq!(sample_ids_in_window(score, (1, 1), (2, 1)), vec!["b"]);
         assert!(sample_ids_in_window(score, (0, 1), (1, 1)).len() < 2);
+    }
+
+    fn gain_control_node(start: Rational, duration: Rational, gain: Rational) -> PatternNodeIr {
+        PatternNodeIr::ControlStream(ControlStreamNodeIr {
+            stream: ControlStream::new(vec![ControlEvent::new(
+                CycleSpan::new(CycleTime(start), CycleDuration(duration)),
+                ControlKeyIr::Gain,
+                ControlValueIr::rational(gain),
+            )]),
+        })
+    }
+
+    fn gate_control_node(start: Rational, duration: Rational, open: bool) -> PatternNodeIr {
+        PatternNodeIr::ControlStream(ControlStreamNodeIr {
+            stream: ControlStream::new(vec![ControlEvent::new(
+                CycleSpan::new(CycleTime(start), CycleDuration(duration)),
+                ControlKeyIr::Gate,
+                ControlValueIr::bool(open),
+            )]),
+        })
+    }
+
+    fn note_with_gain(label: &str, gain: Rational) -> PatternNodeIr {
+        PatternNodeIr::merge(vec![note_node(label), gain_control_node(Rational::zero(), Rational::one(), gain)])
+    }
+
+    #[test]
+    fn concat_lowering_preserves_control_children() {
+        let ir = PatternIr::new(vec![PatternOutput::new(
+            NodeId::new("out"),
+            PatternNodeIr::concat(vec![
+                note_with_gain("a", Rational::one()),
+                note_with_gain("b", Rational::new(1, 2)),
+            ]),
+        )]);
+        let (scores, diagnostics) = lower_tessera_ir(&ir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let score = scores.get(&NodeId::new("out")).unwrap();
+
+        let window_a =
+            Span::new(cadence::prelude::Time::ZERO, cadence::prelude::Time::ONE).unwrap();
+        let report_a = CadenceCompiler::new().preview(score, &window_a).unwrap();
+        assert_eq!(sample_ids_in_window(score, (0, 1), (1, 1)), vec!["a"]);
+        assert!(matches!(
+            report_a.evaluated[0].projected().controls().get(&ControlKey::Gain),
+            Some(ControlValue::Scalar(value)) if (*value - 1.0).abs() < f64::EPSILON
+        ));
+
+        let window_b = Span::new(
+            cadence::prelude::Time::ONE,
+            cadence::prelude::Time::new(2, 1),
+        )
+        .unwrap();
+        let report_b = CadenceCompiler::new().preview(score, &window_b).unwrap();
+        assert_eq!(sample_ids_in_window(score, (1, 1), (2, 1)), vec!["b"]);
+        assert!(matches!(
+            report_b.evaluated[0].projected().controls().get(&ControlKey::Gain),
+            Some(ControlValue::Scalar(value)) if (*value - 0.5).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn cycle_route_lowering_preserves_control_children() {
+        // EventStream leaves lower to absolute mosaics (cycle 0 only). Pair a
+        // single note with CycleRoute of controls so cycle routing of the
+        // control tree is observable without relying on mosaic repetition.
+        let ir = PatternIr::new(vec![PatternOutput::new(
+            NodeId::new("out"),
+            PatternNodeIr::merge(vec![
+                note_node("pad"),
+                PatternNodeIr::cycle_route(vec![
+                    gain_control_node(Rational::zero(), Rational::one(), Rational::one()),
+                    gain_control_node(Rational::zero(), Rational::one(), Rational::new(1, 2)),
+                ]),
+            ]),
+        )]);
+        let (scores, diagnostics) = lower_tessera_ir(&ir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let score = scores.get(&NodeId::new("out")).unwrap();
+
+        let report_0 = CadenceCompiler::new()
+            .preview(
+                score,
+                &Span::new(cadence::prelude::Time::ZERO, cadence::prelude::Time::ONE).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(report_0.starts().count(), 1);
+        assert!(matches!(
+            report_0.evaluated[0].projected().controls().get(&ControlKey::Gain),
+            Some(ControlValue::Scalar(value)) if (*value - 1.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn mask_clip_control_source_uses_mask_semantics_not_merge() {
+        // Merge(event, MaskClip(gain, gate)) must clip gain visibility — not
+        // silently merge gate+gain as peer controls.
+        let ir = PatternIr::new(vec![PatternOutput::new(
+            NodeId::new("out"),
+            PatternNodeIr::merge(vec![
+                note_node("pad"),
+                PatternNodeIr::mask_clip(
+                    gain_control_node(Rational::zero(), Rational::one(), Rational::one()),
+                    gate_control_node(Rational::new(1, 4), Rational::new(1, 2), true),
+                ),
+            ]),
+        )]);
+        let (scores, diagnostics) = lower_tessera_ir(&ir);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let score = scores.get(&NodeId::new("out")).unwrap();
+        let window = Span::new(cadence::prelude::Time::ZERO, cadence::prelude::Time::ONE).unwrap();
+        let report = CadenceCompiler::new().preview(score, &window).unwrap();
+
+        assert_eq!(report.starts().count(), 1);
+        // Gate must not appear as an attached control lane.
+        assert!(
+            report.evaluated[0]
+                .projected()
+                .controls()
+                .get(&ControlKey::Gate)
+                .is_none()
+        );
+        assert!(matches!(
+            report.evaluated[0].projected().controls().get(&ControlKey::Gain),
+            Some(ControlValue::Scalar(value)) if (*value - 1.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn control_tree_degrade_emits_unsupported_diagnostic() {
+        let ir = PatternIr::new(vec![PatternOutput::new(
+            NodeId::new("out"),
+            PatternNodeIr::merge(vec![
+                note_node("pad"),
+                PatternNodeIr::Degrade {
+                    inner: Box::new(gain_control_node(
+                        Rational::zero(),
+                        Rational::one(),
+                        Rational::one(),
+                    )),
+                    keep_probability: Rational::new(1, 2),
+                    seed: 0,
+                },
+            ]),
+        )]);
+        let (_scores, diagnostics) = lower_tessera_ir(&ir);
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic,
+                    AppDiagnostic::Lowering(LoweringDiagnostic::UnsupportedPatternNode { node })
+                        if node.contains("control-tree Degrade")
+                )
+            }),
+            "{diagnostics:?}"
+        );
     }
 
     #[test]

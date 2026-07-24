@@ -3,12 +3,14 @@
 //! Save is requested via [`EditorCommandBus`] only — this module never
 //! `ResMut`s document or session resources.
 
-use bevy::prelude::*;
+use bevy::{picking::prelude::*, prelude::*};
 use bevy_feathers::theme::ThemedText;
 
 use crate::application::command::{EditorCommand, EditorCommandBus};
 use crate::application::session::MusaicProject;
 use crate::infrastructure::app::{AppState, MusaicSet};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+use crate::infrastructure::ui::widgets::spawn_dialog_overlay;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitTarget {
@@ -66,6 +68,7 @@ pub fn request_exit(
 
 fn sync_unsaved_dialog(
     mut commands: Commands,
+    theme: Res<MusaicUiTheme>,
     prompt: Res<UnsavedChangesPrompt>,
     existing: Query<Entity, With<UnsavedDialogRoot>>,
 ) {
@@ -73,62 +76,29 @@ fn sync_unsaved_dialog(
     let has_dialog = !existing.is_empty();
 
     if show && !has_dialog {
-        commands
-            .spawn((
-                UnsavedDialogRoot,
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
-                    display: Display::Flex,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
+        spawn_dialog_overlay(&mut commands, &theme, UnsavedDialogRoot, |card| {
+            card.spawn((
+                Text::new("Save changes?"),
+                TextFont {
+                    font_size: theme.typography.title,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
-                ZIndex(1000),
-            ))
-            .with_children(|overlay| {
-                overlay
-                    .spawn((
-                        Node {
-                            min_width: Val::Px(360.0),
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(16.0),
-                            padding: UiRect::all(Val::Px(24.0)),
-                            border: UiRect::all(Val::Px(1.0)),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgb(0.14, 0.15, 0.2)),
-                        BorderColor::all(Color::srgba(0.35, 0.38, 0.45, 1.0)),
-                    ))
-                    .with_children(|card| {
-                        card.spawn((
-                            Text::new("Save changes?"),
-                            TextFont {
-                                font_size: 20.0,
-                                ..default()
-                            },
-                            ThemedText,
-                        ));
-                        card.spawn((Text::new("Your project has unsaved changes."), ThemedText));
-                        card.spawn(Node {
-                            display: Display::Flex,
-                            flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(12.0),
-                            justify_content: JustifyContent::FlexEnd,
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            spawn_dialog_button(row, "Cancel", UnsavedDialogAction::Cancel);
-                            spawn_dialog_button(row, "Don't save", UnsavedDialogAction::Discard);
-                            spawn_dialog_button(row, "Save", UnsavedDialogAction::Save);
-                        });
-                    });
+                ThemedText,
+            ));
+            card.spawn((Text::new("Your project has unsaved changes."), ThemedText));
+            card.spawn(Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(theme.spacing.lg),
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            })
+            .with_children(|row| {
+                spawn_dialog_button(row, &theme, "Cancel", UnsavedDialogAction::Cancel);
+                spawn_dialog_button(row, &theme, "Don't save", UnsavedDialogAction::Discard);
+                spawn_dialog_button(row, &theme, "Save", UnsavedDialogAction::Save);
             });
+        });
     } else if !show && has_dialog {
         for entity in existing.iter() {
             commands.entity(entity).despawn();
@@ -138,6 +108,7 @@ fn sync_unsaved_dialog(
 
 fn spawn_dialog_button(
     parent: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     label: &str,
     action: UnsavedDialogAction,
 ) {
@@ -146,15 +117,16 @@ fn spawn_dialog_button(
             action,
             Node {
                 height: Val::Px(36.0),
-                padding: UiRect::horizontal(Val::Px(14.0)),
+                padding: UiRect::horizontal(Val::Px(theme.spacing.lg + 2.0)),
                 display: Display::Flex,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.22, 0.24, 0.3, 1.0)),
-            BorderColor::all(Color::srgba(0.4, 0.43, 0.5, 1.0)),
+            BackgroundColor(theme.chrome.button_bg),
+            BorderColor::all(theme.chrome.button_border),
+            Pickable::default(),
         ))
         .observe(on_unsaved_dialog_click)
         .with_children(|btn| {

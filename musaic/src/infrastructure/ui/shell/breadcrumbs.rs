@@ -1,37 +1,35 @@
 //! Bottom bar: surface breadcrumb trail plus the timeline edge grip.
+//!
+//! Labels come from [`BreadcrumbPaint`] — this module paints only.
 
 use bevy::{picking::prelude::Pickable, prelude::*, ui::widget::Text as UiText};
 use bevy_feathers::theme::ThemedText;
-use tessera::prelude::NodeId;
 
 use crate::{
     application::command::EditorCommand,
     application::editor::TimelinePanelState,
-    domain::board::{BoardSurfaceId, BoardSurfaceKind},
-    domain::document::{DocumentQueries, PlacementAddress},
+    application::pipeline::ui_projection::BreadcrumbPaint,
+    domain::board::BoardSurfaceId,
 };
 
 use super::menu::{InspectorButtonAction, on_inspector_button_activated};
 use crate::adapter::load_up::UiSpriteAssets;
-use crate::infrastructure::ui::controls::{MusaicClickable, musaic_clickable};
 use crate::infrastructure::ui::minimap;
-use crate::infrastructure::ui::tile_shell::{PANEL_BG, PanelBackdrop, spawn_shell_panel};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
 use crate::infrastructure::ui::ui_sprites;
+use crate::infrastructure::ui::widgets::{
+    MusaicClickable, PanelBackdrop, musaic_button, spawn_shell_panel,
+};
 
 const BOTTOM_TAB_HEIGHT: f32 = 32.0;
 
 #[derive(Component)]
 struct UiShellTabs;
 
-#[derive(Debug, Clone)]
-pub(crate) struct BreadcrumbEntry {
-    label: String,
-    surface: BoardSurfaceId,
-}
-
 pub(crate) fn spawn_bottom_tabs(
     parent: &mut ChildSpawnerCommands<'_>,
-    breadcrumbs: &[BreadcrumbEntry],
+    theme: &MusaicUiTheme,
+    breadcrumbs: &BreadcrumbPaint,
     active_surface: Option<BoardSurfaceId>,
     sprites: Option<&UiSpriteAssets>,
     images: &Assets<Image>,
@@ -54,13 +52,13 @@ pub(crate) fn spawn_bottom_tabs(
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme.chrome.panel_bg),
         ),
         images,
         sprites,
         PanelBackdrop::Panel,
         |tabs| {
-            minimap::spawn_timeline_edge_handle(tabs);
+            minimap::spawn_timeline_edge_handle(tabs, theme);
             tabs.spawn((Node {
                 width: percent(100),
                 flex_grow: 1.0,
@@ -68,23 +66,24 @@ pub(crate) fn spawn_bottom_tabs(
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                column_gap: px(4),
-                padding: UiRect::horizontal(px(8)),
+                column_gap: px(theme.spacing.xs),
+                padding: UiRect::horizontal(px(theme.spacing.md)),
                 ..default()
             },))
                 .with_children(|row| {
-                    for (index, crumb) in breadcrumbs.iter().enumerate() {
+                    for (index, (label, surface)) in breadcrumbs.entries.iter().enumerate() {
                         if index > 0 {
                             row.spawn((UiText::new("|"), ThemedText));
                         }
-                        let selected = active_surface == Some(crumb.surface);
+                        let selected = active_surface == Some(*surface);
                         spawn_breadcrumb_tab(
                             row,
+                            theme,
                             images,
                             sprites,
-                            &crumb.label,
+                            label,
                             selected,
-                            crumb.surface,
+                            *surface,
                         );
                     }
                 });
@@ -92,11 +91,9 @@ pub(crate) fn spawn_bottom_tabs(
     );
 }
 
-/// Readable label on the near-white `breadcrumb_slot.png` chip.
-const ACTIVE_CRUMB_TEXT: Color = Color::srgb(0.13, 0.14, 0.18);
-
 fn spawn_breadcrumb_tab(
     tabs: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
     label: &str,
@@ -110,7 +107,7 @@ fn spawn_breadcrumb_tab(
         display: Display::Flex,
         justify_content: JustifyContent::Center,
         align_items: AlignItems::Center,
-        padding: UiRect::horizontal(px(8.0)),
+        padding: UiRect::horizontal(px(theme.spacing.md)),
         position_type: PositionType::Relative,
         ..default()
     };
@@ -133,7 +130,7 @@ fn spawn_breadcrumb_tab(
                     Pickable::default(),
                     InspectorButtonAction(EditorCommand::NavigateToSurface { surface }),
                     UiText::new(label.to_string()),
-                    TextColor(ACTIVE_CRUMB_TEXT),
+                    TextColor(theme.chrome.crumb_active_text),
                 ))
                 .observe(on_inspector_button_activated);
         });
@@ -141,70 +138,16 @@ fn spawn_breadcrumb_tab(
     }
 
     tabs.spawn((
-        musaic_clickable(
+        musaic_button(
             chip,
             InspectorButtonAction(EditorCommand::NavigateToSurface { surface }),
             label.to_string(),
         ),
         if selected {
-            BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.14))
+            BackgroundColor(theme.chrome.crumb_selected_bg)
         } else {
             BackgroundColor(Color::NONE)
         },
     ))
     .observe(on_inspector_button_activated);
-}
-
-pub(crate) fn breadcrumb_entries(
-    queries: &DocumentQueries<'_>,
-    active_surface: Option<BoardSurfaceId>,
-) -> Vec<BreadcrumbEntry> {
-    let Some(mut surface) = active_surface else {
-        return Vec::new();
-    };
-
-    let mut labels = Vec::new();
-
-    loop {
-        match queries.surface_kind(surface) {
-            Some(BoardSurfaceKind::RootBoard) => {
-                labels.push(BreadcrumbEntry {
-                    label: "Home".to_string(),
-                    surface,
-                });
-                break;
-            }
-            Some(BoardSurfaceKind::ContainerStack { container }) => {
-                let container_node = NodeId::new(container.0.clone());
-                if let Some(location) = queries.location_of(&container_node) {
-                    let label = match location.address {
-                        PlacementAddress::BoardSlot(slot) => {
-                            format!("Container {}:{}", slot.x, slot.y)
-                        }
-                        PlacementAddress::StackIndex(index) => {
-                            format!("Container @{}", index.0)
-                        }
-                    };
-                    labels.push(BreadcrumbEntry { label, surface });
-                    surface = location.surface;
-                } else {
-                    labels.push(BreadcrumbEntry {
-                        label: "Container".to_string(),
-                        surface,
-                    });
-                    break;
-                }
-            }
-            None => {
-                labels.push(BreadcrumbEntry {
-                    label: "Unknown".to_string(),
-                    surface,
-                });
-                break;
-            }
-        }
-    }
-
-    labels.reverse();
-    labels
 }

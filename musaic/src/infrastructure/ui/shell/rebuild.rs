@@ -4,34 +4,28 @@ use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
     application::board_view_settings::BoardViewSettings,
-    application::editor::{
-        EditorAttention, EditorSession, InspectorLayout, MinimapPanelState, TimelinePanelState,
-    },
+    application::editor::{InspectorLayout, MinimapPanelState, TimelinePanelState},
     application::pipeline::runtime::RuntimePreviewSnapshot,
     application::pipeline::scene_sync::VisibleBoardState,
     application::pipeline::ui_projection::{
         EditorUiProjection, UiDirty, inspector_layout_identity,
     },
-    application::session::MusaicProject,
-    domain::document::DocumentQueries,
 };
 
-use super::breadcrumbs::{breadcrumb_entries, spawn_bottom_tabs};
-use super::layout::{MusaicUiRoot, PANEL_GAP, SHELL_PADDING, spawn_main_row};
+use super::breadcrumbs::spawn_bottom_tabs;
+use super::layout::{MusaicUiRoot, spawn_main_row};
 use super::menu::spawn_top_menu;
 use crate::adapter::load_up::UiSpriteAssets;
-use crate::infrastructure::ui::board_3d::Board3dCamera;
+use crate::infrastructure::ui::board::Board3dCamera;
 use crate::infrastructure::ui::controls::{UiTilePaletteCamera, UiTilePaletteDisplay};
-use crate::infrastructure::ui::inspector_transition::{
-    InspectorPanelHost, InspectorTransitionQueue, PendingInspectorTransition,
+use crate::infrastructure::ui::theme::{
+    InspectorPanelHost, InspectorTransitionQueue, MusaicUiTheme, PendingInspectorTransition,
 };
 use crate::infrastructure::ui::{minimap_view, timeline_view};
 
 #[derive(SystemParam)]
 pub(crate) struct RebuildUiInputs<'w> {
-    project: Res<'w, MusaicProject>,
-    attention: Res<'w, EditorAttention>,
-    session: Res<'w, EditorSession>,
+    theme: Res<'w, MusaicUiTheme>,
     minimap_panel: Res<'w, MinimapPanelState>,
     timeline_panel: Res<'w, TimelinePanelState>,
     visible: Res<'w, VisibleBoardState>,
@@ -119,9 +113,9 @@ fn full_shell_respawn(
         commands.entity(entity).despawn();
     }
 
-    let queries = DocumentQueries::new(&inputs.project.document);
     let active_surface = inputs.projection.active_surface;
-    let breadcrumbs = breadcrumb_entries(&queries, active_surface);
+    let gap = inputs.theme.spacing.panel_gap;
+    let pad = inputs.theme.spacing.shell_padding;
 
     commands
         .spawn((
@@ -131,20 +125,24 @@ fn full_shell_respawn(
                 height: percent(100),
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
-                row_gap: px(PANEL_GAP),
-                padding: UiRect::all(px(SHELL_PADDING)),
+                row_gap: px(gap),
+                padding: UiRect::all(px(pad)),
                 ..default()
             },
         ))
         .with_children(|root| {
-            spawn_top_menu(root, &inputs.images, inputs.ui_sprites.as_deref());
+            spawn_top_menu(
+                root,
+                &inputs.theme,
+                &inputs.images,
+                inputs.ui_sprites.as_deref(),
+            );
             spawn_main_row(
                 root,
-                &queries,
+                &inputs.theme,
                 &inputs.visible,
+                &inputs.projection,
                 &inspector_layout,
-                &inputs.attention,
-                &inputs.session,
                 &inputs.preview_snapshot,
                 board_camera,
                 palette_camera,
@@ -157,7 +155,8 @@ fn full_shell_respawn(
             );
             spawn_bottom_tabs(
                 root,
-                &breadcrumbs,
+                &inputs.theme,
+                &inputs.projection.breadcrumbs,
                 active_surface,
                 inputs.ui_sprites.as_deref(),
                 &inputs.images,

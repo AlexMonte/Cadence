@@ -7,7 +7,7 @@ use tessera::prelude::NodeId;
 
 use crate::application::pipeline::scene_sync::VisibleBoardState;
 use crate::infrastructure::ui::{
-    board_3d::Board3dTile, musaic_tile::TILE_WORLD_HEIGHT, render_layers::SCENE_NODE_VISIBILITY,
+    board::Board3dTile, musaic_tile::TILE_WORLD_HEIGHT, render_layers::SCENE_NODE_VISIBILITY,
 };
 
 const LABEL_LIFT: f32 = 0.06;

@@ -5,10 +5,10 @@
 //! - The `Board3dCamera` `Transform`/`Projection` is written by exactly one
 //!   system: [`smooth_camera_transform`], using frame-rate-independent
 //!   exponential damping.
-//! - Everything else (pointer pan, edge scroll, surface navigation, focus
-//!   jumps, placement settles) submits a [`CameraRequest`]; conflicts are
-//!   resolved once per frame with the written priority
-//!   `FrameSurface > FocusAddress > Pan/Orbit`.
+//! - Everything else (OnEnter Editor framing, pointer pan, edge scroll,
+//!   surface navigation, focus jumps, placement settles) submits a
+//!   [`CameraRequest`]; conflicts are resolved once per frame with the
+//!   written priority `FrameSurface > FocusAddress > Pan/Orbit`.
 
 use bevy::{prelude::*, state::condition::in_state};
 
@@ -24,7 +24,7 @@ use crate::{
     infrastructure::app::{AppState, MusaicSet},
 };
 
-use super::board_3d::Board3dCamera;
+use super::board::Board3dCamera;
 use super::board_geometry::{stack_column_center, tessera_slot_center};
 
 pub const ROOT_CAMERA_DISTANCE: f32 = 12.0;
@@ -123,7 +123,7 @@ impl Plugin for CameraRigPlugin {
                     .chain()
                     .after(MusaicSet::SceneSync),
             )
-            .add_systems(OnEnter(AppState::Editor), reset_camera_rig)
+            .add_systems(OnEnter(AppState::Editor), request_enter_editor_frame)
             .add_systems(
                 Update,
                 (
@@ -136,8 +136,12 @@ impl Plugin for CameraRigPlugin {
     }
 }
 
-fn reset_camera_rig(mut rig: ResMut<BoardCameraRig>) {
-    *rig = BoardCameraRig::default();
+/// Enter-editor framing goes through the request queue so
+/// [`arbitrate_camera_rig`] remains the only [`BoardCameraRig`] writer.
+fn request_enter_editor_frame(mut requests: MessageWriter<CameraRequest>) {
+    requests.write(CameraRequest::FrameSurface(
+        ActiveSurfaceChangeReason::OpenDocument,
+    ));
 }
 
 /// Translates editor navigation state changes into camera requests:

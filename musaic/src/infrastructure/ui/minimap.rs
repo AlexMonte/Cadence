@@ -1,16 +1,15 @@
 //! Minimap shell, edge-drag resize, and timeline edge handle.
 
-use bevy::prelude::*;
+use bevy::{picking::prelude::*, prelude::*};
 
-use crate::{
-    application::editor::EditorAttention, application::pipeline::scene_sync::VisibleBoardState,
-    domain::document::DocumentQueries,
-};
+use crate::application::pipeline::scene_sync::VisibleBoardState;
+use crate::application::pipeline::ui_projection::MinimapPaint;
 
 use super::minimap_view::{UiMinimapContent, spawn_minimap_content};
 use crate::adapter::load_up::UiSpriteAssets;
 
-use super::tile_shell::{PANEL_BG, PanelBackdrop, spawn_shell_panel};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+use crate::infrastructure::ui::widgets::{PanelBackdrop, spawn_shell_panel};
 
 pub use super::minimap_view::{
     MinimapContentCache, MinimapSlotAction, UiMinimapCanvas, sync_minimap_content,
@@ -29,9 +28,9 @@ pub struct TimelineEdgeHandle;
 /// board's left edge to the right (or press `M`) to reveal it.
 pub fn spawn_minimap_panel(
     parent: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     visible: &VisibleBoardState,
-    queries: &DocumentQueries<'_>,
-    attention: &EditorAttention,
+    paint: &MinimapPaint,
     width: f32,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
@@ -55,7 +54,7 @@ pub fn spawn_minimap_panel(
                 ..default()
             },
             ZIndex(3),
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme.chrome.panel_bg),
         ),
         images,
         sprites,
@@ -79,7 +78,7 @@ pub fn spawn_minimap_panel(
                     },
                 ))
                 .with_children(|content| {
-                    spawn_minimap_content(content, images, visible, queries, attention, sprites);
+                    spawn_minimap_content(content, theme, images, visible, paint, sprites);
                 });
         },
     );
@@ -87,7 +86,11 @@ pub fn spawn_minimap_panel(
 
 /// Drag handle on the board's left seam (sits at the minimap's right edge
 /// while open); pull right to reveal/widen the minimap, left to close it.
-pub fn spawn_minimap_edge_handle(board_column: &mut ChildSpawnerCommands<'_>, minimap_width: f32) {
+pub fn spawn_minimap_edge_handle(
+    board_column: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
+    minimap_width: f32,
+) {
     board_column
         .spawn((
             MinimapEdgeHandle,
@@ -100,7 +103,7 @@ pub fn spawn_minimap_edge_handle(board_column: &mut ChildSpawnerCommands<'_>, mi
                 ..default()
             },
             ZIndex(4),
-            BackgroundColor(Color::srgba(0.35, 0.40, 0.50, 0.15)),
+            BackgroundColor(theme.chrome.edge_handle_active),
             Pickable::default(),
         ))
         .observe(super::on_minimap_edge_drag_start)
@@ -109,7 +112,7 @@ pub fn spawn_minimap_edge_handle(board_column: &mut ChildSpawnerCommands<'_>, mi
 }
 
 /// Full-width grip on the breadcrumb bar — drag upward to reveal the piano-roll band.
-pub fn spawn_timeline_edge_handle(tabs_bar: &mut ChildSpawnerCommands<'_>) {
+pub fn spawn_timeline_edge_handle(tabs_bar: &mut ChildSpawnerCommands<'_>, theme: &MusaicUiTheme) {
     tabs_bar
         .spawn((
             TimelineEdgeHandle,
@@ -122,7 +125,7 @@ pub fn spawn_timeline_edge_handle(tabs_bar: &mut ChildSpawnerCommands<'_>) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.35, 0.40, 0.50, 0.22)),
+            BackgroundColor(theme.chrome.edge_handle_idle),
             Pickable::default(),
         ))
         .observe(super::on_timeline_edge_drag_start)
@@ -133,10 +136,10 @@ pub fn spawn_timeline_edge_handle(tabs_bar: &mut ChildSpawnerCommands<'_>) {
                 Node {
                     width: px(36.0),
                     height: px(3.0),
-                    border_radius: BorderRadius::all(px(2.0)),
+                    border_radius: BorderRadius::all(px(theme.radii.sm / 2.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.72, 0.76, 0.82, 0.85)),
+                BackgroundColor(theme.chrome.edge_handle),
             ));
         });
 }

@@ -1,16 +1,21 @@
-//! Compose shell panel chrome (`panel_bg` / `section_panel_bg` sprites with color fallback).
+//! Shell panel chrome (`panel_bg` / `section_panel_bg` sprites with theme fallback).
 
 use bevy::prelude::*;
 
 use crate::adapter::load_up::UiSpriteAssets;
-
-use super::ui_sprites;
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+use crate::infrastructure::ui::ui_sprites;
 
 /// Main menu / inspector / board frame background (fallback when sprites are not loaded).
-pub const PANEL_BG: Color = Color::srgb(0.14, 0.15, 0.19);
+/// Prefer [`MusaicUiTheme::chrome.panel_bg`] at spawn sites.
+pub fn panel_bg(theme: &MusaicUiTheme) -> Color {
+    theme.chrome.panel_bg
+}
 
 /// Inset areas (minimap grid, piano-roll body, drawer scroll).
-pub const PANEL_INSET_BG: Color = Color::srgb(0.10, 0.11, 0.14);
+pub fn panel_inset_bg(theme: &MusaicUiTheme) -> Color {
+    theme.chrome.panel_inset
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelBackdrop {

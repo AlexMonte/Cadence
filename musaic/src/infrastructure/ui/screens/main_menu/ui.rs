@@ -4,6 +4,7 @@ use bevy_feathers::theme::ThemedText;
 use super::launch::{EditorLaunchIntent, MenuUiRoot};
 use crate::adapter::persistence::load_recent_projects;
 use crate::infrastructure::app::AppState;
+use crate::infrastructure::ui::theme::MusaicUiTheme;
 
 #[derive(Component)]
 struct MainMenuScreen;
@@ -44,7 +45,11 @@ impl EditorLaunchIntentHolder {
     }
 }
 
-fn spawn_main_menu(mut commands: Commands, mut root: ResMut<MenuUiRoot>) {
+fn spawn_main_menu(
+    mut commands: Commands,
+    mut root: ResMut<MenuUiRoot>,
+    theme: Res<MusaicUiTheme>,
+) {
     let screen = commands
         .spawn((
             MainMenuScreen,
@@ -55,24 +60,25 @@ fn spawn_main_menu(mut commands: Commands, mut root: ResMut<MenuUiRoot>) {
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: Val::Px(12.0),
-                padding: UiRect::all(Val::Px(32.0)),
+                row_gap: Val::Px(theme.spacing.lg),
+                padding: UiRect::all(Val::Px(theme.spacing.xl * 2.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.08, 0.09, 0.12)),
+            BackgroundColor(theme.chrome.window_bg),
         ))
         .with_children(|menu| {
             menu.spawn((
                 Text::new("Musaic"),
                 TextFont {
-                    font_size: 32.0,
+                    font_size: theme.typography.brand,
                     ..default()
                 },
                 ThemedText,
             ));
-            spawn_menu_button(menu, "New project".to_string(), MainMenuAction::NewProject);
+            spawn_menu_button(menu, &theme, "New project".to_string(), MainMenuAction::NewProject);
             spawn_menu_button(
                 menu,
+                &theme,
                 "Open project…".to_string(),
                 MainMenuAction::OpenProject,
             );
@@ -84,14 +90,19 @@ fn spawn_main_menu(mut commands: Commands, mut root: ResMut<MenuUiRoot>) {
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string())
                 );
-                spawn_menu_button(menu, label, MainMenuAction::OpenRecent(path));
+                spawn_menu_button(menu, &theme, label, MainMenuAction::OpenRecent(path));
             }
         })
         .id();
     root.0 = Some(screen);
 }
 
-fn spawn_menu_button(parent: &mut ChildSpawnerCommands<'_>, label: String, action: MainMenuAction) {
+fn spawn_menu_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
+    label: String,
+    action: MainMenuAction,
+) {
     parent
         .spawn((
             MenuButton(action),
@@ -101,12 +112,13 @@ fn spawn_menu_button(parent: &mut ChildSpawnerCommands<'_>, label: String, actio
                 display: Display::Flex,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                padding: UiRect::horizontal(Val::Px(16.0)),
+                padding: UiRect::horizontal(Val::Px(theme.spacing.xl)),
                 border: UiRect::all(Val::Px(1.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.2, 0.22, 0.28, 1.0)),
-            BorderColor::all(Color::srgba(0.35, 0.38, 0.45, 1.0)),
+            BackgroundColor(theme.chrome.button_bg),
+            BorderColor::all(theme.chrome.border),
+            Pickable::default(),
         ))
         .observe(on_menu_button_click)
         .with_children(|btn| {

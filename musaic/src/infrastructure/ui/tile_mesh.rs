@@ -50,7 +50,7 @@ impl TileMeshPrimitive {
     /// Transform placing this tile at `center` (XZ) resting on the plane at `center.y`.
     ///
     /// Single source of truth for board tiles, palette entries, and drag ghosts —
-    /// see `docs/BOARD_PLACEMENT.md` (ghost must match `try_spawn_gltf_tile`).
+    /// see `docs/BOARD_PLACEMENT.md` (ghost must match `spawn_board_tile`).
     pub fn board_transform(&self, center: Vec3) -> Transform {
         Transform::from_translation(Vec3::new(center.x, center.y + self.ground_lift, center.z))
             .with_scale(Vec3::splat(self.fit_scale))

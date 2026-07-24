@@ -11,7 +11,8 @@ use crate::adapter::load_up::{UiSpriteAssets, pixel_ui_display_size};
 use crate::application::editor::PortSlotState;
 use crate::application::pipeline::scene_sync::VisibleNodeKind;
 
-use super::tile_shell::{PANEL_BG, PANEL_INSET_BG, PanelBackdrop};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+use crate::infrastructure::ui::widgets::PanelBackdrop;
 
 /// Border inset (texels) for 32×32 `panel_bg` / `section_panel_bg` nine-slice sheets.
 pub const PANEL_NINE_SLICE_BORDER: f32 = 4.0;
@@ -30,11 +31,6 @@ pub fn panel_nine_slice_slicer() -> TextureSlicer {
 pub fn panel_backdrop_image(handle: &Handle<Image>) -> ImageNode {
     ImageNode::new(handle.clone()).with_mode(NodeImageMode::Sliced(panel_nine_slice_slicer()))
 }
-
-/// Multiply tint for `section_panel_bg.png`: its center texel is near-white,
-/// which would render themed (light) text unreadable — darken it into a panel
-/// surface while keeping the nine-slice border art.
-const SECTION_BACKDROP_TINT: Color = Color::srgb(0.19, 0.20, 0.25);
 
 /// Build an [`ImageNode`] for fixed-size UI sprites (icons, glyphs).
 pub fn image_node(handle: &Handle<Image>) -> ImageNode {
@@ -88,12 +84,13 @@ pub fn spawn_panel_backdrop(
     sprites: Option<&UiSpriteAssets>,
     backdrop: PanelBackdrop,
 ) {
+    let chrome = MusaicUiTheme::default_dark().chrome;
     let (handle, fallback, tint) = match backdrop {
-        PanelBackdrop::Panel => (sprites.map(|a| a.panel_bg.clone()), PANEL_BG, None),
+        PanelBackdrop::Panel => (sprites.map(|a| a.panel_bg.clone()), chrome.panel_bg, None),
         PanelBackdrop::Section => (
             sprites.map(|a| a.section_panel_bg.clone()),
-            PANEL_INSET_BG,
-            Some(SECTION_BACKDROP_TINT),
+            chrome.panel_inset,
+            Some(chrome.section_tint),
         ),
         PanelBackdrop::None => return,
     };

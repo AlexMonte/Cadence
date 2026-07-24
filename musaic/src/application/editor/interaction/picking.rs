@@ -176,7 +176,8 @@ mod tests {
             .insert_tile(
                 &mut document.surfaces,
                 document.root_surface,
-                PlacementAddress::BoardSlot(BoardSlot::new(1, 0)),
+                // East of the 2×2 output at (0,0).
+                PlacementAddress::BoardSlot(BoardSlot::new(2, 0)),
                 TileSpawnKind::Output {
                     name: "atomish".into(),
                 },

@@ -60,7 +60,8 @@ pub mod prelude {
     pub use crate::domain::rational::{Coord, Time};
     pub use crate::domain::score::{
         ConflictPolicy, ControlScore, ControlScoreNodeId, DeduplicateKey, DeduplicatePolicy,
-        DeduplicateWinner, DegradePolicy, PriorityMergePolicy, Score, ScoreNodeId, WeightedScore,
+        DeduplicateWinner, DegradePolicy, PriorityMergePolicy, Score, ScoreNodeId,
+        WeightedControlScore, WeightedScore,
     };
     pub use crate::domain::signal::{Signal, Waveform};
     pub use crate::domain::space::{Axis, Point3, SpatialMotion};

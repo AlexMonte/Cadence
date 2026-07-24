@@ -1,38 +1,30 @@
 //! Right-rail inspector: panel column chrome plus the stacked panel bodies
-//! projected from the application-layer [`InspectorLayout`].
+//! projected from [`EditorUiProjection`] paint DTOs.
 
 pub mod panels;
 
 use bevy::{prelude::*, ui::widget::Text as UiText};
-use bevy_feathers::{
-    controls::{ButtonProps, button},
-    theme::ThemedText,
-};
-use bevy_ui_widgets::{Activate, observe};
+use bevy_feathers::theme::ThemedText;
+use bevy_ui_widgets::Activate;
 
 use crate::{
     application::board_view_settings::{AtomDisplayMode, AtomDisplayScope, BoardViewSettings},
     application::command::{EditorCommand, EditorCommandBus},
-    application::editor::{
-        EditorSession, InspectorLayout, InspectorPanelKind, inspector_panel_title,
-    },
+    application::editor::{InspectorLayout, InspectorPanelKind},
     application::pipeline::runtime::RuntimePreviewSnapshot,
-    application::pipeline::scene_sync::VisibleBoardState,
-    application::session::MusaicProject,
-    domain::document::DocumentQueries,
+    application::pipeline::ui_projection::{
+        EditorUiProjection, InspectorPaint, InspectorPanelPaint,
+    },
 };
 
 use crate::adapter::load_up::UiSpriteAssets;
 use crate::infrastructure::ui::controls::UiTilePaletteCamera;
-use crate::infrastructure::ui::tile_shell::{
-    PANEL_BG, PANEL_INSET_BG, PanelBackdrop, spawn_shell_panel,
+use crate::infrastructure::ui::theme::{
+    INSPECTOR_SLIDE_DISTANCE_FALLBACK, InspectorPanelHost, InspectorSlideLayer,
+    InspectorTransitionQueue, MusaicUiTheme, SlideDirection, UiInspectorBody, UiInspectorHeader,
+    UiInspectorViewport, finish_active_slides,
 };
-
-pub(crate) use crate::infrastructure::ui::inspector_transition::InspectorPanelHost;
-use crate::infrastructure::ui::inspector_transition::{
-    INSPECTOR_SLIDE_DISTANCE_FALLBACK, InspectorSlideLayer, InspectorTransitionQueue,
-    SlideDirection, UiInspectorBody, UiInspectorHeader, UiInspectorViewport, finish_active_slides,
-};
+use crate::infrastructure::ui::widgets::{PanelBackdrop, musaic_button, spawn_shell_panel};
 
 const RIGHT_PANEL_PERCENT: f32 = 35.0;
 const INSPECTOR_MIN_WIDTH: f32 = 300.0;
@@ -43,11 +35,10 @@ struct UiShellInspector;
 
 pub(crate) fn spawn_inspector_column(
     parent: &mut ChildSpawnerCommands<'_>,
-    queries: &DocumentQueries<'_>,
+    theme: &MusaicUiTheme,
     layout: &InspectorLayout,
-    session: &EditorSession,
+    paint: &InspectorPaint,
     preview_snapshot: &RuntimePreviewSnapshot,
-    visible: &VisibleBoardState,
     palette_camera: Option<Entity>,
     host: &mut InspectorPanelHost,
     sprites: Option<&UiSpriteAssets>,
@@ -69,7 +60,7 @@ pub(crate) fn spawn_inspector_column(
                 row_gap: px(8),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme.chrome.panel_bg),
         ),
         images,
         sprites,
@@ -87,7 +78,7 @@ pub(crate) fn spawn_inspector_column(
                         ..default()
                     },
                 ))
-                .with_children(|header| spawn_inspector_header(header, layout, queries))
+                .with_children(|header| spawn_inspector_header(header, paint))
                 .id();
             host.header = Some(header_id);
 
@@ -109,12 +100,11 @@ pub(crate) fn spawn_inspector_column(
                         .with_children(|body| {
                             spawn_inspector_body(
                                 body,
+                                theme,
                                 images,
-                                queries,
                                 layout,
-                                session,
+                                paint,
                                 preview_snapshot,
-                                visible,
                                 view_settings,
                                 sprites,
                                 palette_camera,
@@ -150,28 +140,22 @@ fn inspector_body_bundle() -> impl Bundle {
     )
 }
 
-fn spawn_inspector_header(
-    panel: &mut ChildSpawnerCommands<'_>,
-    layout: &InspectorLayout,
-    queries: &DocumentQueries<'_>,
-) {
-    let title = crate::application::editor::inspector_title(layout, queries);
-    panel.spawn((UiText::new(title), ThemedText));
+fn spawn_inspector_header(panel: &mut ChildSpawnerCommands<'_>, paint: &InspectorPaint) {
+    panel.spawn((UiText::new(paint.header_title.clone()), ThemedText));
 }
 
 /// Spawn the inspector body as a stack of panels (top of stack rendered first).
 ///
 /// Each panel gets shared chrome from
-/// [`tile_shell`](crate::infrastructure::ui::tile_shell); the drawer panel
+/// [`widgets`](crate::infrastructure::ui::widgets); the drawer panel
 /// grows to fill remaining space, other panels hug their content.
 pub(crate) fn spawn_inspector_body(
     panel: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
-    queries: &DocumentQueries<'_>,
     layout: &InspectorLayout,
-    session: &EditorSession,
+    paint: &InspectorPaint,
     preview_snapshot: &RuntimePreviewSnapshot,
-    visible: &VisibleBoardState,
     view_settings: BoardViewSettings,
     ui_sprites: Option<&UiSpriteAssets>,
     palette_camera: Option<Entity>,
@@ -182,8 +166,20 @@ pub(crate) fn spawn_inspector_body(
         return;
     }
 
+    debug_assert_eq!(
+        layout.panels.len(),
+        paint.panels.len(),
+        "inspector layout and paint must stay 1:1"
+    );
+
     let top_index = layout.panels.len() - 1;
-    for (index, kind) in layout.panels.iter().enumerate().rev() {
+    for (index, (kind, panel_paint)) in layout
+        .panels
+        .iter()
+        .zip(paint.panels.iter())
+        .enumerate()
+        .rev()
+    {
         let grows = matches!(kind, InspectorPanelKind::DrawerPanel { .. });
         let panel_node = Node {
             width: percent(100),
@@ -199,7 +195,7 @@ pub(crate) fn spawn_inspector_body(
         };
         spawn_shell_panel(
             panel,
-            (panel_node, BackgroundColor(PANEL_INSET_BG)),
+            (panel_node, BackgroundColor(theme.chrome.panel_inset)),
             images,
             ui_sprites,
             PanelBackdrop::Section,
@@ -208,7 +204,7 @@ pub(crate) fn spawn_inspector_body(
                 // header names only the topmost panel).
                 if index != top_index {
                     content.spawn((
-                        UiText::new(inspector_panel_title(kind, queries)),
+                        UiText::new(panel_paint_title(panel_paint)),
                         TextFont {
                             font_size: 11.0,
                             ..default()
@@ -219,11 +215,9 @@ pub(crate) fn spawn_inspector_body(
                 spawn_inspector_panel(
                     content,
                     images,
-                    queries,
                     kind,
-                    session,
+                    panel_paint,
                     preview_snapshot,
-                    visible,
                     ui_sprites,
                     palette_camera,
                 );
@@ -232,47 +226,87 @@ pub(crate) fn spawn_inspector_body(
     }
 }
 
+fn panel_paint_title(paint: &InspectorPanelPaint) -> String {
+    match paint {
+        InspectorPanelPaint::Drawer { panel_title, .. }
+        | InspectorPanelPaint::PlacementPrompt { panel_title, .. }
+        | InspectorPanelPaint::TileInspect { panel_title, .. }
+        | InspectorPanelPaint::SelectionSummary { panel_title, .. }
+        | InspectorPanelPaint::TimelineEvent { panel_title, .. }
+        | InspectorPanelPaint::ProjectOverview { panel_title, .. } => panel_title.clone(),
+    }
+}
+
 fn spawn_inspector_panel(
     panel: &mut ChildSpawnerCommands<'_>,
     images: &Assets<Image>,
-    queries: &DocumentQueries<'_>,
     kind: &InspectorPanelKind,
-    session: &EditorSession,
+    paint: &InspectorPanelPaint,
     preview_snapshot: &RuntimePreviewSnapshot,
-    visible: &VisibleBoardState,
     ui_sprites: Option<&UiSpriteAssets>,
     palette_camera: Option<Entity>,
 ) {
-    match kind {
-        InspectorPanelKind::DrawerPanel { target, context } => {
+    match (kind, paint) {
+        (
+            InspectorPanelKind::DrawerPanel { .. },
+            InspectorPanelPaint::Drawer {
+                target_label,
+                armed_label,
+                ..
+            },
+        ) => {
             panels::drawer::spawn_tile_drawer(
                 panel,
-                session,
-                target.as_ref(),
-                *context,
+                target_label.as_deref(),
+                armed_label.as_deref(),
                 palette_camera,
             );
         }
-        InspectorPanelKind::PlacementPromptPanel { target, context } => {
+        (
+            InspectorPanelKind::PlacementPromptPanel { context, .. },
+            InspectorPanelPaint::PlacementPrompt { target_label, .. },
+        ) => {
             panels::placement_prompt::spawn_placement_prompt_panel(
                 panel,
-                target.as_ref(),
+                target_label.as_deref(),
                 *context,
             );
         }
-        InspectorPanelKind::TileInspectPanel { node } => {
+        (
+            InspectorPanelKind::TileInspectPanel { node },
+            InspectorPanelPaint::TileInspect {
+                description, ports, ..
+            },
+        ) => {
             panels::tile_inspect::spawn_tile_inspect_panel(
-                panel, queries, node, visible, images, ui_sprites,
+                panel,
+                node,
+                description,
+                ports.as_ref(),
+                images,
+                ui_sprites,
             );
         }
-        InspectorPanelKind::ProjectOverviewPanel { surface } => {
+        (
+            InspectorPanelKind::ProjectOverviewPanel { surface },
+            InspectorPanelPaint::ProjectOverview { .. },
+        ) => {
             panels::project_overview::spawn_project_overview_panel(panel, *surface);
         }
-        InspectorPanelKind::SelectionSummaryPanel { count, primary } => {
+        (
+            InspectorPanelKind::SelectionSummaryPanel { count, primary },
+            InspectorPanelPaint::SelectionSummary { .. },
+        ) => {
             panels::selection::spawn_selection_summary_panel(panel, *count, primary.as_ref());
         }
-        InspectorPanelKind::TimelineEventPanel { event } => {
+        (
+            InspectorPanelKind::TimelineEventPanel { event },
+            InspectorPanelPaint::TimelineEvent { .. },
+        ) => {
             panels::timeline_event::spawn_timeline_event_panel(panel, *event, preview_snapshot);
+        }
+        _ => {
+            panic!("inspector layout/paint variant mismatch — projection writer must stay 1:1");
         }
     }
 }
@@ -280,10 +314,9 @@ fn spawn_inspector_panel(
 pub(crate) fn process_inspector_transitions(
     mut queue: ResMut<InspectorTransitionQueue>,
     mut host: ResMut<InspectorPanelHost>,
-    project: Res<MusaicProject>,
-    session: Res<EditorSession>,
+    theme: Res<MusaicUiTheme>,
+    projection: Res<EditorUiProjection>,
     preview_snapshot: Res<RuntimePreviewSnapshot>,
-    visible: Res<VisibleBoardState>,
     view_settings: Res<BoardViewSettings>,
     ui_sprites: Option<Res<UiSpriteAssets>>,
     images: Res<Assets<Image>>,
@@ -299,9 +332,7 @@ pub(crate) fn process_inspector_transitions(
         return;
     };
 
-    let queries = DocumentQueries::new(&project.document);
-
-    refresh_inspector_chrome(&mut commands, &host, &pending.layout, &queries);
+    refresh_inspector_chrome(&mut commands, &host, &projection.inspector_paint);
 
     let distance = viewport_nodes
         .get(viewport)
@@ -337,12 +368,11 @@ pub(crate) fn process_inspector_transitions(
             .with_children(|body| {
                 spawn_inspector_body(
                     body,
+                    &theme,
                     &images,
-                    &queries,
                     &pending.layout,
-                    &session,
+                    &projection.inspector_paint,
                     &preview_snapshot,
-                    &visible,
                     *view_settings,
                     ui_sprites.as_deref(),
                     palette_camera,
@@ -369,13 +399,12 @@ pub(crate) fn process_inspector_transitions(
 fn refresh_inspector_chrome(
     commands: &mut Commands,
     host: &InspectorPanelHost,
-    layout: &InspectorLayout,
-    queries: &DocumentQueries<'_>,
+    paint: &InspectorPaint,
 ) {
     if let Some(header) = host.header {
         commands.entity(header).despawn_children();
         commands.entity(header).with_children(|panel| {
-            spawn_inspector_header(panel, layout, queries);
+            spawn_inspector_header(panel, paint);
         });
     }
 }
@@ -394,14 +423,19 @@ fn spawn_view_settings_controls(panel: &mut ChildSpawnerCommands<'_>, settings: 
         (AtomDisplayScope::ContainerInterior, "Container interior"),
     ] {
         let mode = settings.label_for_scope(scope);
-        panel.spawn((
-            button(
-                ButtonProps::default(),
+        panel
+            .spawn(musaic_button(
+                Node {
+                    min_height: px(28.0),
+                    padding: UiRect::horizontal(px(8.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
                 ViewSettingsCycleButton(scope),
-                Spawn((UiText::new(format!("{label}: {mode}")), ThemedText)),
-            ),
-            observe(on_view_settings_cycle_activated),
-        ));
+                format!("{label}: {mode}"),
+            ))
+            .observe(on_view_settings_cycle_activated);
     }
 }
 

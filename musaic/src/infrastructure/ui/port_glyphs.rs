@@ -15,7 +15,7 @@ use crate::{
     domain::board::BoardSurfaceId,
     infrastructure::ui::{
         InspectorButtonAction,
-        board_3d::BoardPickTarget,
+        board::BoardPickTarget,
         render_layers::SCENE_NODE_VISIBILITY,
         ui_sprites::{self, port_slot_image},
     },

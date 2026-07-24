@@ -3,7 +3,6 @@ pub mod command;
 pub mod editor;
 pub mod history;
 pub mod pipeline;
-pub mod query;
 pub mod session;
 
 pub use board_view_settings::{AtomDisplayMode, AtomDisplayScope, BoardViewSettings};

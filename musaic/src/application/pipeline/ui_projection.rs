@@ -1,7 +1,7 @@
 //! Unified UI read model — one projection after SceneSync, one region dirty set.
 //!
 //! **Single writer:** [`compute_and_store_ui_projection`] (SceneSync, after
-//! `VisibleBoardState`). Region systems in RenderUi / board_3d consume
+//! `VisibleBoardState`). Region systems in RenderUi / board consume
 //! [`UiDirty`] flags; they never recompute inspector layout or invent fingerprints.
 
 use std::collections::BTreeSet;
@@ -12,16 +12,18 @@ use bevy::prelude::*;
 use tessera::prelude::NodeId;
 
 use crate::application::editor::{
-    CursorInteraction, CursorInteractionPhase, DrawerPanelState, EditorAttention, EditorSession,
-    InspectorLayout, InspectorPanelKind, MinimapPanelState, SelectionState, TileLibraryContextKind,
-    TimelinePanelState, WorkspaceLayoutKind, basic_tile_options, derive_inspector_layout,
-    layout_for_mode,
+    ConnectionEndpointView, CursorInteraction, CursorInteractionPhase, DrawerPanelState,
+    EditorAttention, EditorSession, InspectorLayout, InspectorPanelKind, MinimapPanelState,
+    SelectionState, TileDrawerItem, TileLibraryContextKind, TimelinePanelState,
+    WorkspaceLayoutKind, basic_tile_options, derive_inspector_layout, drawer_item_short_label,
+    inspector_panel_title, inspector_title, layout_for_mode, minimap_surface_buttons,
+    placement_target_label, tile_inspect_description, tile_inspect_title,
 };
 use crate::application::pipeline::runtime::{ProjectedEventId, RuntimePreviewSnapshot};
 use crate::application::pipeline::scene_sync::{VisibleBoardState, focused_node_from_attention};
 use crate::application::session::MusaicProject;
-use crate::domain::board::{BoardSlot, BoardSurfaceId};
-use crate::domain::document::{DocumentQueries, TileSpawnKind};
+use crate::domain::board::{BoardSlot, BoardSurfaceId, BoardSurfaceKind};
+use crate::domain::document::{DocumentQueries, PlacementAddress, TileSpawnKind};
 use crate::infrastructure::diagnostics::DiagnosticStore;
 
 /// Chrome dimensions and readiness that drive shell structure / layout.
@@ -49,6 +51,62 @@ pub struct PaletteFingerprint {
     pub context: TileLibraryContextKind,
     pub armed: Option<TileSpawnKind>,
     pub options_hash: u64,
+    /// Catalog options for the current drawer context (RenderUi paints these).
+    pub options: Vec<TileDrawerItem>,
+    /// Short label for the armed tile ("Armed: …"), if any.
+    pub armed_label: Option<String>,
+}
+
+/// Paint-ready inspector panel payloads (1:1 with [`InspectorLayout::panels`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InspectorPanelPaint {
+    Drawer {
+        target_label: Option<String>,
+        armed_label: Option<String>,
+        panel_title: String,
+    },
+    PlacementPrompt {
+        target_label: Option<String>,
+        panel_title: String,
+    },
+    TileInspect {
+        title: String,
+        description: String,
+        ports: Option<ConnectionEndpointView>,
+        panel_title: String,
+    },
+    SelectionSummary {
+        count: usize,
+        primary_label: Option<String>,
+        panel_title: String,
+    },
+    TimelineEvent {
+        event: ProjectedEventId,
+        panel_title: String,
+    },
+    ProjectOverview {
+        surface: BoardSurfaceId,
+        panel_title: String,
+    },
+}
+
+/// Inspector chrome strings derived once in the projection writer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InspectorPaint {
+    pub header_title: String,
+    pub panels: Vec<InspectorPanelPaint>,
+}
+
+/// Minimap surface navigation buttons.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MinimapPaint {
+    pub surface_buttons: Vec<(String, BoardSurfaceId)>,
+}
+
+/// Bottom-tab breadcrumb trail (label + surface), derived once in the projection writer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BreadcrumbPaint {
+    pub entries: Vec<(String, BoardSurfaceId)>,
 }
 
 /// Canonical UI facts for one frame. Diffed to produce [`UiDirty`].
@@ -59,6 +117,9 @@ pub struct EditorUiProjection {
     pub layout_kind: WorkspaceLayoutKind,
     pub inspector: InspectorLayout,
     pub inspector_identity: String,
+    pub inspector_paint: InspectorPaint,
+    pub minimap_paint: MinimapPaint,
+    pub breadcrumbs: BreadcrumbPaint,
     pub selection_ids: BTreeSet<NodeId>,
     pub focused_node: Option<NodeId>,
     pub focused_slot: Option<BoardSlot>,
@@ -80,6 +141,12 @@ impl Default for EditorUiProjection {
             layout_kind: WorkspaceLayoutKind::ComposeBoardInspector,
             inspector: InspectorLayout::default(),
             inspector_identity: "empty".into(),
+            inspector_paint: InspectorPaint {
+                header_title: "Context".into(),
+                panels: Vec::new(),
+            },
+            minimap_paint: MinimapPaint::default(),
+            breadcrumbs: BreadcrumbPaint::default(),
             selection_ids: BTreeSet::new(),
             focused_node: None,
             focused_slot: None,
@@ -91,6 +158,8 @@ impl Default for EditorUiProjection {
                 context: TileLibraryContextKind::RootBoard,
                 armed: None,
                 options_hash: 0,
+                options: Vec::new(),
+                armed_label: None,
             },
             chrome: ShellChrome {
                 drawer_open: false,
@@ -182,6 +251,15 @@ pub fn compute_editor_ui_projection(inputs: &UiProjectionInputs<'_>) -> EditorUi
         .drawer_context()
         .unwrap_or(TileLibraryContextKind::RootBoard);
     let options = basic_tile_options(palette_context);
+    let armed = inputs.session.armed_tile().cloned();
+    let armed_label = armed.as_ref().map(drawer_item_short_label);
+    let inspector_paint = build_inspector_paint(&inspector, &queries, inputs.visible, &armed_label);
+    let minimap_paint = MinimapPaint {
+        surface_buttons: minimap_surface_buttons(&queries, inputs.attention.active_board()),
+    };
+    let breadcrumbs = BreadcrumbPaint {
+        entries: breadcrumb_entries(&queries, active_surface),
+    };
 
     EditorUiProjection {
         document_revision: inputs.project.document.revision.0,
@@ -189,6 +267,9 @@ pub fn compute_editor_ui_projection(inputs: &UiProjectionInputs<'_>) -> EditorUi
         layout_kind: layout_for_mode(inputs.attention.workspace_mode),
         inspector,
         inspector_identity,
+        inspector_paint,
+        minimap_paint,
+        breadcrumbs,
         selection_ids: inputs.selection.nodes.iter().cloned().collect(),
         focused_node: focused_node_from_attention(inputs.attention),
         focused_slot: focused_slot_from_attention(inputs.attention),
@@ -198,8 +279,10 @@ pub fn compute_editor_ui_projection(inputs: &UiProjectionInputs<'_>) -> EditorUi
         diagnostics_summary: format_diagnostics_summary(inputs.diagnostics),
         palette: PaletteFingerprint {
             context: palette_context,
-            armed: inputs.session.armed_tile().cloned(),
+            armed,
             options_hash: hash_tile_options(&options),
+            options,
+            armed_label,
         },
         chrome: ShellChrome {
             drawer_open,
@@ -218,11 +301,82 @@ pub fn compute_editor_ui_projection(inputs: &UiProjectionInputs<'_>) -> EditorUi
     }
 }
 
+fn build_inspector_paint(
+    layout: &InspectorLayout,
+    queries: &DocumentQueries<'_>,
+    visible: &VisibleBoardState,
+    armed_label: &Option<String>,
+) -> InspectorPaint {
+    let header_title = inspector_title(layout, queries);
+    let panels = layout
+        .panels
+        .iter()
+        .map(|panel| {
+            let panel_title = inspector_panel_title(panel, queries);
+            match panel {
+                InspectorPanelKind::DrawerPanel { target, .. } => InspectorPanelPaint::Drawer {
+                    target_label: target.as_ref().map(placement_target_label),
+                    armed_label: armed_label.clone(),
+                    panel_title,
+                },
+                InspectorPanelKind::PlacementPromptPanel { target, .. } => {
+                    InspectorPanelPaint::PlacementPrompt {
+                        target_label: target.as_ref().map(placement_target_label),
+                        panel_title,
+                    }
+                }
+                InspectorPanelKind::TileInspectPanel { node } => {
+                    let ports = visible
+                        .nodes
+                        .iter()
+                        .find(|n| &n.node == node)
+                        .and_then(|n| n.ports.clone())
+                        .or_else(|| {
+                            crate::application::editor::connection_endpoint_view(
+                                queries, node, None, None,
+                            )
+                        });
+                    InspectorPanelPaint::TileInspect {
+                        title: tile_inspect_title(queries, node),
+                        description: tile_inspect_description(queries, node),
+                        ports,
+                        panel_title,
+                    }
+                }
+                InspectorPanelKind::SelectionSummaryPanel { count, primary } => {
+                    InspectorPanelPaint::SelectionSummary {
+                        count: *count,
+                        primary_label: primary.as_ref().map(|id| id.0.clone()),
+                        panel_title,
+                    }
+                }
+                InspectorPanelKind::TimelineEventPanel { event } => {
+                    InspectorPanelPaint::TimelineEvent {
+                        event: *event,
+                        panel_title,
+                    }
+                }
+                InspectorPanelKind::ProjectOverviewPanel { surface } => {
+                    InspectorPanelPaint::ProjectOverview {
+                        surface: *surface,
+                        panel_title,
+                    }
+                }
+            }
+        })
+        .collect();
+    InspectorPaint {
+        header_title,
+        panels,
+    }
+}
+
 /// Diff previous vs next projection into region dirty flags.
 pub fn diff_ui_regions(prev: &EditorUiProjection, next: &EditorUiProjection) -> UiDirty {
     let shell_structure = prev.active_surface != next.active_surface
         || prev.layout_kind != next.layout_kind
-        || prev.chrome.ui_sprites_ready != next.chrome.ui_sprites_ready;
+        || prev.chrome.ui_sprites_ready != next.chrome.ui_sprites_ready
+        || prev.breadcrumbs != next.breadcrumbs;
 
     let shell_layout = prev.chrome.minimap_open != next.chrome.minimap_open
         || prev.chrome.minimap_width != next.chrome.minimap_width
@@ -230,6 +384,7 @@ pub fn diff_ui_regions(prev: &EditorUiProjection, next: &EditorUiProjection) -> 
         || prev.chrome.timeline_height != next.chrome.timeline_height;
 
     let inspector = prev.inspector != next.inspector
+        || prev.inspector_paint != next.inspector_paint
         || prev.document_revision != next.document_revision
         || prev.focused_node != next.focused_node
         || prev.selection_ids != next.selection_ids
@@ -242,7 +397,8 @@ pub fn diff_ui_regions(prev: &EditorUiProjection, next: &EditorUiProjection) -> 
         || prev.board_occupancy_hash != next.board_occupancy_hash
         || prev.connection_hash != next.connection_hash
         || prev.focused_slot != next.focused_slot
-        || prev.focused_node != next.focused_node;
+        || prev.focused_node != next.focused_node
+        || prev.minimap_paint != next.minimap_paint;
 
     let timeline = prev.document_revision != next.document_revision
         || prev.active_surface != next.active_surface
@@ -261,6 +417,51 @@ pub fn diff_ui_regions(prev: &EditorUiProjection, next: &EditorUiProjection) -> 
         diagnostics,
         palette,
     }
+}
+
+fn breadcrumb_entries(
+    queries: &DocumentQueries<'_>,
+    active_surface: Option<BoardSurfaceId>,
+) -> Vec<(String, BoardSurfaceId)> {
+    let Some(mut surface) = active_surface else {
+        return Vec::new();
+    };
+
+    let mut labels = Vec::new();
+
+    loop {
+        match queries.surface_kind(surface) {
+            Some(BoardSurfaceKind::RootBoard) => {
+                labels.push(("Home".to_string(), surface));
+                break;
+            }
+            Some(BoardSurfaceKind::ContainerStack { container }) => {
+                let container_node = NodeId::new(container.0.clone());
+                if let Some(location) = queries.location_of(&container_node) {
+                    let label = match location.address {
+                        PlacementAddress::BoardSlot(slot) => {
+                            format!("Container {}:{}", slot.x, slot.y)
+                        }
+                        PlacementAddress::StackIndex(index) => {
+                            format!("Container @{}", index.0)
+                        }
+                    };
+                    labels.push((label, surface));
+                    surface = location.surface;
+                } else {
+                    labels.push(("Container".to_string(), surface));
+                    break;
+                }
+            }
+            None => {
+                labels.push(("Unknown".to_string(), surface));
+                break;
+            }
+        }
+    }
+
+    labels.reverse();
+    labels
 }
 
 /// Structural identity of the panel stack for inspector slide animation.
@@ -543,6 +744,26 @@ mod tests {
     }
 
     #[test]
+    fn layout_kind_change_dirties_shell_structure() {
+        let a = EditorUiProjection::default();
+        let mut b = a.clone();
+        b.layout_kind = WorkspaceLayoutKind::TimelineStackedOverBoardInspector;
+        let dirty = diff_ui_regions(&a, &b);
+        assert!(dirty.shell_structure);
+    }
+
+    #[test]
+    fn breadcrumb_change_dirties_shell_structure() {
+        let a = EditorUiProjection::default();
+        let mut b = a.clone();
+        b.breadcrumbs = BreadcrumbPaint {
+            entries: vec![("Home".into(), BoardSurfaceId(0))],
+        };
+        let dirty = diff_ui_regions(&a, &b);
+        assert!(dirty.shell_structure);
+    }
+
+    #[test]
     fn occupancy_hash_changes_when_node_moves() {
         let mut visible = VisibleBoardState::default();
         visible.nodes.push(VisibleBoardNode {
@@ -553,6 +774,8 @@ mod tests {
             selected: false,
             focused: false,
             icon: None,
+            atom: None,
+            ports: None,
             surface_content: TileSurfaceContent::Empty,
         });
         let h1 = hash_board_occupancy(&visible);

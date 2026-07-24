@@ -163,36 +163,41 @@ Systems (registered by `CadencePlugin`):
 
 `PlaybackRuntime` is `!Sync`; always install it with `App::insert_non_send_resource`.
 
-## PatternNodeIr ↔ ScoreKind parity
+## PatternNodeIr ↔ ScoreKind / ControlScoreKind parity
 
 Musaic lowering in `musaic/src/application/pipeline/lowering/` should be a **homomorphism**:
 one Tessera `PatternNodeIr` variant maps to one Cadence `ScoreKind` / `ControlScoreKind`
 arm (recursive child mapping). No offset accumulators or shift+merge encodings for
 structural variants that already exist in Tessera.
 
-| PatternNodeIr | ScoreKind / ControlScoreKind | Notes |
-|---------------|------------------------------|-------|
-| `Merge` | `Merge` | Simultaneous children |
-| `Concat` | `Concat` | Sequential children in transport-time order |
-| `CycleRoute` | `CycleRoute` | |
-| `CycleSlots` | `CycleSlots` | |
-| `TimeScale` | `TimeScale` | |
-| `Shift` | `Shift` | |
-| `ReflectCycle` | `ReflectCycle` | |
-| `SpaceShift` | `SpaceShift` | |
-| `SpaceScale` | `SpaceScale` | |
-| `SpaceReflect` | `SpaceReflect` | |
-| `Degrade` | `Degrade` | |
-| `Deduplicate` | `Deduplicate` | |
-| `PriorityMerge` | `PriorityMerge` | |
-| `WeightedChoice` | `WeightedChoice` | |
-| `MaskClip` | `MaskClip` | |
-| `EventStream` | `Voice` / `Mosaic` | Leaf lowering only |
-| `ControlStream` | `ControlTrack` | Leaf lowering only |
-| `ScalarStream` | gate `ControlTrack` | Leaf lowering only |
+Structural ops that exist on **both** trees lower event children with `Score::*` and
+control children with the matching `ControlScore::*` (child cardinality preserved so
+cycle/concat alignment stays honest). Leaf and score-only transforms are noted below.
+
+| PatternNodeIr | ScoreKind | ControlScoreKind | Notes |
+|---------------|-----------|------------------|-------|
+| `Merge` | `Merge` | `Merge` | Simultaneous children |
+| `Concat` | `Concat` | `Concat` | Sequential children in transport-time order |
+| `CycleRoute` | `CycleRoute` | `CycleRoute` | |
+| `CycleSlots` | `CycleSlots` | `CycleSlots` | |
+| `TimeScale` | `TimeScale` | `TimeScale` | |
+| `Shift` | `Shift` | `Shift` | |
+| `ReflectCycle` | `ReflectCycle` | `ReflectCycle` | |
+| `PriorityMerge` | `PriorityMerge` | `PriorityMerge` | Control conflicts treat `ControlKey` as lane identity |
+| `WeightedChoice` | `WeightedChoice` | `WeightedChoice` | Uses `WeightedScore` / `WeightedControlScore` |
+| `MaskClip` | `MaskClip` | `MaskClip` | Clips **visible** spans to open `Gate` regions; never silently merge |
+| `SpaceShift` | `SpaceShift` | — | Score-only; controls pass through |
+| `SpaceScale` | `SpaceScale` | — | Score-only; controls pass through |
+| `SpaceReflect` | `SpaceReflect` | — | Score-only; controls pass through |
+| `Degrade` | `Degrade` | — | Score-only; control-only trees → unsupported diagnostic |
+| `Deduplicate` | `Deduplicate` | — | Score-only; control-only trees → unsupported diagnostic |
+| `EventStream` | `Voice` / `Mosaic` | — | Leaf lowering only |
+| `ControlStream` | — | `Track` | Leaf lowering only |
+| `ScalarStream` | — | gate `Track` | Leaf lowering only |
 
 `WithControls` is Cadence-only composition (source + control tree). Tessera has no
-direct counterpart; Musaic attaches controls when lowering paired event/control material.
+direct counterpart; Musaic attaches controls when lowering paired event/control material
+(`lowered_to_score`).
 
 Board placement UI pipeline (Musaic editor): see
 [`musaic/docs/BOARD_PLACEMENT.md`](../musaic/docs/BOARD_PLACEMENT.md).

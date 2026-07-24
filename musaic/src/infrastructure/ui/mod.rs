@@ -1,39 +1,45 @@
 //! Editor UI: shell chrome, inspector panel stack, and 3D viewports.
 //!
 //! Structure:
-//! - [`shell`] — root layout, top menu, breadcrumbs, rebuild driver
+//! - [`theme`] — design tokens + Feathers mapping + shared motion
+//! - [`widgets`] — button, panel, dialog primitives
+//! - [`screens`] — MainMenu, Loading, UnsavedDialog
+//! - [`shell`] — root layout, in-editor top chrome, breadcrumbs, rebuild driver
 //! - [`inspector`] — right-rail panel stack projected from `InspectorLayout`
-//! - [`board_3d`] / [`controls`] — 3D board and tile palette viewports
+//! - [`board`] / [`controls`] — 3D board and tile palette viewports
 
 use bevy::{prelude::*, state::condition::in_state};
 
 use crate::infrastructure::app::MusaicSet;
 
-pub mod artist_palette;
 pub mod asset_hydration;
-pub mod board_3d;
+pub mod board;
 mod board_camera_nav;
 pub mod board_geometry;
 pub mod camera_rig;
 pub mod controls;
 mod diagnostics_panel;
 pub mod inspector;
-pub mod inspector_transition;
 pub mod minimap;
 pub mod minimap_view;
 pub mod musaic_tile;
 pub mod placement_preview;
 pub mod port_glyphs;
 pub mod render_layers;
+pub mod screens;
 pub mod shell;
+pub mod theme;
 pub mod tile_icons;
 pub mod tile_mesh;
-pub mod tile_shell;
 pub mod tile_surface;
 pub mod tile_visual;
 pub mod timeline_view;
 pub mod transform_tile;
 pub mod ui_sprites;
+pub mod widgets;
+
+/// Backward-compatible re-exports (ArtistPalette folded into theme).
+pub use theme::{ArtistPalette, atom_value_color};
 
 // Shared UI items re-exported for sibling modules (`super::…` imports).
 pub(crate) use inspector::panels::drawer::{
@@ -45,10 +51,10 @@ pub(crate) use shell::layout::{
 };
 pub(crate) use shell::menu::{InspectorButtonAction, on_inspector_button_activated};
 
-use board_3d::Board3dPlugin;
+use board::Board3dPlugin;
 use board_camera_nav::BoardCameraNavPlugin;
 use controls::MusaicUiControlsPlugin;
-use inspector_transition::{InspectorPanelHost, InspectorTransitionQueue, drive_inspector_slides};
+use theme::{InspectorPanelHost, InspectorTransitionQueue, drive_inspector_slides};
 
 pub struct MusaicUiPlugin;
 
@@ -61,7 +67,8 @@ impl Plugin for MusaicUiPlugin {
             tile_surface::TileSurfacePlugin,
             BoardCameraNavPlugin,
             MusaicUiControlsPlugin,
-            crate::infrastructure::menu::MenuPlugin,
+            screens::MainMenuPlugin,
+            screens::LoadingUiPlugin,
             crate::infrastructure::diagnostics::HierarchyAuditPlugin,
         ))
         .init_resource::<InspectorPanelHost>()
