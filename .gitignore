@@ -1,4 +1,7 @@
 /target
+/cadence/target
+/musaic/target
+/tessera/target
 .DS_Store
 %[scene]-*
 /tests
@@ -7,11 +10,6 @@
 /current_project
 *.rs.bk
 /.tmp
-/cadence_frontend/node_modules
-/cadence_frontend/dist
-/cadence_frontend/test-results
-/cadence_frontend/playwright-report
-/cadence_frontend/target
 /.claude
 /docs
 /package-lock.json
@@ -21,3 +19,8 @@
 # Local Cadence export files
 /project.cadence.json
 /project.grooveatlas.json
+/test-results
+dev
+/legacy
+/archieve
+/.github

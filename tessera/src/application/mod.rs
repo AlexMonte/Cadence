@@ -1,0 +1,23 @@
+mod compile_container;
+mod compile_context;
+mod compile_flow_control;
+mod compile_program;
+mod compile_transform;
+mod flow_policy;
+mod flow_policy_ir;
+mod normalize;
+mod relations;
+mod resolve_spatial_program;
+mod stream_shape;
+mod validate;
+mod validate_root_graph;
+mod validate_surface;
+
+pub(crate) use compile_container::compile_container;
+pub(crate) use compile_context::CompileContext;
+pub(crate) use compile_flow_control::compile_flow_control_node_ir;
+pub(crate) use compile_program::compile_normalized_program;
+pub(crate) use compile_transform::compile_transform_node_ir;
+pub(crate) use normalize::normalize_program;
+pub(crate) use resolve_spatial_program::resolve_spatial_program;
+pub(crate) use validate::validate_program_shape;

@@ -1,0 +1,7 @@
+{
+	"format_version": "1.16.100",
+	"minecraft:texture_set": {
+		"color": "mosiac_tile_base",
+		"normal": "mosiac_tile_base_normal"
+	}
+}

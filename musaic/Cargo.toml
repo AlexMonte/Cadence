@@ -1,0 +1,97 @@
+[package]
+name = "musaic"
+version = "0.1.0"
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+publish = false
+
+[dependencies]
+bevy = { version = "0.18", features = ["webgl2"] }
+bevy_feathers = "0.18.0"
+bevy_ui_widgets = "0.18.0"
+seldom_state = "0.16.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tessera = { workspace = true, features = ["bevy"] }
+load_up = { workspace = true }
+cadence = { workspace = true, features = ["bevy"] }
+rfd = "0.17.2"
+symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.15"
+directories = "6.0.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+manganis = "0.7.3"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "DedicatedWorkerGlobalScope",
+    "Document",
+    "Event",
+    "File",
+    "FileList",
+    "FileReader",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Storage",
+    "Url",
+    "Window",
+] }
+
+[dev-dependencies]
+proptest = "1.6.0"
+
+[features]
+default = [
+    # Default to a native dev build.
+    # Use `cargo check-wasm` for the wasm-safe path, because native hot-reload
+    # watchers in `dev_native` do not compile for wasm targets.
+    "dev_native",
+]
+dev = [
+    # Improve compile times for dev builds by linking Bevy as a dynamic library.
+    "bevy/dynamic_linking",
+    "bevy/bevy_dev_tools",
+    "bevy/bevy_ui_debug",
+    # Improve error messages coming from Bevy
+    "bevy/track_location",
+]
+dev_native = [
+    "dev",
+    # Enable asset hot reloading for native dev builds.
+    "bevy/file_watcher",
+    # Enable embedded asset hot reloading for native dev builds.
+    "bevy/embedded_watcher",
+]
+
+[package.metadata.bevy_cli.release]
+# Disable debug functionality in release builds.
+default_features = false
+
+[package.metadata.bevy_cli.web]
+# Tell the random providing crates to use the wasm_js backend on Web.
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
+
+[package.metadata.bevy_cli.web.dev]
+# Disable native-only debug functionality in web builds.
+default_features = false
+features = ["dev"]
+
+[lints]
+workspace = true
+
+# You can configure the warning levels of Bevy lints here. For a list of all lints, see:
+# <https://thebevyflock.github.io/bevy_cli/bevy_lint/lints/>
+[package.metadata.bevy_lint]
+# panicking_methods = "deny"
+# pedantic = "warn"
