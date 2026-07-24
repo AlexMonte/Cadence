@@ -9,8 +9,8 @@ Drawer press (inspector/panels/drawer / tile_palette)
     → EditorSession::begin_placing (PlacementSession)
     → BoardPlacementPointer (sample_board_placement_pointer)
     → sync_placement_hover_from_pointer (slot address)
-    → resolve_placement_preview_center (placement_preview.rs)
-    → tile_visual (GLTF mesh + translucent_preview_material)
+    → resolve_placement_preview_center (hover.or(last_hover) only)
+    → tile_visual::spawn_board_tile (Preview mode)
     → sync_placement_slot_highlight (optional ring)
 ```
 
@@ -18,8 +18,11 @@ Drawer press (inspector/panels/drawer / tile_palette)
 
 - **Camera** (`camera_rig::BoardCameraRig`) frames the board surface; it never reads ghost
   position. All camera motion goes through `CameraRequest` — see `docs/ARCHITECTURE.md`.
-- **Ghost transform** uses the same `TileMeshPrimitive::board_transform` (per-prototype fit
-  scale + ground lift) and tessera footprint as `try_spawn_gltf_tile`.
+- **Ghost center** is session hover geometry only (`hover.or(last_hover)`). Cursor must not
+  invent a slot inside `placement_preview`; slot snap lives in
+  `sync_placement_hover_from_pointer` → `VisibleBoardState::pick_at`.
+- **Ghost transform** uses the same `spawn_board_tile` / `board_tile_transform` path as
+  placed tiles (`BoardTileMode::Preview` only swaps in `translucent_preview_material`).
 - **Preview persistence**: while `EditorSession::is_placing_from_drawer()`, ghost stays at
   `last_hover` when the cursor leaves the board viewport briefly.
 - **Inspector**: panel stack comes from `derive_inspector_layout` (application layer). Tile
@@ -44,10 +47,10 @@ the next frame anyway. Preview systems (step 3) read the current frame's project
 
 ## Drawer visuals
 
-The 3D tile palette (`UiTilePalettePlugin` + `spawn_gltf_tile_mesh`) is the sole
-interactive tile library. On-tile glyphs come from application catalog identity
-(`TileDrawerItem` / `basic_tile_options`); there is no duplicate label-chip grid.
-Palette presses share one funnel: `on_drawer_tile_press` /
-`on_drawer_tile_release` → `DrawerTilePressQueue` (drag past threshold places;
-plain click arms). The viewport fills the drawer panel and the ortho camera
-frames every catalog entry.
+The 3D tile palette (`UiTilePalettePlugin` + `spawn_board_tile_child` with
+`BoardTileMode::Palette`) is the sole interactive tile library. On-tile glyphs
+come from application catalog identity (`TileDrawerItem` / `basic_tile_options`);
+there is no duplicate label-chip grid. Palette presses share one funnel:
+`on_drawer_tile_press` / `on_drawer_tile_release` → `DrawerTilePressQueue` (drag
+past threshold places; plain click arms). The viewport fills the drawer panel
+and the ortho camera frames every catalog entry.

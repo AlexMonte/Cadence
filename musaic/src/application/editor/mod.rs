@@ -30,8 +30,9 @@ pub use layout::{WorkspaceLayoutKind, layout_for_mode};
 pub use panels::{
     DrawerPanelState, InspectorLayout, InspectorPanelKind, MinimapPanelState, TileDrawerItem,
     TileLibraryContextKind, TimelinePanelState, atom_tile_drawer_rows, basic_tile_options,
-    derive_inspector_layout, inspector_panel_title, inspector_title, labeled_tile_drawer_items,
-    placement_target_label, tile_inspect_description, tile_inspect_io_lines, tile_inspect_title,
+    derive_inspector_layout, drawer_item_short_label, inspector_panel_title, inspector_title,
+    labeled_tile_drawer_items, minimap_surface_buttons, placement_target_label,
+    tile_inspect_description, tile_inspect_io_lines, tile_inspect_title,
 };
 pub use selection::{SelectionMode, SelectionState};
 pub use transaction::{

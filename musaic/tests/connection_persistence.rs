@@ -40,7 +40,8 @@ fn connection_round_trip_preserves_relation_count() {
         .insert_tile(
             &mut document.surfaces,
             root,
-            PlacementAddress::BoardSlot(BoardSlot::new(1, 0)),
+            // 2×2 footprints: sequence at (0,0) occupies through (1,1); east neighbor anchors at (2,0).
+            PlacementAddress::BoardSlot(BoardSlot::new(2, 0)),
             TileSpawnKind::Output {
                 name: "main".into(),
             },

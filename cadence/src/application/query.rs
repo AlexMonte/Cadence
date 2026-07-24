@@ -13,6 +13,7 @@ use crate::domain::{
     projection::ProjectedMoment,
     score::{
         ConflictPolicy, ControlScore, ControlScoreKind, ControlScoreNodeId, DeduplicateKey,
+        WeightedControlScore,
         DeduplicatePolicy, DeduplicateWinner, DegradePolicy, PriorityMergePolicy, Score, ScoreKind,
         ScoreNodeId, WeightedScore,
     },
@@ -608,6 +609,109 @@ fn mask_clip_events(
     flatten_lifecycle_groups(clipped_groups)
 }
 
+fn mask_clip_controls(
+    owner: ControlScoreNodeId,
+    source: Vec<EvaluatedControl>,
+    mask_controls: Vec<EvaluatedControl>,
+) -> Vec<EvaluatedControl> {
+    let open_spans = mask_controls
+        .iter()
+        .filter_map(gate_open_span)
+        .collect::<Vec<_>>();
+    if open_spans.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clipped = Vec::new();
+    for control in source {
+        for open_span in &open_spans {
+            let Some(visible) = control.visible.intersection(open_span) else {
+                continue;
+            };
+            clipped.push(control.remap(owner, control.whole, visible, control.value.clone()));
+        }
+    }
+    clipped
+}
+
+fn evaluate_control_priority_merge(
+    children: &[ControlScore],
+    window: &TransportSpan,
+    policy: PriorityMergePolicy,
+) -> Vec<EvaluatedControl> {
+    let mut accepted = Vec::<EvaluatedControl>::new();
+    for child in children {
+        for candidate in evaluate_control_score(child, window) {
+            if !accepted
+                .iter()
+                .any(|existing| control_tiles_conflict(existing, &candidate, policy.conflict()))
+            {
+                accepted.push(candidate);
+            }
+        }
+    }
+    accepted
+}
+
+fn control_tiles_conflict(
+    left: &EvaluatedControl,
+    right: &EvaluatedControl,
+    policy: ConflictPolicy,
+) -> bool {
+    if left.key != right.key {
+        return false;
+    }
+    match policy {
+        ConflictPolicy::SameWholeStartAndIntent => left.whole.start() == right.whole.start(),
+        ConflictPolicy::SameWholeSpanAndIntent => left.whole == right.whole,
+        ConflictPolicy::WholeSpanOverlap => left.whole.intersects(&right.whole),
+    }
+}
+
+fn evaluate_control_weighted_choice(
+    options: &[WeightedControlScore],
+    seed: u64,
+    window: &TransportSpan,
+) -> Vec<EvaluatedControl> {
+    if options.is_empty() {
+        return Vec::new();
+    }
+
+    let mut controls = Vec::new();
+    for cycle_window in split_by_cycle(window) {
+        let cycle_index = cycle_window.start().floor();
+        let Some(selected) = choose_weighted_control_option(options, seed, cycle_index) else {
+            continue;
+        };
+        controls.extend(evaluate_control_score(selected.score(), &cycle_window));
+    }
+    controls
+}
+
+fn choose_weighted_control_option(
+    options: &[WeightedControlScore],
+    seed: u64,
+    cycle_index: i64,
+) -> Option<&WeightedControlScore> {
+    let total_weight = options
+        .iter()
+        .fold(Time::ZERO, |total, option| total + option.weight());
+    if total_weight <= Time::ZERO {
+        return None;
+    }
+
+    let roll = seeded_roll_below(seed, stable_hash(&cycle_index), total_weight);
+    let mut cursor = Time::ZERO;
+    for option in options {
+        cursor = cursor + option.weight();
+        if roll < cursor {
+            return Some(option);
+        }
+    }
+
+    options.last()
+}
+
 fn gate_open_span(control: &EvaluatedControl) -> Option<TransportSpan> {
     if control.key != ControlKey::Gate {
         return None;
@@ -726,6 +830,17 @@ fn evaluate_control_score_unsorted(
         ControlScoreKind::ReflectCycle { inner } => {
             evaluate_reflected_controls(score.id(), inner, window)
         }
+        ControlScoreKind::PriorityMerge { children, policy } => {
+            evaluate_control_priority_merge(children, window, *policy)
+        }
+        ControlScoreKind::WeightedChoice { options, seed } => {
+            evaluate_control_weighted_choice(options, *seed, window)
+        }
+        ControlScoreKind::MaskClip { source, mask } => mask_clip_controls(
+            score.id(),
+            evaluate_control_score(source, window),
+            evaluate_control_score(mask, window),
+        ),
     }
 }
 
@@ -830,9 +945,19 @@ fn control_sequencing_extent(score: &ControlScore) -> Time {
             .max()
             .unwrap_or(Time::ZERO),
         ControlScoreKind::TimeScale { inner, rate } => control_sequencing_extent(inner) * *rate,
-        ControlScoreKind::Shift { inner, .. } | ControlScoreKind::ReflectCycle { inner } => {
-            control_sequencing_extent(inner)
-        }
+        ControlScoreKind::Shift { inner, .. }
+        | ControlScoreKind::ReflectCycle { inner }
+        | ControlScoreKind::MaskClip { source: inner, .. } => control_sequencing_extent(inner),
+        ControlScoreKind::PriorityMerge { children, .. } => children
+            .iter()
+            .map(control_sequencing_extent)
+            .max()
+            .unwrap_or(Time::ZERO),
+        ControlScoreKind::WeightedChoice { options, .. } => options
+            .iter()
+            .map(|option| control_sequencing_extent(option.score()))
+            .max()
+            .unwrap_or(Time::ZERO),
     }
 }
 
@@ -2617,6 +2742,153 @@ mod tests {
         let events = evaluate_score(&score, &span((0, 1), (1, 1))).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].projected().visible(), span((1, 4), (1, 2)));
+    }
+
+    #[test]
+    fn control_mask_clip_limits_visible_span_to_open_gate() {
+        let source = ControlScore::from(
+            ControlTrack::new(
+                Time::ONE,
+                vec![
+                    ControlTile::spanning(
+                        Time::ZERO,
+                        Time::ONE,
+                        ControlKey::Gain,
+                        ControlValue::Scalar(1.0),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let mask = ControlScore::from(
+            ControlTrack::new(
+                Time::ONE,
+                vec![
+                    ControlTile::spanning(
+                        Time::new(1, 4),
+                        Time::new(3, 4),
+                        ControlKey::Gate,
+                        ControlValue::Bool(true),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let controls =
+            evaluate_control_score(&ControlScore::mask_clip(source, mask), &span((0, 1), (1, 1)));
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].whole, span((0, 1), (1, 1)));
+        assert_eq!(controls[0].visible, span((1, 4), (3, 4)));
+        assert_eq!(controls[0].key, ControlKey::Gain);
+    }
+
+    #[test]
+    fn control_priority_merge_keeps_higher_priority_tile_on_overlap() {
+        let high = ControlScore::from(
+            ControlTrack::new(
+                Time::ONE,
+                vec![
+                    ControlTile::spanning(
+                        Time::ZERO,
+                        Time::new(1, 2),
+                        ControlKey::Gain,
+                        ControlValue::Scalar(1.0),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let low = ControlScore::from(
+            ControlTrack::new(
+                Time::ONE,
+                vec![
+                    ControlTile::spanning(
+                        Time::new(1, 4),
+                        Time::new(3, 4),
+                        ControlKey::Gain,
+                        ControlValue::Scalar(0.25),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let controls = evaluate_control_score(
+            &ControlScore::priority_merge(
+                vec![high, low],
+                PriorityMergePolicy::new(ConflictPolicy::WholeSpanOverlap),
+            ),
+            &span((0, 1), (1, 1)),
+        );
+        assert_eq!(controls.len(), 1);
+        assert!(matches!(
+            controls[0].value,
+            ControlValue::Scalar(value) if (value - 1.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn control_weighted_choice_is_stable_across_adjacent_split_windows() {
+        let a = ControlScore::from(
+            ControlTrack::new(
+                Time::ONE,
+                vec![
+                    ControlTile::spanning(
+                        Time::ZERO,
+                        Time::ONE,
+                        ControlKey::Gain,
+                        ControlValue::Scalar(1.0),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let b = ControlScore::from(
+            ControlTrack::new(
+                Time::ONE,
+                vec![
+                    ControlTile::spanning(
+                        Time::ZERO,
+                        Time::ONE,
+                        ControlKey::Gain,
+                        ControlValue::Scalar(0.5),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap(),
+        );
+        let score = ControlScore::weighted_choice(
+            vec![
+                WeightedControlScore::new(a, Time::new(7, 1)),
+                WeightedControlScore::new(b, Time::new(1, 1)),
+            ],
+            123,
+        );
+
+        let whole = evaluate_control_score(&score, &span((0, 1), (8, 1)));
+        let left = evaluate_control_score(&score, &span((0, 1), (4, 1)));
+        let right = evaluate_control_score(&score, &span((4, 1), (8, 1)));
+
+        let key = |control: &EvaluatedControl| {
+            let value = match control.value {
+                ControlValue::Scalar(value) => value.to_bits(),
+                _ => 0,
+            };
+            (control.whole.start(), value)
+        };
+        let whole_keys = whole.iter().map(key).collect::<std::collections::BTreeSet<_>>();
+        let split_keys = left
+            .iter()
+            .chain(right.iter())
+            .map(key)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(whole_keys, split_keys);
     }
 
     #[test]

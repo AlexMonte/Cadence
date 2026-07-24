@@ -15,18 +15,18 @@ use crate::{
         AtomTileAssets, BoardTileIconAssets, GLYPH_ATLAS_COLS, GLYPH_ATLAS_ROWS,
         GLYPH_CELL_SUBDIVISION,
     },
-    application::editor::{EditorSession, TileLibraryContextKind, basic_tile_options},
+    application::editor::TileLibraryContextKind,
     domain::document::{ContainerKind, TileSpawnKind, root_board_tile_footprint},
     infrastructure::ui::{
         DrawerTileSource,
-        musaic_tile::{spawn_ortho_tile_visual, spawn_tile_placeholder, tile_visual_for_spawn},
+        musaic_tile::tile_visual_for_spawn,
         on_drawer_tile_press, on_drawer_tile_release,
         render_layers::{
             PALETTE_VIEW, PALETTE_WORLD_ORIGIN, SCENE_NODE_VISIBILITY, SCENE_ROOT_VISIBILITY,
         },
         tile_icons::TileIconAssets,
         tile_mesh::TileMeshAssets,
-        tile_visual::{spawn_gltf_tile_mesh_child, visible_kind_for_spawn},
+        tile_visual::{BoardTileMode, BoardTileSpec, spawn_board_tile_child, visible_kind_for_spawn},
         transform_tile::TransformTileAssets,
     },
 };
@@ -124,7 +124,11 @@ fn teardown_ui_tile_palette_scene(
 #[derive(Component)]
 struct PaletteSceneLight;
 
-fn setup_ui_tile_palette_scene(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+fn setup_ui_tile_palette_scene(
+    mut commands: Commands,
+    theme: Res<crate::infrastructure::ui::theme::MusaicUiTheme>,
+    mut images: ResMut<Assets<Image>>,
+) {
     let mut image = Image::new_uninit(
         default(),
         TextureDimension::D2,
@@ -144,7 +148,7 @@ fn setup_ui_tile_palette_scene(mut commands: Commands, mut images: ResMut<Assets
         PALETTE_VIEW,
         Camera {
             order: -2,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.10, 0.11, 0.14)),
+            clear_color: ClearColorConfig::Custom(theme.chrome.palette_clear),
             ..default()
         },
         RenderTarget::Image(image_handle.into()),
@@ -202,7 +206,7 @@ pub fn tile_palette_viewport(camera: Entity) -> impl Bundle {
 
 pub fn sync_ui_tile_palette_scene(
     mut commands: Commands,
-    session: Res<EditorSession>,
+    theme: Res<crate::infrastructure::ui::theme::MusaicUiTheme>,
     assets: Res<TransformTileAssets>,
     tile_meshes: Option<Res<TileMeshAssets>>,
     tile_icons: Res<TileIconAssets>,
@@ -234,8 +238,8 @@ pub fn sync_ui_tile_palette_scene(
         return;
     };
 
-    let items = basic_tile_options(projection.palette.context);
-    let armed = session.armed_tile().cloned();
+    let items = &projection.palette.options;
+    let armed = projection.palette.armed.as_ref();
     let on_root_board = projection.palette.context == TileLibraryContextKind::RootBoard;
 
     if let Ok(kids) = children.get(root) {
@@ -246,7 +250,7 @@ pub fn sync_ui_tile_palette_scene(
 
     commands.entity(root).with_children(|parent| {
         for (index, item) in items.iter().enumerate() {
-            let highlighted = armed.as_ref() == Some(&item.spawn);
+            let highlighted = armed == Some(&item.spawn);
             let Some(visual) = tile_visual_for_spawn(&item.spawn, highlighted) else {
                 continue;
             };
@@ -282,41 +286,32 @@ pub fn sync_ui_tile_palette_scene(
                     } else {
                         tessera::prelude::TileFootprint::unit()
                     };
-                    let gltf_spawned = tile_meshes.as_ref().is_some_and(|meshes| {
-                        spawn_gltf_tile_mesh_child(
-                            tile_root,
-                            meshes,
+                    let needs_fallback = !(tile_meshes.as_ref().is_some_and(|m| m.ready)
+                        || assets.ready);
+                    let fallback = needs_fallback.then(|| {
+                        materials.add(StandardMaterial {
+                            base_color: theme.chrome.palette_fallback_tile,
+                            ..default()
+                        })
+                    });
+                    spawn_board_tile_child(
+                        tile_root,
+                        tile_meshes.as_deref(),
+                        Some(&assets),
+                        &mut meshes,
+                        &mut materials,
+                        fallback.as_ref(),
+                        &BoardTileSpec {
                             kind,
                             tessera_footprint,
                             on_root_board,
-                            None,
-                            Vec3::ZERO,
-                            PALETTE_VIEW,
-                        )
-                    });
-                    if gltf_spawned {
-                        return;
-                    }
-                    if assets.ready {
-                        spawn_ortho_tile_visual(
-                            tile_root,
-                            &assets,
-                            &tile_icons,
-                            Vec3::ZERO,
-                            visual,
-                            PALETTE_VIEW,
-                            PALETTE_VIEW,
-                        );
-                    } else {
-                        spawn_tile_placeholder(
-                            tile_root,
-                            &mut meshes,
-                            &mut materials,
-                            Vec3::ZERO,
-                            visual,
-                            PALETTE_VIEW,
-                        );
-                    }
+                            plane_anchor: Vec3::ZERO,
+                            visual_footprint: visual.footprint,
+                            ortho: Some(visual),
+                        },
+                        BoardTileMode::Palette,
+                        PALETTE_VIEW,
+                    );
                 });
         }
     });
@@ -327,7 +322,7 @@ pub fn frame_ui_tile_palette_camera(
     projection: Res<crate::application::pipeline::ui_projection::EditorUiProjection>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<UiTilePaletteCamera>>,
 ) {
-    let item_count = basic_tile_options(projection.palette.context).len();
+    let item_count = projection.palette.options.len();
     let Ok((mut transform, mut camera_projection)) = cameras.single_mut() else {
         return;
     };

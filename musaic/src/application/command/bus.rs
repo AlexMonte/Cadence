@@ -17,7 +17,7 @@ use crate::application::editor::interaction::{apply_invalidation, push_transacti
 use crate::application::editor::transaction::{EditorTransactionResult, Invalidation};
 use crate::application::editor::{
     ActiveSurfaceChanged, DrawerPanelState, EditorAttention, EditorSession, MinimapPanelState,
-    SelectionState,
+    SelectionState, TimelinePanelState,
 };
 use crate::application::history::{CommandHistory, HistoryEntry, HistoryPolicy};
 use crate::application::pipeline::runtime::{RuntimeState, TimelineProvenanceStore};
@@ -43,6 +43,7 @@ struct CommandContext<'w> {
     session: ResMut<'w, EditorSession>,
     drawer_panel: ResMut<'w, DrawerPanelState>,
     minimap_panel: ResMut<'w, MinimapPanelState>,
+    timeline_panel: ResMut<'w, TimelinePanelState>,
     view_settings: ResMut<'w, BoardViewSettings>,
     diagnostics: ResMut<'w, DiagnosticStore>,
     surface_events: MessageWriter<'w, ActiveSurfaceChanged>,
@@ -86,6 +87,21 @@ fn handle_dispatcher_command(command: &EditorCommand, ctx: &mut CommandContext) 
         }
         EditorCommand::ToggleMinimap => {
             ctx.minimap_panel.toggle();
+            true
+        }
+        EditorCommand::EnterTimelineMode => {
+            ctx.attention.enter_navigation(
+                crate::application::editor::NavigationMode::Timeline,
+            );
+            ctx.timeline_panel.open = true;
+            if ctx.timeline_panel.height < TimelinePanelState::MIN_HEIGHT {
+                ctx.timeline_panel.height = TimelinePanelState::DEFAULT_HEIGHT;
+            }
+            true
+        }
+        EditorCommand::EnterCompose => {
+            ctx.attention.enter_compose();
+            ctx.timeline_panel.open = false;
             true
         }
         EditorCommand::ArmPlacementTool { tile } => {
@@ -409,6 +425,7 @@ mod tests {
             .add_plugins((
                 tessera::bevy::TesseraPlugin,
                 crate::application::editor::EditorPlugin,
+                crate::application::pipeline::PlaybackPlugin,
             ));
         app.insert_state(crate::infrastructure::app::AppState::Editor);
 

@@ -1,40 +1,45 @@
 //! Board placement ghost position — shared between drag preview and slot highlight.
+//!
+//! Center comes only from session hover geometry (`hover.or(last_hover)`). Cursor
+//! world positions must not invent a slot here; that belongs to
+//! `sync_placement_hover_from_pointer` → `VisibleBoardState::pick_at`.
 
 use bevy::prelude::*;
 use tessera::prelude::TileFootprint;
 
 use crate::{
-    application::editor::{BoardPlacementPointer, EditorSession, PlacementHover},
+    application::editor::PlacementHover,
     application::pipeline::scene_sync::VisibleNodeKind,
     domain::{
         board::{
             SurfaceLayoutKind,
-            geometry::{BOARD_PLANE_Y, SLOT_SIZE, slot_at_world_position},
+            geometry::{BOARD_PLANE_Y, SLOT_SIZE},
         },
-        document::{PlacementAddress, RootBoardTileKind, StackIndex, root_board_tile_footprint},
+        document::{PlacementAddress, RootBoardTileKind, root_board_tile_footprint},
     },
 };
 
 use super::board_geometry::{stack_flat_tile_center, tessera_slot_center};
 use super::musaic_tile::{
-    board_footprint_for_kind, stack_footprint_for_kind, tile_center_y_for_footprint,
+    TILE_INSET, board_footprint_for_kind, stack_footprint_for_kind, tile_center_y_for_footprint,
 };
-
-const TILE_INSET: f32 = 0.18;
 
 /// Resolve world-space center for the placement ghost.
 ///
-/// Priority: active hover → cursor slot snap → cursor on board plane → last hover.
+/// Priority: active hover → last hover. No cursor→slot invent path.
 pub fn resolve_placement_preview_center(
-    session: &EditorSession,
-    pointer: &BoardPlacementPointer,
+    session: &crate::application::editor::EditorSession,
     visible: &crate::application::pipeline::scene_sync::VisibleBoardState,
     preview_kind: VisibleNodeKind,
 ) -> Option<Vec3> {
-    let placement = match &session.mode {
-        crate::application::editor::EditorMode::Placing(p) => p,
-        _ => return None,
-    };
+    if !matches!(
+        session.mode,
+        crate::application::editor::EditorMode::Placing(_)
+    ) {
+        return None;
+    }
+
+    let hover = session.placement_hover()?;
     let on_root_board = visible.layout == SurfaceLayoutKind::Board;
     let visual_footprint = if visible.layout == SurfaceLayoutKind::Stack {
         stack_footprint_for_kind(preview_kind)
@@ -43,42 +48,13 @@ pub fn resolve_placement_preview_center(
     };
     let tessera_footprint = tessera_footprint_for_preview(preview_kind, on_root_board);
 
-    if let Some(hover) = placement.hover {
-        return center_for_hover(
-            hover,
-            visible.layout,
-            preview_kind,
-            visual_footprint,
-            tessera_footprint,
-        );
-    }
-
-    if let Some(world) = pointer.cursor_world {
-        if visible.layout == SurfaceLayoutKind::Stack {
-            if let Some(slot) = slot_at_world_position(world, visible.layout) {
-                return Some(stack_flat_tile_center(
-                    StackIndex(slot.x as usize),
-                    preview_kind,
-                    BOARD_PLANE_Y,
-                ));
-            }
-        } else if let Some(slot) = slot_at_world_position(world, visible.layout) {
-            // The root board is unbounded: every world position resolves to a
-            // slot, so the ghost always previews the true landing slot.
-            let y = tile_center_y_for_footprint(visual_footprint, BOARD_PLANE_Y);
-            return Some(tessera_slot_center(slot, tessera_footprint, y));
-        }
-    }
-
-    placement.last_hover.and_then(|hover| {
-        center_for_hover(
-            hover,
-            visible.layout,
-            preview_kind,
-            visual_footprint,
-            tessera_footprint,
-        )
-    })
+    center_for_hover(
+        hover,
+        visible.layout,
+        preview_kind,
+        visual_footprint,
+        tessera_footprint,
+    )
 }
 
 pub fn tessera_footprint_for_preview(kind: VisibleNodeKind, on_root_board: bool) -> TileFootprint {
@@ -130,6 +106,7 @@ fn tile_world_position(address: PlacementAddress, footprint: f32) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::editor::EditorSession;
     use crate::domain::{
         board::{BoardSlot, BoardSurfaceId},
         document::{ContainerKind, TileSpawnKind},
@@ -162,11 +139,9 @@ mod tests {
             layout: SurfaceLayoutKind::Board,
             ..Default::default()
         };
-        let pointer = BoardPlacementPointer::default();
 
         let center = resolve_placement_preview_center(
             &session,
-            &pointer,
             &visible,
             VisibleNodeKind::Container,
         )
@@ -177,38 +152,55 @@ mod tests {
     }
 
     #[test]
-    fn cursor_far_from_origin_snaps_to_slot_on_unbounded_board() {
+    fn ghost_center_none_when_hover_and_last_hover_none() {
         let session = session_placing_sequence();
         let visible = crate::application::pipeline::scene_sync::VisibleBoardState {
             active_surface: Some(BoardSurfaceId(1)),
             layout: SurfaceLayoutKind::Board,
             ..Default::default()
         };
-        let world = Vec3::new(99.0, 0.0, 99.0);
-        let pointer = BoardPlacementPointer {
-            cursor_world: Some(world),
+
+        assert!(
+            resolve_placement_preview_center(&session, &visible, VisibleNodeKind::Container)
+                .is_none(),
+            "ghost must not invent a slot from cursor when hover and last_hover are unset"
+        );
+    }
+
+    #[test]
+    fn active_hover_wins_over_last_hover() {
+        let mut session = session_placing_sequence();
+        let surface = BoardSurfaceId(1);
+        if let Some(placement) = session.placement_mut() {
+            placement.last_hover = Some(PlacementHover {
+                surface,
+                address: PlacementAddress::BoardSlot(BoardSlot::new(0, 0)),
+            });
+            placement.hover = Some(PlacementHover {
+                surface,
+                address: PlacementAddress::BoardSlot(BoardSlot::new(4, 1)),
+            });
+        }
+
+        let visible = crate::application::pipeline::scene_sync::VisibleBoardState {
+            active_surface: Some(surface),
+            layout: SurfaceLayoutKind::Board,
             ..Default::default()
         };
 
         let center = resolve_placement_preview_center(
             &session,
-            &pointer,
             &visible,
             VisibleNodeKind::Container,
         )
-        .expect("the board is unbounded — any cursor position resolves to a slot");
+        .expect("active hover");
 
-        // The ghost snaps to the containing slot's tessera center, matching
-        // where the tile would actually land.
-        let slot = slot_at_world_position(world, SurfaceLayoutKind::Board)
-            .expect("unbounded board resolves every world position");
         let expected = tessera_slot_center(
-            slot,
+            BoardSlot::new(4, 1),
             tessera_footprint_for_preview(VisibleNodeKind::Container, true),
             center.y,
         );
         assert_eq!(center.x, expected.x);
         assert_eq!(center.z, expected.z);
-        assert!(center.y > 0.0);
     }
 }

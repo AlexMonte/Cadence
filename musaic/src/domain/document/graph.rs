@@ -3,9 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use tessera::prelude::{Arrangement, ContainerId, NodeId};
 
+use tessera::prelude::TileFootprint;
+
 use crate::domain::board::{
     BoardSlot, BoardSurface, BoardSurfaceId, BoardSurfaceKind, BoardSurfaces,
 };
+
+use super::footprint::root_board_tile_footprint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -18,7 +22,8 @@ pub struct TilePrototypeId(pub u64);
 /// Authored document structure for the board language.
 ///
 /// Important domain split:
-/// - `placements` are authored tile occupancy: a tile/node exists at one board slot.
+/// - `placements` store each tile's anchor slot; root-board containers/outputs also
+///   occupy a [`root_board_tile_footprint`] rectangle that must stay free.
 /// - Empty board slots are not document nodes. They are editor/render affordances.
 /// - Container nodes own child board surfaces through `container_surfaces`.
 ///
@@ -242,6 +247,9 @@ impl DocumentGraph {
     /// This is the document-side authorship operation: the slot is merely an
     /// address until this method succeeds. Container insertion also creates the
     /// container-local child surface that nested authoring will happen inside.
+    ///
+    /// Root-board placements reject footprint overlap (not only exact-anchor
+    /// collision), matching Tessera export occupancy.
     pub fn insert_tile(
         &mut self,
         surfaces: &mut BoardSurfaces,
@@ -252,9 +260,7 @@ impl DocumentGraph {
         if !surfaces.contains(surface) {
             return Err(DocumentGraphError::MissingSurface(surface));
         }
-        if !self.is_address_empty(surface, address) {
-            return Err(DocumentGraphError::OccupiedAddress { surface, address });
-        }
+        self.ensure_placement_free(surface, address, &spawn)?;
 
         let node_id = self.alloc_node_id();
         let kind = match spawn {
@@ -429,9 +435,7 @@ impl DocumentGraph {
         if !surfaces.contains(surface) {
             return Err(DocumentGraphError::MissingSurface(surface));
         }
-        if !self.is_address_empty(surface, address) {
-            return Err(DocumentGraphError::OccupiedAddress { surface, address });
-        }
+        self.ensure_placement_free(surface, address, &spawn)?;
 
         let kind = match spawn {
             TileSpawnKind::Tile { prototype } => DocumentNodeKind::Tile(TileNode { prototype }),
@@ -491,6 +495,51 @@ impl DocumentGraph {
             PlacementAddress::BoardSlot(slot) => self.is_board_slot_empty(surface, slot),
             PlacementAddress::StackIndex(index) => self.is_stack_index_empty(surface, index),
         }
+    }
+
+    fn ensure_placement_free(
+        &self,
+        surface: BoardSurfaceId,
+        address: PlacementAddress,
+        spawn: &TileSpawnKind,
+    ) -> Result<(), DocumentGraphError> {
+        match address {
+            PlacementAddress::StackIndex(_) => {
+                if !self.is_address_empty(surface, address) {
+                    return Err(DocumentGraphError::OccupiedAddress { surface, address });
+                }
+            }
+            PlacementAddress::BoardSlot(slot) => {
+                let footprint = root_board_tile_footprint(spawn);
+                if self.board_footprint_conflicts(surface, slot, footprint) {
+                    return Err(DocumentGraphError::OccupiedAddress { surface, address });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn board_footprint_conflicts(
+        &self,
+        surface: BoardSurfaceId,
+        slot: BoardSlot,
+        footprint: TileFootprint,
+    ) -> bool {
+        for cell in footprint.occupied_cells(slot) {
+            for ((placed_surface, anchor), node_id) in &self.board_placements {
+                if *placed_surface != surface {
+                    continue;
+                }
+                let Some(node) = self.nodes.get(node_id) else {
+                    continue;
+                };
+                let existing = root_board_tile_footprint(&node.kind);
+                if existing.occupies(*anchor, cell) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn alloc_surface_id(&mut self) -> BoardSurfaceId {

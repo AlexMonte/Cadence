@@ -1,67 +1,45 @@
 //! Tile inspect panel: description, port compass, connect action.
 
 use bevy::{prelude::*, ui::widget::Text as UiText};
-use bevy_feathers::{
-    controls::{ButtonProps, button},
-    theme::ThemedText,
-};
-use bevy_ui_widgets::observe;
+use bevy_feathers::theme::ThemedText;
+
 use tessera::prelude::NodeId;
 
 use crate::application::command::EditorCommand;
-use crate::application::editor::{connection_endpoint_view, tile_inspect_description};
-use crate::application::pipeline::scene_sync::VisibleBoardState;
-use crate::domain::document::DocumentQueries;
+use crate::application::editor::ConnectionEndpointView;
 
 use crate::adapter::load_up::UiSpriteAssets;
 use crate::infrastructure::ui::port_glyphs::spawn_inspector_port_compass;
+use crate::infrastructure::ui::widgets::musaic_button;
 use crate::infrastructure::ui::{InspectorButtonAction, on_inspector_button_activated};
 
 pub(crate) fn spawn_tile_inspect_panel(
     panel: &mut ChildSpawnerCommands<'_>,
-    queries: &DocumentQueries<'_>,
     node: &NodeId,
-    visible: &VisibleBoardState,
+    description: &str,
+    ports: Option<&ConnectionEndpointView>,
     images: &Assets<Image>,
     ui_sprites: Option<&UiSpriteAssets>,
 ) {
-    panel.spawn((
-        UiText::new(tile_inspect_description(queries, node)),
-        ThemedText,
-    ));
+    panel.spawn((UiText::new(description.to_string()), ThemedText));
 
-    let slot = queries
-        .location_of(node)
-        .and_then(|location| match location.address {
-            crate::domain::document::PlacementAddress::BoardSlot(slot) => Some(slot),
-            _ => None,
-        })
-        .or_else(|| {
-            if let Some(crate::application::pipeline::scene_sync::RenderBoardFocus::Tile {
-                address: crate::domain::document::PlacementAddress::BoardSlot(slot),
-                ..
-            }) = visible.focus.as_ref()
-            {
-                Some(*slot)
-            } else {
-                None
-            }
-        });
-
-    if let Some(slot) = slot {
-        if let Some(view) = connection_endpoint_view(queries, node, Some(slot), None) {
-            spawn_inspector_port_compass(panel, images, ui_sprites, node, &view);
-        }
+    if let Some(view) = ports {
+        spawn_inspector_port_compass(panel, images, ui_sprites, node, view);
     }
 
-    panel.spawn((
-        button(
-            ButtonProps::default(),
+    panel
+        .spawn(musaic_button(
+            Node {
+                min_height: px(28.0),
+                padding: UiRect::horizontal(px(8.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
             InspectorButtonAction(EditorCommand::StartConnection {
                 source: node.clone(),
             }),
-            Spawn((UiText::new("Connect"), ThemedText)),
-        ),
-        observe(on_inspector_button_activated),
-    ));
+            "Connect",
+        ))
+        .observe(on_inspector_button_activated);
 }

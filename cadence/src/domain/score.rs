@@ -212,6 +212,41 @@ impl WeightedScore {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// One weighted control-score option used by cycle-stable weighted choice.
+pub struct WeightedControlScore {
+    score: ControlScore,
+    weight: Time,
+}
+
+impl WeightedControlScore {
+    /// Creates a weighted control-score option.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `weight <= 0`.
+    #[must_use]
+    pub fn new(score: ControlScore, weight: Time) -> Self {
+        assert!(
+            weight > Time::ZERO,
+            "weighted control score weight must be positive"
+        );
+        Self { score, weight }
+    }
+
+    /// Returns the child control score.
+    #[must_use]
+    pub fn score(&self) -> &ControlScore {
+        &self.score
+    }
+
+    /// Returns the positive weight.
+    #[must_use]
+    pub fn weight(&self) -> Time {
+        self.weight
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 /// Public variants of the source score tree.
 pub enum ScoreKind {
     /// Single repeating voice leaf.
@@ -365,6 +400,36 @@ pub enum ControlScoreKind {
     ReflectCycle {
         /// Child control score being transformed.
         inner: ControlScore,
+    },
+    /// Merges control children in priority order.
+    ///
+    /// Earlier children win conflicts against later children. Conflict policies
+    /// that mention "intent" treat [`crate::domain::control::ControlKey`] as the
+    /// control-lane identity.
+    PriorityMerge {
+        /// Priority-ordered control children (earlier wins).
+        children: Vec<ControlScore>,
+        /// Conflict rule used when later children collide with earlier ones.
+        policy: PriorityMergePolicy,
+    },
+    /// Selects one control child per absolute cycle using deterministic weighted
+    /// choice.
+    WeightedChoice {
+        /// Weighted control child options.
+        options: Vec<WeightedControlScore>,
+        /// Deterministic seed.
+        seed: u64,
+    },
+    /// Clips source control visibility to open gate-control spans.
+    ///
+    /// The source control keeps its original whole-span identity. Only the
+    /// visible span is clipped. The mask itself is not emitted.
+    MaskClip {
+        /// Source control score being clipped.
+        source: ControlScore,
+        /// Control score whose `ControlKey::Gate == true` spans define open
+        /// visibility regions.
+        mask: ControlScore,
     },
 }
 
@@ -615,6 +680,39 @@ impl ControlScore {
     #[must_use]
     pub fn reflect_cycle(inner: ControlScore) -> Self {
         Self::new(ControlScoreKind::ReflectCycle { inner })
+    }
+
+    /// Merges control children in priority order.
+    ///
+    /// Earlier children win conflicts against later children. Conflict policies
+    /// that mention "intent" treat control key as the lane identity.
+    #[must_use]
+    pub fn priority_merge(children: Vec<ControlScore>, policy: PriorityMergePolicy) -> Self {
+        Self::new(ControlScoreKind::PriorityMerge { children, policy })
+    }
+
+    /// Selects one control child per absolute cycle using deterministic weighted
+    /// choice.
+    ///
+    /// Empty option lists produce no controls.
+    #[must_use]
+    pub fn weighted_choice(options: Vec<WeightedControlScore>, seed: u64) -> Self {
+        Self::new(ControlScoreKind::WeightedChoice { options, seed })
+    }
+
+    /// Clips source control visibility to open gate-control spans.
+    ///
+    /// This is the control-tree dual of [`Score::mask_clip`]: whole-span identity
+    /// is preserved and only visible spans are clipped to open gate regions.
+    #[must_use]
+    pub fn mask_clip(source: ControlScore, mask: ControlScore) -> Self {
+        Self::new(ControlScoreKind::MaskClip { source, mask })
+    }
+
+    /// Returns an empty control score (no tiles).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::merge(Vec::new())
     }
 
     #[must_use]

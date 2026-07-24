@@ -1,5 +1,9 @@
 //! Shell layout: UI root, main row (timeline band, board region, inspector
 //! column), board viewport, and edge-drag panel resizing.
+//!
+//! [`WorkspaceLayoutKind`] selects the document tree:
+//! - Compose — board + inspector only (no timeline band entity)
+//! - TimelineStacked — timeline band above board + inspector (default open)
 
 use bevy::{
     picking::prelude::*,
@@ -10,22 +14,21 @@ use bevy_feathers::theme::ThemedText;
 
 use crate::{
     application::board_view_settings::BoardViewSettings,
+    application::command::{EditorCommand, EditorCommandBus},
     application::editor::{
-        EditorAttention, EditorSession, InspectorLayout, MinimapPanelState, TimelinePanelState,
+        InspectorLayout, MinimapPanelState, TimelinePanelState, WorkspaceLayoutKind,
     },
     application::pipeline::runtime::RuntimePreviewSnapshot,
     application::pipeline::scene_sync::VisibleBoardState,
-    domain::document::DocumentQueries,
+    application::pipeline::ui_projection::{EditorUiProjection, MinimapPaint},
 };
 
 use crate::adapter::load_up::UiSpriteAssets;
 use crate::infrastructure::ui::board_camera_nav::UiBoardViewport;
-use crate::infrastructure::ui::inspector::{InspectorPanelHost, spawn_inspector_column};
-use crate::infrastructure::ui::tile_shell::{PANEL_BG, PanelBackdrop, spawn_shell_panel};
+use crate::infrastructure::ui::inspector::spawn_inspector_column;
+use crate::infrastructure::ui::theme::{InspectorPanelHost, MusaicUiTheme};
+use crate::infrastructure::ui::widgets::{PanelBackdrop, spawn_shell_panel};
 use crate::infrastructure::ui::{minimap, timeline_view};
-
-pub(crate) const PANEL_GAP: f32 = 12.0;
-pub(crate) const SHELL_PADDING: f32 = 10.0;
 
 #[derive(Component)]
 pub(crate) struct MusaicUiRoot;
@@ -44,11 +47,10 @@ pub(crate) fn teardown_editor_ui(mut commands: Commands, roots: Query<Entity, Wi
 
 pub(crate) fn spawn_main_row(
     root: &mut ChildSpawnerCommands<'_>,
-    queries: &DocumentQueries<'_>,
+    theme: &MusaicUiTheme,
     visible: &VisibleBoardState,
+    projection: &EditorUiProjection,
     layout: &InspectorLayout,
-    attention: &EditorAttention,
-    session: &EditorSession,
     preview_snapshot: &RuntimePreviewSnapshot,
     board_camera: Option<Entity>,
     palette_camera: Option<Entity>,
@@ -59,6 +61,7 @@ pub(crate) fn spawn_main_row(
     images: &Assets<Image>,
     view_settings: BoardViewSettings,
 ) {
+    let gap = theme.spacing.panel_gap;
     root.spawn((
         UiShellMain,
         Node {
@@ -67,34 +70,40 @@ pub(crate) fn spawn_main_row(
             min_height: px(0),
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
-            row_gap: px(PANEL_GAP),
+            row_gap: px(gap),
             ..default()
         },
     ))
     .with_children(|main| {
-        spawn_timeline_band(
-            main,
-            timeline_height.max(0.0),
-            preview_snapshot,
-            images,
-            sprites,
-        );
+        match projection.layout_kind {
+            WorkspaceLayoutKind::ComposeBoardInspector => {
+                // Compose contract: no timeline band in the tree.
+            }
+            WorkspaceLayoutKind::TimelineStackedOverBoardInspector => {
+                let height = if timeline_height > 0.0 {
+                    timeline_height
+                } else {
+                    TimelinePanelState::DEFAULT_HEIGHT
+                };
+                spawn_timeline_band(main, theme, height, preview_snapshot, images, sprites);
+            }
+        }
 
         main.spawn((Node {
             width: percent(100),
             flex_grow: 1.0,
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
-            column_gap: px(PANEL_GAP),
+            column_gap: px(gap),
             min_height: px(0),
             ..default()
         },))
             .with_children(|row| {
                 spawn_board_region(
                     row,
-                    queries,
+                    theme,
                     visible,
-                    attention,
+                    &projection.minimap_paint,
                     board_camera,
                     minimap_width,
                     sprites,
@@ -102,11 +111,10 @@ pub(crate) fn spawn_main_row(
                 );
                 spawn_inspector_column(
                     row,
-                    queries,
+                    theme,
                     layout,
-                    session,
+                    &projection.inspector_paint,
                     preview_snapshot,
-                    visible,
                     palette_camera,
                     host,
                     sprites,
@@ -119,16 +127,12 @@ pub(crate) fn spawn_main_row(
 
 fn spawn_timeline_band(
     parent: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     height: f32,
     preview_snapshot: &RuntimePreviewSnapshot,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
 ) {
-    let backdrop = if height > 0.0 {
-        PanelBackdrop::Section
-    } else {
-        PanelBackdrop::None
-    };
     spawn_shell_panel(
         parent,
         (
@@ -137,23 +141,19 @@ fn spawn_timeline_band(
                 width: percent(100),
                 height: px(height),
                 flex_shrink: 0.0,
-                display: if height > 0.0 {
-                    Display::Flex
-                } else {
-                    Display::None
-                },
+                display: Display::Flex,
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(10.0)),
-                row_gap: px(6.0),
+                padding: UiRect::all(px(theme.spacing.md + 2.0)),
+                row_gap: px(theme.spacing.sm),
                 overflow: Overflow::clip(),
                 position_type: PositionType::Relative,
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme.chrome.panel_bg),
         ),
         images,
         sprites,
-        backdrop,
+        PanelBackdrop::Section,
         |band| {
             band.spawn((
                 timeline_view::UiTimelineContent,
@@ -162,13 +162,13 @@ fn spawn_timeline_band(
                     height: percent(100),
                     display: Display::Flex,
                     flex_direction: FlexDirection::Column,
-                    row_gap: px(6.0),
+                    row_gap: px(theme.spacing.sm),
                     min_height: px(0.0),
                     ..default()
                 },
             ))
             .with_children(|content| {
-                timeline_view::spawn_timeline_content(content, preview_snapshot);
+                timeline_view::spawn_timeline_content(content, theme, preview_snapshot);
             });
         },
     );
@@ -176,9 +176,9 @@ fn spawn_timeline_band(
 
 fn spawn_board_region(
     parent: &mut ChildSpawnerCommands<'_>,
-    queries: &DocumentQueries<'_>,
+    theme: &MusaicUiTheme,
     visible: &VisibleBoardState,
-    attention: &EditorAttention,
+    minimap_paint: &MinimapPaint,
     board_camera: Option<Entity>,
     minimap_width: f32,
     sprites: Option<&UiSpriteAssets>,
@@ -197,7 +197,7 @@ fn spawn_board_region(
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme.chrome.panel_bg),
         ),
         images,
         sprites,
@@ -206,14 +206,14 @@ fn spawn_board_region(
             spawn_board_viewport(board_column, board_camera);
             minimap::spawn_minimap_panel(
                 board_column,
+                theme,
                 visible,
-                queries,
-                attention,
+                minimap_paint,
                 minimap_width,
                 images,
                 sprites,
             );
-            minimap::spawn_minimap_edge_handle(board_column, minimap_width);
+            minimap::spawn_minimap_edge_handle(board_column, theme, minimap_width);
         },
     );
 }
@@ -255,6 +255,7 @@ fn spawn_board_viewport(column: &mut ChildSpawnerCommands<'_>, board_camera: Opt
 pub(crate) fn sync_shell_panel_sizes(
     minimap_panel: Res<'_, MinimapPanelState>,
     timeline_panel: Res<'_, TimelinePanelState>,
+    projection: Res<'_, EditorUiProjection>,
     mut panel_nodes: ParamSet<(
         Query<'_, '_, &mut Node, With<minimap::UiShellMinimap>>,
         Query<'_, '_, &mut Node, With<UiShellTimeline>>,
@@ -276,14 +277,25 @@ pub(crate) fn sync_shell_panel_sizes(
         node.left = px(minimap_width);
     }
 
-    let timeline_height = timeline_panel.visible_height();
-    for mut node in panel_nodes.p1().iter_mut() {
-        node.height = px(timeline_height);
-        node.display = if timeline_height > 0.0 {
-            Display::Flex
-        } else {
-            Display::None
-        };
+    // Timeline height only applies when the shell tree includes the band.
+    if matches!(
+        projection.layout_kind,
+        WorkspaceLayoutKind::TimelineStackedOverBoardInspector
+    ) {
+        let timeline_height = timeline_panel.visible_height().max(0.0);
+        let show = timeline_height > 0.0;
+        for mut node in panel_nodes.p1().iter_mut() {
+            node.height = px(if show {
+                timeline_height
+            } else {
+                TimelinePanelState::DEFAULT_HEIGHT
+            });
+            node.display = if show {
+                Display::Flex
+            } else {
+                Display::None
+            };
+        }
     }
 }
 
@@ -324,9 +336,19 @@ pub(crate) fn on_minimap_edge_drag_end(
 pub(crate) fn on_timeline_edge_drag_start(
     mut event: On<'_, '_, Pointer<DragStart>>,
     mut timeline: ResMut<'_, TimelinePanelState>,
+    projection: Res<'_, EditorUiProjection>,
+    mut bus: MessageWriter<'_, EditorCommandBus>,
 ) {
     if event.button != PointerButton::Primary {
         return;
+    }
+    // Compose has no timeline band — enter TimelineStacked so the shell can
+    // rebuild with the region before height tracking continues.
+    if matches!(
+        projection.layout_kind,
+        WorkspaceLayoutKind::ComposeBoardInspector
+    ) {
+        bus.write(EditorCommandBus(EditorCommand::EnterTimelineMode));
     }
     timeline.begin_drag();
     event.propagate(false);
@@ -346,10 +368,16 @@ pub(crate) fn on_timeline_edge_drag(
 pub(crate) fn on_timeline_edge_drag_end(
     mut event: On<'_, '_, Pointer<DragEnd>>,
     mut timeline: ResMut<'_, TimelinePanelState>,
+    mut bus: MessageWriter<'_, EditorCommandBus>,
 ) {
     if event.button != PointerButton::Primary {
         return;
     }
     timeline.finish_drag();
+    if timeline.open {
+        bus.write(EditorCommandBus(EditorCommand::EnterTimelineMode));
+    } else {
+        bus.write(EditorCommandBus(EditorCommand::EnterCompose));
+    }
     event.propagate(false);
 }

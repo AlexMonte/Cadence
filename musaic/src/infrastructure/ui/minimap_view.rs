@@ -1,30 +1,25 @@
 //! Minimap: 3×3 color-coded pixels per board cell plus flow-line overlay.
 
-use bevy::{picking::prelude::*, prelude::*, ui::widget::Text as UiText};
-use bevy_feathers::{
-    controls::{ButtonProps, button},
-    theme::ThemedText,
-};
+use bevy::{picking::prelude::*, prelude::*};
 use bevy_ui_widgets::Activate;
-use bevy_ui_widgets::observe;
 
 use crate::{
     application::command::{EditorCommand, EditorCommandBus},
-    application::editor::{EditorAttention, command_from_pick_checked},
+    application::editor::command_from_pick_checked,
     application::pipeline::scene_sync::{
         RenderBoardFocus, VisibleAtomCompound, VisibleBoardNode, VisibleBoardState, VisibleNodeKind,
     },
+    application::pipeline::ui_projection::MinimapPaint,
     domain::board::{BoardSlot, VIEWPORT_COLUMNS, VIEWPORT_ROWS},
-    domain::document::{DocumentNodeKind, DocumentQueries, PlacementAddress},
+    domain::document::{DocumentQueries, PlacementAddress},
 };
-
-use super::artist_palette::{ArtistPalette, atom_value_color};
 
 use crate::adapter::load_up::UiSpriteAssets;
+use crate::infrastructure::ui::theme::{ArtistPalette, MusaicUiTheme, atom_value_color};
+use crate::infrastructure::ui::ui_sprites;
+use crate::infrastructure::ui::widgets::{MusaicClickable, musaic_button};
 
-use super::{
-    InspectorButtonAction, controls::MusaicClickable, tile_shell::PANEL_INSET_BG, ui_sprites,
-};
+use super::InspectorButtonAction;
 
 const FLOW_LINE_STEPS: usize = 12;
 
@@ -118,32 +113,25 @@ pub struct MinimapSlotAction {
     pub slot: BoardSlot,
 }
 
-pub fn visible_node_color(queries: &DocumentQueries<'_>, node: &VisibleBoardNode) -> Color {
+pub fn visible_node_color(node: &VisibleBoardNode) -> Color {
     match node.kind {
         VisibleNodeKind::Tile => ArtistPalette::TRANSFORM_GENERIC,
         VisibleNodeKind::Container => ArtistPalette::CONTAINER,
         VisibleNodeKind::Output => ArtistPalette::OUTPUT,
-        VisibleNodeKind::Atom => queries
-            .node(&node.node)
-            .and_then(|document_node| match &document_node.kind {
-                DocumentNodeKind::Atom(atom) => Some(atom_value_color(atom.atom.clone())),
-                _ => None,
-            })
+        VisibleNodeKind::Atom => node
+            .atom
+            .clone()
+            .map(atom_value_color)
             .unwrap_or(ArtistPalette::ATOM_NOTE),
         VisibleNodeKind::TrickInstance => ArtistPalette::TRICK_UNSET,
     }
 }
 
-pub fn compound_slot_color(queries: &DocumentQueries<'_>, compound: &VisibleAtomCompound) -> Color {
+pub fn compound_slot_color(compound: &VisibleAtomCompound) -> Color {
     compound
-        .compound
-        .members
-        .first()
-        .and_then(|node_id| queries.node(node_id))
-        .and_then(|document_node| match &document_node.kind {
-            DocumentNodeKind::Atom(atom) => Some(atom_value_color(atom.atom.clone())),
-            _ => None,
-        })
+        .primary_atom
+        .clone()
+        .map(atom_value_color)
         .unwrap_or(ArtistPalette::ATOM_NOTE)
 }
 
@@ -157,10 +145,10 @@ pub fn flow_color(scalar: bool) -> Color {
 
 pub fn spawn_minimap_content(
     panel: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
     visible: &VisibleBoardState,
-    queries: &DocumentQueries<'_>,
-    attention: &EditorAttention,
+    paint: &MinimapPaint,
     sprites: Option<&UiSpriteAssets>,
 ) {
     panel
@@ -172,27 +160,36 @@ pub fn spawn_minimap_content(
                 min_height: px(96.0),
                 position_type: PositionType::Relative,
                 overflow: Overflow::clip(),
-                border_radius: BorderRadius::all(px(6.0)),
+                border_radius: BorderRadius::all(px(theme.radii.md)),
                 ..default()
             },
-            BackgroundColor(PANEL_INSET_BG),
+            BackgroundColor(theme.chrome.panel_inset),
         ))
         .with_children(|canvas| {
             let window = MinimapWindow::from_visible(visible);
             spawn_flow_lines(canvas, visible, &window);
-            spawn_pixel_grid(canvas, images, visible, queries, sprites, &window);
+            spawn_pixel_grid(canvas, images, visible, sprites, &window);
         });
 
-    let surfaces = minimap_surface_labels(queries, attention);
-    for (label, surface) in surfaces {
-        panel.spawn((
-            button(
-                ButtonProps::default(),
-                InspectorButtonAction(EditorCommand::NavigateToSurface { surface }),
-                Spawn((UiText::new(label), ThemedText)),
-            ),
-            observe(super::on_inspector_button_activated),
-        ));
+    for (label, surface) in &paint.surface_buttons {
+        panel
+            .spawn((
+                musaic_button(
+                    Node {
+                        min_height: px(28.0),
+                        padding: UiRect::horizontal(px(theme.spacing.md)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    InspectorButtonAction(EditorCommand::NavigateToSurface {
+                        surface: *surface,
+                    }),
+                    label.clone(),
+                ),
+                BackgroundColor(theme.chrome.button_bg),
+            ))
+            .observe(super::on_inspector_button_activated);
     }
 }
 
@@ -200,7 +197,6 @@ fn spawn_pixel_grid(
     canvas: &mut ChildSpawnerCommands<'_>,
     images: &Assets<Image>,
     visible: &VisibleBoardState,
-    queries: &DocumentQueries<'_>,
     sprites: Option<&UiSpriteAssets>,
     window: &MinimapWindow,
 ) {
@@ -238,9 +234,9 @@ fn spawn_pixel_grid(
                 let fill = if focused {
                     ArtistPalette::FOCUS_ACCENT
                 } else if let Some(node) = node {
-                    visible_node_color(queries, node)
+                    visible_node_color(node)
                 } else if let Some(compound) = compound_entry {
-                    compound_slot_color(queries, compound)
+                    compound_slot_color(compound)
                 } else {
                     ArtistPalette::EMPTY_CELL
                 };
@@ -351,30 +347,6 @@ fn spawn_flow_arrow(
     ));
 }
 
-fn minimap_surface_labels(
-    queries: &DocumentQueries<'_>,
-    attention: &EditorAttention,
-) -> Vec<(String, crate::domain::board::BoardSurfaceId)> {
-    let mut out = Vec::new();
-    let root = queries.document.root_surface;
-    out.push(("Home".to_string(), root));
-    let active = attention.active_board();
-    if active != root {
-        if let Some(kind) = queries.surface_kind(active) {
-            let label = match kind {
-                crate::domain::board::BoardSurfaceKind::RootBoard => "Home".to_string(),
-                crate::domain::board::BoardSurfaceKind::ContainerStack { container } => {
-                    container.0.to_string()
-                }
-            };
-            if !out.iter().any(|(_, s)| *s == active) {
-                out.push((label, active));
-            }
-        }
-    }
-    out
-}
-
 pub fn on_minimap_slot_activated(
     activate: On<'_, '_, Activate>,
     actions: Query<'_, '_, &MinimapSlotAction>,
@@ -406,10 +378,10 @@ pub fn on_minimap_slot_activated(
 
 pub fn sync_minimap_content(
     mut commands: Commands,
+    theme: Res<'_, MusaicUiTheme>,
     images: Res<'_, Assets<Image>>,
     visible: Res<'_, VisibleBoardState>,
-    project: Res<'_, crate::application::session::MusaicProject>,
-    attention: Res<'_, EditorAttention>,
+    projection: Res<'_, crate::application::pipeline::ui_projection::EditorUiProjection>,
     ui_sprites: Option<Res<'_, UiSpriteAssets>>,
     dirty: Res<'_, crate::application::pipeline::ui_projection::UiDirty>,
     content_roots: Query<Entity, With<UiMinimapContent>>,
@@ -420,16 +392,15 @@ pub fn sync_minimap_content(
     }
     cache.force_next = false;
 
-    let queries = DocumentQueries::new(&project.document);
     for root in content_roots.iter() {
         commands.entity(root).despawn_children();
         commands.entity(root).with_children(|panel| {
             spawn_minimap_content(
                 panel,
+                &theme,
                 &images,
                 &visible,
-                &queries,
-                &attention,
+                &projection.minimap_paint,
                 ui_sprites.as_deref(),
             );
         });

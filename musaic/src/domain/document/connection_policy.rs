@@ -73,7 +73,12 @@ mod tests {
             .footprint(TileFootprint::new(2, 2))
             .sequence(SequenceStack::new().build())
             .unwrap();
-        board.at(x, y).named("output").output().unwrap();
+        board
+            .at(x, y)
+            .named("output")
+            .footprint(TileFootprint::new(2, 2))
+            .output()
+            .unwrap();
         board.finish()
     }
 

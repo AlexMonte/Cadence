@@ -5,6 +5,7 @@ use bevy_feathers::theme::ThemedText;
 use load_up::prelude::{ActiveStateLoad, StateLoadBlocked, StateLoadReady};
 
 use crate::infrastructure::app::AppState;
+use crate::infrastructure::ui::theme::MusaicUiTheme;
 
 #[derive(Component)]
 struct LoadingScreenRoot;
@@ -30,8 +31,12 @@ struct LoadingStatusText {
     message: String,
 }
 
-fn spawn_loading_screen(mut commands: Commands, mut status: ResMut<LoadingStatusText>) {
-    status.message = "Loading editor…".into(); // shown while load_up holds Loading before Editor
+fn spawn_loading_screen(
+    mut commands: Commands,
+    mut status: ResMut<LoadingStatusText>,
+    theme: Res<MusaicUiTheme>,
+) {
+    status.message = "Loading editor…".into();
     commands
         .spawn((
             LoadingScreenRoot,
@@ -42,15 +47,16 @@ fn spawn_loading_screen(mut commands: Commands, mut status: ResMut<LoadingStatus
                 flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: Val::Px(12.0),
+                row_gap: Val::Px(theme.spacing.lg),
                 ..default()
             },
+            BackgroundColor(theme.chrome.window_bg),
         ))
         .with_children(|root| {
             root.spawn((
                 Text::new("Musaic"),
                 TextFont {
-                    font_size: 28.0,
+                    font_size: theme.typography.hero,
                     ..default()
                 },
                 ThemedText,

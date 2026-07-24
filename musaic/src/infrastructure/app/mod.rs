@@ -1,13 +1,15 @@
 use bevy::prelude::*;
 
-use tessera::bevy::TesseraPlugin;
+use cadence::bevy::CadenceSet;
+use tessera::bevy::{TesseraPlugin, TesseraSystems};
 
 use crate::adapter::PersistencePlugin;
 use crate::adapter::load_up::LoadUpMusaicPlugin;
 use crate::application::{EditorPlugin, PlaybackPlugin};
-use bevy_feathers::{FeathersPlugins, dark_theme::create_dark_theme, theme::UiTheme};
+use bevy_feathers::FeathersPlugins;
 
-use crate::infrastructure::{loading::LoadingUiPlugin, ui::MusaicUiPlugin};
+use crate::infrastructure::ui::theme::insert_musaic_ui_theme;
+use crate::infrastructure::ui::MusaicUiPlugin;
 
 mod window;
 
@@ -30,9 +32,9 @@ impl Plugin for MusaicPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<AppState>()
             .init_state::<TransportMode>()
-            .add_plugins(FeathersPlugins)
-            .insert_resource(UiTheme(create_dark_theme()))
-            .add_plugins((window::AppWindowPlugin, LoadingUiPlugin))
+            .add_plugins(FeathersPlugins);
+        insert_musaic_ui_theme(app);
+        app.add_plugins(window::AppWindowPlugin)
             .configure_sets(
                 Update,
                 (
@@ -55,7 +57,17 @@ impl Plugin for MusaicPlugin {
                 PlaybackPlugin,     // playback: compile → lower → audio
                 MusaicUiPlugin,     // UI: editor shell + main menu rendering
                 PersistencePlugin,  // adapter: project file IO
-            ));
+            ))
+            // Host owns the Tessera/Cadence seam: nest kernel sets into MusaicSet
+            // so compile/tick cannot race bare Update against the pipeline.
+            .configure_sets(
+                Update,
+                (
+                    TesseraSystems.in_set(MusaicSet::Compile),
+                    CadenceSet::ReplaceScores.in_set(MusaicSet::Runtime),
+                    CadenceSet::Tick.in_set(MusaicSet::Runtime),
+                ),
+            );
         #[cfg(target_arch = "wasm32")]
         app.add_plugins(crate::adapter::persistence::wasm_io::WasmIoPlugin);
     }

@@ -4,10 +4,9 @@ use bevy::prelude::*;
 use bevy::state::condition::in_state;
 use cadence::prelude::{CadenceCompiler, Score, Span, Time as CycleTime};
 use serde::{Deserialize, Serialize};
+use cadence::bevy::CadenceSet;
 use tessera::{
-    bevy::{
-        CompileRequested, CompiledIr, TesseraBoard, TesseraDiagnostics, compile_on_request_system,
-    },
+    bevy::{CompileRequested, CompiledIr, TesseraBoard, TesseraDiagnostics, TesseraSystems},
     prelude::{BoardError, PatternIr},
 };
 
@@ -85,14 +84,19 @@ pub struct ProjectDirty {
 /// Registers the document → sound stages: tessera compile, preview projection, playback sync.
 ///
 /// Called by the playback plugin; not a standalone plugin.
+///
+/// Frame order inside host sets (see `docs/ARCHITECTURE.md`):
+/// - `MusaicSet::Compile`: document→board → [`TesseraSystems`] → collect IR
+/// - `MusaicSet::Runtime`: [`CadenceSet::ReplaceScores`] → transport →
+///   [`CadenceSet::Tick`] → clock readback → preview
 pub fn register_runtime(app: &mut App) {
     app.init_resource::<TimelineProvenanceStore>()
         .init_resource::<RuntimePreviewSnapshot>()
         .add_systems(
             Update,
             (
-                sync_document_to_tessera_board,
-                collect_tessera_compile_output.after(compile_on_request_system),
+                sync_document_to_tessera_board.before(TesseraSystems),
+                collect_tessera_compile_output.after(TesseraSystems),
             )
                 .in_set(MusaicSet::Compile)
                 .run_if(in_state(crate::infrastructure::app::AppState::Editor)),
@@ -100,8 +104,10 @@ pub fn register_runtime(app: &mut App) {
         .add_systems(
             Update,
             (
-                sync_transport_to_playback,
-                sync_playback_to_transport_clock,
+                sync_transport_to_playback
+                    .after(CadenceSet::ReplaceScores)
+                    .before(CadenceSet::Tick),
+                sync_playback_to_transport_clock.after(CadenceSet::Tick),
                 mark_preview_dirty_while_playing,
                 preview_runtime_for_editor,
             )

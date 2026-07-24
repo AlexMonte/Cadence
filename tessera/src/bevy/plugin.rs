@@ -1,5 +1,5 @@
 use bevy_app::{App, Plugin, Update};
-use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 
 use super::components::{NeedsCompile, TesseraTile, TileNodeKind, TilePlacement};
 use super::events::{CompileFinished, CompileRequested, ValidateFinished};
@@ -11,6 +11,14 @@ use super::resources::{
 use super::systems::{
     compile_on_request_system, sync_authored_from_board_system, sync_tiles_from_program_system,
 };
+
+/// Host-nestable set for Tessera's Update compile pipeline.
+///
+/// Systems run chained: board→authored sync, compile-on-request, tile entity sync.
+/// Hosts that own frame order (e.g. Musaic `MusaicSet::Compile`) should nest this
+/// set rather than racing bare `Update` systems.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TesseraSystems;
 
 pub struct TesseraPlugin;
 
@@ -43,7 +51,8 @@ impl Plugin for TesseraPlugin {
                     compile_on_request_system,
                     sync_tiles_from_program_system,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(TesseraSystems),
             );
     }
 }

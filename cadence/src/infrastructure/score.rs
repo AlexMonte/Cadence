@@ -10,7 +10,7 @@ pub use crate::domain::{
     rational::Time,
     score::{
         ConflictPolicy, ControlScore, DeduplicateKey, DeduplicatePolicy, DeduplicateWinner,
-        DegradePolicy, PriorityMergePolicy, Score, WeightedScore,
+        DegradePolicy, PriorityMergePolicy, Score, WeightedControlScore, WeightedScore,
     },
     span::{Phase, PhaseSpan, Span, Transport, TransportSpan},
     voice::{Repeat, Tile, TileId, Voice, VoiceId, ops},

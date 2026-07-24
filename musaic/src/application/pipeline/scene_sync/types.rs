@@ -2,8 +2,9 @@
 
 use tessera::prelude::NodeId;
 
+use crate::application::editor::ConnectionEndpointView;
 use crate::domain::board::{BoardSlot, BoardSurfaceId, SurfaceLayoutKind};
-use crate::domain::document::{PlacementAddress, StackIndex};
+use crate::domain::document::{AtomValue, PlacementAddress, StackIndex};
 
 use super::board_scene::{BoardSceneAtomCompound, BoardSceneConnection, BoardSceneTile};
 
@@ -26,7 +27,12 @@ pub struct VisibleBoardNode {
     pub kind: VisibleNodeKind,
     pub selected: bool,
     pub focused: bool,
+    /// Trick / catalog icon identity (board chrome; never re-queried in Render).
     pub icon: Option<crate::adapter::tile_icons::TileIconId>,
+    /// Atom value for texture / ortho sheet / minimap color (board chrome).
+    pub atom: Option<AtomValue>,
+    /// Port compass view for root-board tiles (board + inspector chrome).
+    pub ports: Option<ConnectionEndpointView>,
     pub surface_content: TileSurfaceContent,
 }
 
@@ -78,6 +84,8 @@ impl From<VisibleNodeKind> for crate::domain::document::RootBoardTileKind {
 pub struct VisibleAtomCompound {
     pub slot: BoardSlot,
     pub compound: crate::application::editor::AtomCompoundView,
+    /// First member's atom for minimap fill without reopening the document.
+    pub primary_atom: Option<AtomValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

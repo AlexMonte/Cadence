@@ -36,10 +36,11 @@ impl Plugin for AudioPlugin {
             .add_systems(
                 Update,
                 (
-                    pump_audio_renderer.after(cadence::bevy::tick_playback_system),
+                    pump_audio_renderer.after(cadence::bevy::CadenceSet::Tick),
                     emit_playback_status_events.after(pump_audio_renderer),
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(crate::infrastructure::app::MusaicSet::Runtime),
             );
         #[cfg(not(target_arch = "wasm32"))]
         start_cpal_output(app);

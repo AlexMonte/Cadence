@@ -1,5 +1,9 @@
-//! Top menu bar (Play / Tiles chips) and the shell command-button channel:
-//! any UI button carrying [`MenuBarButtonAction`] or [`InspectorButtonAction`]
+//! In-editor top chrome (Play / Tiles) and the shell command-button channel.
+//!
+//! This is **not** the boot MainMenu screen — see
+//! [`crate::infrastructure::ui::screens::main_menu`].
+//!
+//! Any UI button carrying [`MenuBarButtonAction`] or [`InspectorButtonAction`]
 //! dispatches its [`EditorCommand`] on the bus when activated.
 
 use bevy::{prelude::*, ui::widget::Text as UiText};
@@ -9,9 +13,9 @@ use bevy_ui_widgets::Activate;
 use crate::application::command::{EditorCommand, EditorCommandBus};
 
 use crate::adapter::load_up::UiSpriteAssets;
-use crate::infrastructure::ui::controls::musaic_clickable;
-use crate::infrastructure::ui::tile_shell::{PANEL_BG, PanelBackdrop, spawn_shell_panel};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
 use crate::infrastructure::ui::ui_sprites;
+use crate::infrastructure::ui::widgets::{PanelBackdrop, musaic_button, spawn_shell_panel};
 
 const TOP_MENU_HEIGHT: f32 = 36.0;
 
@@ -30,6 +34,7 @@ pub(crate) struct InspectorButtonAction(pub(crate) EditorCommand);
 
 pub(crate) fn spawn_top_menu(
     parent: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
 ) {
@@ -44,12 +49,12 @@ pub(crate) fn spawn_top_menu(
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                column_gap: px(8),
-                padding: UiRect::horizontal(px(8)),
+                column_gap: px(theme.spacing.md),
+                padding: UiRect::horizontal(px(theme.spacing.md)),
                 position_type: PositionType::Relative,
                 ..default()
             },
-            BackgroundColor(PANEL_BG),
+            BackgroundColor(theme.chrome.panel_bg),
         ),
         images,
         sprites,
@@ -98,7 +103,7 @@ fn spawn_menu_chip(
                 ui_sprites::spawn_menu_item_backdrop(chip, images, sprites);
             }
             if matches!(action, EditorCommand::TransportToggle) {
-                chip.spawn((musaic_clickable(
+                chip.spawn((musaic_button(
                     Node {
                         width: percent(100),
                         height: percent(100),
@@ -111,7 +116,7 @@ fn spawn_menu_chip(
                 ),))
                     .observe(on_menu_bar_button_activated);
             } else {
-                chip.spawn((musaic_clickable(
+                chip.spawn((musaic_button(
                     Node {
                         width: percent(100),
                         height: percent(100),

@@ -1,11 +1,28 @@
-//! Horizontal slide transitions for the inspector context body.
+//! Shared UI motion tokens and inspector slide helpers.
 
 use bevy::prelude::*;
 
 use crate::application::editor::InspectorLayout;
 
-pub(crate) const INSPECTOR_SLIDE_DURATION: f32 = 0.18;
-pub(crate) const INSPECTOR_SLIDE_DISTANCE_FALLBACK: f32 = 320.0;
+/// Duration / distance tokens for panel motion.
+#[derive(Debug, Clone, Copy)]
+pub struct MotionTokens {
+    pub panel_slide_secs: f32,
+    pub panel_slide_distance_fallback: f32,
+}
+
+impl MotionTokens {
+    pub const fn default_dark() -> Self {
+        Self {
+            panel_slide_secs: 0.18,
+            panel_slide_distance_fallback: 320.0,
+        }
+    }
+}
+
+pub const INSPECTOR_SLIDE_DURATION: f32 = MotionTokens::default_dark().panel_slide_secs;
+pub const INSPECTOR_SLIDE_DISTANCE_FALLBACK: f32 =
+    MotionTokens::default_dark().panel_slide_distance_fallback;
 
 #[derive(Component)]
 pub(crate) struct UiInspectorViewport;
@@ -93,18 +110,20 @@ pub(crate) fn drive_inspector_slides(
     mut commands: Commands,
     mut host: ResMut<InspectorPanelHost>,
     mut slides: Query<(Entity, &mut InspectorSlideLayer, &mut UiTransform)>,
+    theme: Res<super::MusaicUiTheme>,
 ) {
     if slides.is_empty() {
         return;
     }
 
     let dt = time.delta_secs();
+    let duration = theme.motion.panel_slide_secs;
     let mut finished_exits = Vec::new();
     let mut finished_enters = Vec::new();
 
     for (entity, mut slide, mut transform) in &mut slides {
         slide.elapsed += dt;
-        let t = (slide.elapsed / INSPECTOR_SLIDE_DURATION).min(1.0);
+        let t = (slide.elapsed / duration).min(1.0);
         let eased = ease_out_cubic(t);
         let x = slide_translation_x(slide.direction, slide.distance, eased);
         transform.translation = Val2::px(x, 0.0);

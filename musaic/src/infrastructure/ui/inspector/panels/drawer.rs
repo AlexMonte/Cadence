@@ -7,10 +7,6 @@ use bevy::{
 };
 use bevy_feathers::theme::ThemedText;
 
-use crate::application::editor::{
-    EditorSession, TileLibraryContextKind, atom_tile_drawer_rows, labeled_tile_drawer_items,
-    placement_target_label, transaction::PlacementTarget,
-};
 use crate::domain::document::TileSpawnKind;
 
 use crate::infrastructure::ui::controls::tile_palette_viewport;
@@ -23,24 +19,19 @@ pub(crate) struct DrawerTileSource {
 
 /// Sole tile library: 3D palette viewport with on-tile glyphs.
 ///
-/// Catalog identity comes from the application layer ([`TileDrawerItem`] via
-/// [`basic_tile_options`](crate::application::editor::basic_tile_options)).
-/// There is no duplicate label-chip grid.
+/// Armed / target labels come from [`EditorUiProjection`](crate::application::pipeline::ui_projection::EditorUiProjection)
+/// paint DTOs — never live [`EditorSession`](crate::application::editor::EditorSession).
 pub(crate) fn spawn_tile_drawer(
     panel: &mut ChildSpawnerCommands<'_>,
-    session: &EditorSession,
-    target: Option<&PlacementTarget>,
-    _context: TileLibraryContextKind,
+    target_label: Option<&str>,
+    armed_label: Option<&str>,
     palette_camera: Option<Entity>,
 ) {
-    if let Some(target) = target {
-        panel.spawn((UiText::new(placement_target_label(target)), ThemedText));
+    if let Some(label) = target_label {
+        panel.spawn((UiText::new(label.to_string()), ThemedText));
     }
-    if let Some(armed) = session.armed_tile() {
-        panel.spawn((
-            UiText::new(format!("Armed: {}", drawer_item_short_label(armed))),
-            ThemedText,
-        ));
+    if let Some(label) = armed_label {
+        panel.spawn((UiText::new(format!("Armed: {label}")), ThemedText));
     }
 
     spawn_palette_viewport(panel, palette_camera);
@@ -50,21 +41,6 @@ fn spawn_palette_viewport(panel: &mut ChildSpawnerCommands<'_>, palette_camera: 
     if let Some(camera) = palette_camera {
         panel.spawn(tile_palette_viewport(camera));
     }
-}
-
-fn drawer_item_short_label(spawn: &TileSpawnKind) -> String {
-    labeled_tile_drawer_items()
-        .into_iter()
-        .find(|item| &item.spawn == spawn)
-        .map(|item| item.label)
-        .or_else(|| {
-            atom_tile_drawer_rows()
-                .into_iter()
-                .flat_map(|(_, row)| row)
-                .find(|item| &item.spawn == spawn)
-                .map(|item| item.label)
-        })
-        .unwrap_or_else(|| format!("{spawn:?}"))
 }
 
 pub(crate) fn on_drawer_tile_press(
