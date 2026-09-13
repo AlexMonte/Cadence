@@ -1,0 +1,52 @@
+{
+  "variants": [
+    {
+      "path": "Organ - zone 002.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 57.68,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 10333,
+          "end_frame": 39585
+        }
+      },
+      "pitch_zone": {
+        "low": 38.0,
+        "high": 46.0
+      }
+    },
+    {
+      "path": "Organ - zone 003.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 57.68,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 10333,
+          "end_frame": 39585
+        }
+      },
+      "pitch_zone": {
+        "low": 47.0,
+        "high": 50.0
+      }
+    },
+    {
+      "path": "Organ - zone 001.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 47.68,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 15390,
+          "end_frame": 59048
+        }
+      },
+      "pitch_zone": {
+        "low": 33.0,
+        "high": 37.0
+      }
+    }
+  ]
+}

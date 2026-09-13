@@ -20,14 +20,25 @@ pub(super) struct LoweredPattern {
 pub(super) fn lower_control_key(key: &ControlKeyIr, _ctx: &mut LoweringCtx) -> Option<ControlKey> {
     let mapped = match key {
         ControlKeyIr::Gate => ControlKey::Gate,
+        ControlKeyIr::Legato => ControlKey::Legato,
+        ControlKeyIr::Transpose => ControlKey::Transpose,
+        ControlKeyIr::SampleBank => ControlKey::SampleBank,
+        ControlKeyIr::SampleVariant => ControlKey::SampleVariant,
         ControlKeyIr::Gain => ControlKey::Gain,
         ControlKeyIr::PostGain => ControlKey::PostGain,
+        ControlKeyIr::Pan => ControlKey::Pan,
+        ControlKeyIr::Velocity => ControlKey::Velocity,
+        ControlKeyIr::ClipLength => ControlKey::ClipLength,
+        ControlKeyIr::Expression => ControlKey::Expression,
+
         ControlKeyIr::Pitch => ControlKey::Pitch,
         ControlKeyIr::PitchBend => ControlKey::PitchBend,
         ControlKeyIr::PlaybackRate => ControlKey::PlaybackRate,
         ControlKeyIr::PlaybackStart => ControlKey::PlaybackStart,
         ControlKeyIr::PlaybackEnd => ControlKey::PlaybackEnd,
         ControlKeyIr::Reverse => ControlKey::Reverse,
+        ControlKeyIr::Fit => ControlKey::Fit,
+        ControlKeyIr::Loop => ControlKey::Loop,
         ControlKeyIr::Attack => ControlKey::Attack,
         ControlKeyIr::Decay => ControlKey::Decay,
         ControlKeyIr::Sustain => ControlKey::Sustain,
@@ -38,6 +49,7 @@ pub(super) fn lower_control_key(key: &ControlKeyIr, _ctx: &mut LoweringCtx) -> O
         ControlKeyIr::HighPassResonance => ControlKey::HighPassResonance,
         ControlKeyIr::ReverbSend => ControlKey::ReverbSend,
         ControlKeyIr::DelaySend => ControlKey::DelaySend,
+        ControlKeyIr::Compressor => ControlKey::Compressor,
         ControlKeyIr::Select(name) => ControlKey::Select(Symbol::new(name.clone())),
         ControlKeyIr::Custom(name) => ControlKey::Custom(Symbol::new(name.clone())),
     };
@@ -55,16 +67,104 @@ pub(super) fn lower_control_value(
     ctx: &mut LoweringCtx,
 ) -> Option<ControlValue> {
     let result = match (key, value) {
+        (_, ControlValueIr::Modulation { value }) => {
+            use tessera::prelude::{ModulationWaveform as W, ParameterKey as P};
+            let parameter = match key {
+                ControlKey::Gain => P::Gain,
+                ControlKey::Velocity => P::Velocity,
+                ControlKey::PlaybackRate => P::PlaybackRate,
+                ControlKey::LowPassCutoff => P::LowPassCutoff,
+                ControlKey::Transpose => P::Transpose,
+                _ => {
+                    ctx.push_unsupported("This lane does not support signal modulation.");
+                    return None;
+                }
+            };
+            if let Err(reason) = value.validate_for(parameter) {
+                ctx.push_unsupported(reason);
+                return None;
+            }
+            let waveform = match value.waveform {
+                W::Sine => cadence::prelude::Waveform::Sine,
+                W::Saw => cadence::prelude::Waveform::Saw,
+                W::Triangle => cadence::prelude::Waveform::Tri,
+                W::Square => cadence::prelude::Waveform::Square,
+                W::SmoothNoise => cadence::prelude::Waveform::Perlin { seed: value.seed },
+                W::Random => cadence::prelude::Waveform::Random { seed: value.seed },
+                W::SteppedNoise => cadence::prelude::Waveform::Rand { seed: value.seed },
+                W::Ramp => cadence::prelude::Waveform::Ramp,
+            };
+            let min = rational_to_f64(value.minimum);
+            let max = rational_to_f64(value.maximum);
+            let (bias, depth) = if value.waveform == W::Ramp {
+                (min, max - min)
+            } else {
+                ((min + max) / 2.0, (max - min) / 2.0)
+            };
+            ControlValue::Signal(
+                cadence::prelude::Signal::new(waveform)
+                    .with_rate(cadence::prelude::Time::new(
+                        value.rate.numerator,
+                        value.rate.denominator,
+                    ))
+                    .with_phase(cadence::prelude::Time::new(
+                        value.phase.numerator,
+                        value.phase.denominator,
+                    ))
+                    .with_bias(bias)
+                    .with_depth(depth),
+            )
+        }
+        (_, ControlValueIr::Delay { value }) => {
+            if let Err(reason) = value.validate() {
+                ctx.push_unsupported(reason);
+                return None;
+            }
+            ControlValue::Delay(cadence::prelude::DelaySettings::new(
+                UnitValue::new(rational_to_f64(value.amount)).unwrap(),
+                std::time::Duration::from_secs_f64(rational_to_f64(value.time)),
+                UnitValue::new(rational_to_f64(value.feedback)).unwrap(),
+                UnitValue::new(rational_to_f64(value.damping)).unwrap(),
+            ))
+        }
+        (_, ControlValueIr::Reverb { value }) => {
+            if let Err(reason) = value.validate() {
+                ctx.push_unsupported(reason);
+                return None;
+            }
+            ControlValue::Reverb(cadence::prelude::ReverbSettings::new(
+                UnitValue::new(rational_to_f64(value.amount)).unwrap(),
+                std::time::Duration::from_secs_f64(rational_to_f64(value.decay)),
+                UnitValue::new(rational_to_f64(value.damping)).unwrap(),
+            ))
+        }
+        (_, ControlValueIr::Compressor { value }) => {
+            if let Err(reason) = value.validate() {
+                ctx.push_unsupported(reason);
+                return None;
+            }
+            ControlValue::Compressor(
+                cadence::prelude::CompressorSettings::new(
+                    UnitValue::new(rational_to_f64(value.threshold)).unwrap(),
+                    rational_to_f64(value.ratio),
+                    std::time::Duration::from_secs_f64(rational_to_f64(value.attack)),
+                    std::time::Duration::from_secs_f64(rational_to_f64(value.release)),
+                )
+                .with_knee_db(rational_to_f64(value.knee_db)),
+            )
+        }
         (ControlKey::Gate, ControlValueIr::Bool { value }) => ControlValue::Bool(*value),
         (ControlKey::Gate, ControlValueIr::Rational { value }) => {
             ControlValue::Bool(!value.is_zero())
         }
-        (ControlKey::Reverse | ControlKey::SustainPedal, ControlValueIr::Bool { value }) => {
-            ControlValue::Bool(*value)
-        }
-        (ControlKey::Reverse | ControlKey::SustainPedal, ControlValueIr::Rational { value }) => {
-            ControlValue::Bool(!value.is_zero())
-        }
+        (
+            ControlKey::Reverse | ControlKey::Fit | ControlKey::Loop | ControlKey::SustainPedal,
+            ControlValueIr::Bool { value },
+        ) => ControlValue::Bool(*value),
+        (
+            ControlKey::Reverse | ControlKey::Fit | ControlKey::Loop | ControlKey::SustainPedal,
+            ControlValueIr::Rational { value },
+        ) => ControlValue::Bool(!value.is_zero()),
         (ControlKey::Velocity | ControlKey::Sustain, ControlValueIr::Rational { value }) => {
             let scalar = rational_to_f64(*value);
             UnitValue::new(scalar)
@@ -77,7 +177,7 @@ pub(super) fn lower_control_value(
                 .map(ControlValue::Unipolar)
                 .unwrap_or(ControlValue::Scalar(scalar))
         }
-        (ControlKey::PitchBend, ControlValueIr::Rational { value }) => {
+        (ControlKey::PitchBend | ControlKey::Pan, ControlValueIr::Rational { value }) => {
             let scalar = rational_to_f64(*value);
             SignedUnitValue::new(scalar)
                 .map(ControlValue::Bipolar)
@@ -106,6 +206,16 @@ pub(super) fn lower_field_value(
     ctx: &mut LoweringCtx,
 ) -> Option<ControlValue> {
     let ir = match value {
+        FieldValue::Modulation { value } => ControlValueIr::Modulation { value: *value },
+        FieldValue::Delay { value } => ControlValueIr::Delay { value: *value },
+        FieldValue::Reverb { value } => ControlValueIr::Reverb { value: *value },
+        FieldValue::Compressor { value } => ControlValueIr::Compressor { value: *value },
+        FieldValue::Slice { .. } => {
+            ctx.push_unsupported(
+                "A slice is an owned source selection, not a scalar control value",
+            );
+            return None;
+        }
         FieldValue::Rational { value } => ControlValueIr::Rational { value: *value },
         FieldValue::Bool { value } => ControlValueIr::Bool { value: *value },
         FieldValue::Symbol { value } => ControlValueIr::Symbol {
@@ -120,14 +230,29 @@ pub(super) fn lower_event_field(
     ctx: &mut LoweringCtx,
 ) -> Option<(ControlKey, ControlValue)> {
     let (key_ir, value) = match field {
+        EventField::Gate(value) => (ControlKeyIr::Gate, value),
+        EventField::Legato(value) => (ControlKeyIr::Legato, value),
+        EventField::SampleBank(value) => (ControlKeyIr::SampleBank, value),
+        EventField::SampleVariant(value) => (ControlKeyIr::SampleVariant, value),
         EventField::Gain(value) => (ControlKeyIr::Gain, value),
         EventField::PostGain(value) => (ControlKeyIr::PostGain, value),
+        EventField::Pan(value) => (ControlKeyIr::Pan, value),
+        EventField::Velocity(value) => (ControlKeyIr::Velocity, value),
+        EventField::ClipLength(value) => (ControlKeyIr::ClipLength, value),
+        EventField::Expression(value) => (ControlKeyIr::Expression, value),
+
         EventField::Pitch(value) => (ControlKeyIr::Pitch, value),
         EventField::PitchBend(value) => (ControlKeyIr::PitchBend, value),
         EventField::PlaybackRate(value) => (ControlKeyIr::PlaybackRate, value),
         EventField::PlaybackStart(value) => (ControlKeyIr::PlaybackStart, value),
         EventField::PlaybackEnd(value) => (ControlKeyIr::PlaybackEnd, value),
         EventField::Reverse(value) => (ControlKeyIr::Reverse, value),
+        EventField::Fit(value) => (ControlKeyIr::Fit, value),
+        EventField::Loop(value) => (ControlKeyIr::Loop, value),
+        EventField::Slice(_) => {
+            ctx.push_unsupported("A slice must be resolved against its assigned sample source");
+            return None;
+        }
         EventField::Attack(value) => (ControlKeyIr::Attack, value),
         EventField::Decay(value) => (ControlKeyIr::Decay, value),
         EventField::Sustain(value) => (ControlKeyIr::Sustain, value),
@@ -138,6 +263,7 @@ pub(super) fn lower_event_field(
         EventField::HighPassResonance(value) => (ControlKeyIr::HighPassResonance, value),
         EventField::ReverbSend(value) => (ControlKeyIr::ReverbSend, value),
         EventField::DelaySend(value) => (ControlKeyIr::DelaySend, value),
+        EventField::Compressor(value) => (ControlKeyIr::Compressor, value),
         EventField::Select(value) => {
             let name = match value {
                 FieldValue::Symbol { value } => value.clone(),
@@ -155,12 +281,7 @@ pub(super) fn lower_event_field(
             let control_value = lower_field_value(&control_key, value, ctx)?;
             return Some((control_key, control_value));
         }
-        EventField::Transpose(value) => {
-            let control_key =
-                lower_control_key(&ControlKeyIr::Custom("transpose".to_string()), ctx)?;
-            let control_value = lower_field_value(&control_key, value, ctx)?;
-            return Some((control_key, control_value));
-        }
+        EventField::Transpose(value) => (ControlKeyIr::Transpose, value),
         EventField::Degrade(_) => return None,
         EventField::Elongate(_) | EventField::Replicate(_) | EventField::RandomChoice => {
             ctx.push_unsupported(format!("event field {field:?}"));
@@ -171,6 +292,77 @@ pub(super) fn lower_event_field(
     let key = lower_control_key(&key_ir, ctx)?;
     let control_value = lower_field_value(&key, value, ctx)?;
     Some((key, control_value))
+}
+
+/// Resolve region operands as one source operation before attaching note controls.
+/// Bounds are absolute normalized sample positions. A slice divides that effective
+/// region, regardless of where the region and slice tiles occur in the note.
+pub(super) fn resolve_sample_region(
+    fields: &[EventField],
+    intent: &mut cadence::prelude::Intent,
+    ctx: &mut LoweringCtx,
+) -> bool {
+    use tessera::prelude::ParameterKey;
+    if !fields.iter().any(|field| {
+        matches!(
+            field,
+            EventField::PlaybackStart(_) | EventField::PlaybackEnd(_) | EventField::Slice(_)
+        )
+    }) {
+        return true;
+    }
+    let cadence::prelude::Intent::Sample(sample) = intent else {
+        ctx.push_unsupported("Sample region and slice tiles require a connected sample Sound tile");
+        return false;
+    };
+    let mut start = sample.start;
+    let mut end = sample.end;
+    let mut slice = None;
+    for field in fields {
+        let (key, value) = match field {
+            EventField::PlaybackStart(value) => (ParameterKey::PlaybackStart, value),
+            EventField::PlaybackEnd(value) => (ParameterKey::PlaybackEnd, value),
+            EventField::Slice(value) => (ParameterKey::Slice, value),
+            _ => continue,
+        };
+        if let Err(reason) = key.spec().validate(value) {
+            ctx.push_unsupported(format!("{}: {reason}", key.spec().label));
+            return false;
+        }
+        match (key, value) {
+            (ParameterKey::PlaybackStart, FieldValue::Rational { value }) => {
+                start = rational_to_f64(*value)
+            }
+            (ParameterKey::PlaybackEnd, FieldValue::Rational { value }) => {
+                end = rational_to_f64(*value)
+            }
+            (ParameterKey::Slice, FieldValue::Slice { index, count }) => {
+                if slice.replace((*index, *count)).is_some() {
+                    ctx.push_unsupported(
+                        "A note can select only one slice; each slice owns its index and count",
+                    );
+                    return false;
+                }
+            }
+            _ => unreachable!("validated source operand"),
+        }
+    }
+    if !start.is_finite() || !end.is_finite() || start < 0.0 || start >= end || end > 1.0 {
+        ctx.push_unsupported("Sample region must satisfy 0 <= start < end <= 1");
+        return false;
+    }
+    let mut selected = sample.clone().region(start, end);
+    if let Some((index, count)) = slice {
+        match selected.slice(index, count) {
+            Ok(value) => selected = value,
+            Err(error) => {
+                ctx.push_unsupported(format!("Invalid sample slice: {error:?}"));
+                return false;
+            }
+        }
+    }
+    *sample = selected;
+    true
 }
 
 fn rational_to_f64(value: Rational) -> f64 {
@@ -220,6 +412,13 @@ pub(super) fn lower_scalar_stream_as_gate(
 
 pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) -> LoweredPattern {
     match node {
+        PatternNodeIr::FlowProjection { .. } => super::query_source::lower(node, ctx, true),
+        PatternNodeIr::Arrange { segments } => {
+            super::lower_arrangement(segments, ctx, lower_control_node)
+        }
+        PatternNodeIr::Sequence { children } => {
+            lower_weighted_slots(children, ctx, lower_control_node)
+        }
         PatternNodeIr::ControlStream(inner) => LoweredPattern {
             events: None,
             controls: lower_control_stream(&inner.stream, ctx),
@@ -255,9 +454,9 @@ pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) ->
             let inner = lower_control_node(inner, ctx);
             LoweredPattern {
                 events: None,
-                controls: inner
-                    .controls
-                    .map(|controls| ControlScore::time_scale(controls, rational_to_time(*factor))),
+                controls: inner.controls.map(|controls| {
+                    ControlScore::time_scale(controls, CycleTime::ONE / rational_to_time(*factor))
+                }),
             }
         }
         PatternNodeIr::Shift { inner, offset } => {
@@ -313,7 +512,9 @@ pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) ->
         PatternNodeIr::WeightedChoice { options, seed } => {
             lower_weighted_choice_parts(options, *seed, ctx, lower_control_node)
         }
-        PatternNodeIr::EventStream(_) => LoweredPattern {
+        // Intentional: EventStream is event-only (HOST_API). Control lowering
+        // discards it without a diagnostic — there is no control material to map.
+        PatternNodeIr::EventStream(_) | PatternNodeIr::CycleEventStream(_) => LoweredPattern {
             events: None,
             controls: None,
         },
@@ -354,6 +555,55 @@ pub(super) fn lower_control_node(node: &PatternNodeIr, ctx: &mut LoweringCtx) ->
             ControlScore::concat,
         ),
     }
+}
+
+pub(super) fn lower_weighted_slots(
+    children: &[WeightedPatternIr],
+    ctx: &mut LoweringCtx,
+    lower_child: fn(&PatternNodeIr, &mut LoweringCtx) -> LoweredPattern,
+) -> LoweredPattern {
+    let parts: Vec<_> = children
+        .iter()
+        .map(|child| {
+            (
+                lower_child(&child.node, ctx),
+                rational_to_time(child.weight),
+            )
+        })
+        .collect();
+    let events = parts
+        .iter()
+        .any(|(part, _)| part.events.is_some())
+        .then(|| {
+            Score::weighted_cycle_slots(
+                parts
+                    .iter()
+                    .map(|(part, weight)| {
+                        WeightedScore::new(
+                            part.events.clone().unwrap_or_else(Score::empty),
+                            *weight,
+                        )
+                    })
+                    .collect(),
+            )
+        });
+    let controls = parts
+        .iter()
+        .any(|(part, _)| part.controls.is_some())
+        .then(|| {
+            ControlScore::weighted_cycle_slots(
+                parts
+                    .iter()
+                    .map(|(part, weight)| {
+                        WeightedControlScore::new(
+                            part.controls.clone().unwrap_or_else(ControlScore::empty),
+                            *weight,
+                        )
+                    })
+                    .collect(),
+            )
+        });
+    LoweredPattern { events, controls }
 }
 
 fn source_mask_controls(mask: &PatternNodeIr, ctx: &mut LoweringCtx) -> Option<ControlScore> {
@@ -481,17 +731,25 @@ pub(super) fn combine_lowered(
         }
     }
 
-    LoweredPattern {
-        events: match events.len() {
-            0 => None,
-            1 => Some(events.remove(0)),
-            _ => Some(cadence::prelude::merge(events)),
+    let events = match events.len() {
+        0 => None,
+        1 => Some(events.remove(0)),
+        _ => Some(cadence::prelude::merge(events)),
+    };
+    let controls = match controls.len() {
+        0 => None,
+        1 => Some(controls.remove(0)),
+        _ => Some(ControlScore::merge(controls)),
+    };
+    // Merge(event pattern, control pattern) is the scope of an explicit flow
+    // modifier. Resolve that scope here; lifting its controls into a parent
+    // layer would also modify the unrelated sibling voices in that layer.
+    match (events, controls) {
+        (Some(events), Some(controls)) => LoweredPattern {
+            events: Some(Score::with_controls(events, controls)),
+            controls: None,
         },
-        controls: match controls.len() {
-            0 => None,
-            1 => Some(controls.remove(0)),
-            _ => Some(ControlScore::merge(controls)),
-        },
+        (events, controls) => LoweredPattern { events, controls },
     }
 }
 

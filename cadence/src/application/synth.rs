@@ -45,6 +45,8 @@ pub type SynthGainRamp = SampleGainRamp;
 #[derive(Debug, Clone, PartialEq)]
 /// Concrete playback packet for a built-in synth voice.
 pub struct SynthTrigger {
+    /// Validated immutable ordered per-voice insert chain.
+    pub inserts: crate::domain::inserts::InsertChain,
     /// Concrete voice instance this trigger belongs to.
     pub voice_id: VoiceInstanceId,
     /// Initial runtime control state for the active voice.
@@ -113,6 +115,7 @@ impl SynthTrigger {
         assert_non_negative("synth trigger post-gain", settings.post_gain);
 
         Self {
+            inserts: settings.inserts,
             voice_id: settings.voice_id,
             runtime_controls: settings.runtime_controls,
             source: settings.source,
@@ -187,8 +190,9 @@ impl SynthTrigger {
         };
 
         let mut builder = Self::builder()
+            .inserts(plan.inserts.clone())
             .voice_id(plan.voice_id)
-            .runtime_controls(plan.runtime_controls)
+            .runtime_controls(plan.runtime_controls.clone())
             .source(source.source)
             .pitch(source.pitch)
             .velocity(plan.mix.velocity)
@@ -217,13 +221,13 @@ impl SynthTrigger {
             builder = builder.high_pass_cutoff_hz(cutoff);
         }
         if let Some(reverb) = &plan.sends.reverb {
-            builder = builder.reverb(reverb.clone());
+            builder = builder.reverb(*reverb);
         }
         if let Some(delay) = &plan.sends.delay {
-            builder = builder.delay(delay.clone());
+            builder = builder.delay(*delay);
         }
         if let Some(compressor) = &plan.dynamics.compressor {
-            builder = builder.compressor(compressor.clone());
+            builder = builder.compressor(*compressor);
         }
         if let Some(note) = plan.live_note {
             builder = builder.live_note(note);
@@ -237,6 +241,8 @@ impl SynthTrigger {
 #[derive(Debug, Clone, PartialEq)]
 /// Field-based settings struct accepted by [`SynthTrigger::new`].
 pub struct SynthTriggerSettings {
+    /// Validated immutable ordered per-voice insert chain.
+    pub inserts: crate::domain::inserts::InsertChain,
     /// Concrete voice instance this trigger belongs to.
     pub voice_id: VoiceInstanceId,
     /// Initial runtime control state for the active voice.
@@ -282,6 +288,7 @@ pub struct SynthTriggerSettings {
 #[derive(Debug, Clone, Default)]
 /// Builder for [`SynthTrigger`].
 pub struct SynthTriggerBuilder {
+    inserts: crate::domain::inserts::InsertChain,
     voice_id: Option<VoiceInstanceId>,
     runtime_controls: Option<AudioRuntimeControlState>,
     source: Option<BuiltInSynthSource>,
@@ -305,6 +312,11 @@ pub struct SynthTriggerBuilder {
 }
 
 impl SynthTriggerBuilder {
+    /// Replaces the ordered per-voice insert chain.
+    pub fn inserts(mut self, inserts: crate::domain::inserts::InsertChain) -> Self {
+        self.inserts = inserts;
+        self
+    }
     /// Creates an empty builder.
     #[must_use]
     pub fn new() -> Self {
@@ -483,6 +495,7 @@ impl SynthTriggerBuilder {
     #[must_use]
     pub fn build(self) -> Option<SynthTrigger> {
         Some(SynthTrigger::new(SynthTriggerSettings {
+            inserts: self.inserts,
             voice_id: self.voice_id.unwrap_or_else(VoiceInstanceId::next_live),
             runtime_controls: self.runtime_controls.unwrap_or_default(),
             source: self.source?,

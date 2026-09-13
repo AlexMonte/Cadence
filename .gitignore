@@ -7,10 +7,12 @@
 /tests
 /test_project
 /.codex
+/.cursor
 /current_project
 *.rs.bk
 /.tmp
 /.claude
+**/.opencode/
 /docs
 /package-lock.json
 /package.json

@@ -1,8 +1,8 @@
 //! Canonical projected transport-time output.
 //!
-//! Hosts that need the full projected meaning of a render window should inspect
-//! `ProjectedMoment` / `ProjectedMosaic`. Thin `Moment` / `Mosaic` values
-//! remain available as lossy transport-time compatibility views.
+//! Hosts that need the full projected meaning of a render window inspect the
+//! ordered `EvaluatedEvent` values returned by `CadenceCompiler` or
+//! `RendererCore`. Each event carries one `ProjectedMoment`.
 
 pub use crate::domain::{
     control::{ControlKey, ControlMap, ControlValue, Symbol, UnitValue},
@@ -11,7 +11,7 @@ pub use crate::domain::{
         SampleIntent, SelectIntent, SynthIntent, ToggleIntent,
     },
     moment::{Moment, MomentId},
-    projection::{ProjectedMoment, ProjectedMosaic},
+    projection::ProjectedMoment,
     rational::Time,
     span::{Span, TransportSpan},
 };

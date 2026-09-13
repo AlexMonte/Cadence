@@ -1,7 +1,6 @@
 //! Backend-agnostic host-facing projection/render contract.
 //!
-//! `RendererCore` is score-first. Hosts that need the full projected meaning
-//! of a transport window should prefer `projected_output()`. Thin
-//! `projected_mosaic()` output remains available as a lossy compatibility view.
+//! `RendererCore` is score-first and returns the complete ordered event list
+//! for a transport window.
 
 pub use crate::application::renderer_core::RendererCore;

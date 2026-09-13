@@ -49,3 +49,17 @@ impl StackBuilder {
         self.items
     }
 }
+
+/// A number owned by the preceding note's octave, independent of group order.
+pub fn octave(value: i64) -> ContainerSurfaceTile {
+    ContainerSurfaceTile::Atom(AtomTile::Octave(value))
+}
+
+pub fn accidental(value: crate::domain::SignedAccidental) -> ContainerSurfaceTile {
+    ContainerSurfaceTile::Atom(AtomTile::Accidental(value))
+}
+
+/// A complete modifier group. Its operands remain bound when moved.
+pub fn modifier(value: crate::domain::AtomModifier) -> ContainerSurfaceTile {
+    ContainerSurfaceTile::Atom(AtomTile::Modifier(value))
+}

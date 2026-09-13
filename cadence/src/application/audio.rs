@@ -1,11 +1,12 @@
 //! Mixed sample/synth audio lowering for the audio path.
 
+use crate::domain::rational::Time;
 use std::sync::{
     Arc, RwLock,
-    mpsc::{self, Receiver, SendError, Sender, TryRecvError},
+    mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
 };
 use std::{
-    sync::atomic::{AtomicI64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     time::Duration,
 };
 
@@ -65,9 +66,17 @@ pub enum RuntimeControlValue<T> {
     Reset,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 /// Shared runtime control state consumed by active voices.
 pub struct AudioRuntimeControlState {
+    /// Whether the voice currently passes audio while retaining its playback position.
+    pub gate: bool,
+    /// Current filter parameters, retained when one filter lane changes independently.
+    pub filters: FilterPlan,
+    /// Combined stereo pan offset; the renderer clamps the final value.
+    pub pan: f64,
+    /// Additive musical transposition, evaluated independently of pitch bend.
+    pub transpose: crate::domain::control::SemitoneControl,
     /// Additional pitch bend in semitones.
     pub pitch_bend_semitones: f64,
     /// Expression gain multiplier.
@@ -81,6 +90,10 @@ pub struct AudioRuntimeControlState {
 impl Default for AudioRuntimeControlState {
     fn default() -> Self {
         Self {
+            gate: true,
+            filters: FilterPlan::default(),
+            pan: 0.0,
+            transpose: crate::domain::control::SemitoneControl::default(),
             pitch_bend_semitones: 0.0,
             expression: UnitValue::new(1.0).unwrap(),
             mod_wheel: UnitValue::new(0.0).unwrap(),
@@ -89,9 +102,35 @@ impl Default for AudioRuntimeControlState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 /// Partial update applied to an active voice's runtime controls.
 pub struct AudioRuntimeControlDelta {
+    /// Replaces the gain signal while retaining the voice clock.
+    pub gain_signal: RuntimeControlValue<Signal>,
+    /// Replaces the sample-rate signal while retaining the voice clock.
+    pub playback_rate_signal: RuntimeControlValue<Signal>,
+    /// Replaces the cutoff signal while retaining filter memory.
+    pub low_pass_signal: RuntimeControlValue<Signal>,
+    /// Changes the audible gate without restarting the voice.
+    pub gate: RuntimeControlValue<bool>,
+    /// Changes the low-pass cutoff, or disables it on reset.
+    pub low_pass_cutoff_hz: RuntimeControlValue<f64>,
+    /// Changes low-pass resonance.
+    pub low_pass_resonance: RuntimeControlValue<UnitValue>,
+    /// Changes the high-pass cutoff, or disables it on reset.
+    pub high_pass_cutoff_hz: RuntimeControlValue<f64>,
+    /// Changes high-pass resonance.
+    pub high_pass_resonance: RuntimeControlValue<UnitValue>,
+    /// Changes or removes reverb routing.
+    pub reverb: RuntimeControlValue<ReverbSettings>,
+    /// Changes or removes delay routing.
+    pub delay: RuntimeControlValue<DelaySettings>,
+    /// Changes or removes dynamics processing.
+    pub compressor: RuntimeControlValue<CompressorSettings>,
+    /// Replacement of the complete additive stereo pan lane.
+    pub pan: RuntimeControlValue<f64>,
+    /// Replacement of the complete additive transposition lane.
+    pub transpose: RuntimeControlValue<crate::domain::control::SemitoneControl>,
     /// Change applied to pitch bend in semitones.
     pub pitch_bend_semitones: RuntimeControlValue<f64>,
     /// Change applied to expression gain.
@@ -111,6 +150,19 @@ pub struct AudioRuntimeControlDelta {
 impl Default for AudioRuntimeControlDelta {
     fn default() -> Self {
         Self {
+            gain_signal: RuntimeControlValue::Keep,
+            playback_rate_signal: RuntimeControlValue::Keep,
+            low_pass_signal: RuntimeControlValue::Keep,
+            gate: RuntimeControlValue::Keep,
+            low_pass_cutoff_hz: RuntimeControlValue::Keep,
+            low_pass_resonance: RuntimeControlValue::Keep,
+            high_pass_cutoff_hz: RuntimeControlValue::Keep,
+            high_pass_resonance: RuntimeControlValue::Keep,
+            reverb: RuntimeControlValue::Keep,
+            delay: RuntimeControlValue::Keep,
+            compressor: RuntimeControlValue::Keep,
+            pan: RuntimeControlValue::Keep,
+            transpose: RuntimeControlValue::Keep,
             pitch_bend_semitones: RuntimeControlValue::Keep,
             expression: RuntimeControlValue::Keep,
             mod_wheel: RuntimeControlValue::Keep,
@@ -130,6 +182,12 @@ impl AudioRuntimeControlDelta {
         let mut delta = Self::default();
 
         match (key, value) {
+            (ControlKey::Pan, value) => {
+                delta.pan = RuntimeControlValue::Set(pan_from_control(value)?);
+            }
+            (ControlKey::Transpose, value) => {
+                delta.transpose = RuntimeControlValue::Set(transpose_from_control(value)?);
+            }
             (ControlKey::PitchBend, ControlValue::Bipolar(value)) => {
                 delta.pitch_bend_semitones =
                     RuntimeControlValue::Set(value.value() * DEFAULT_PITCH_BEND_RANGE_SEMITONES);
@@ -144,15 +202,11 @@ impl AudioRuntimeControlDelta {
                 delta.sustain_pedal = RuntimeControlValue::Set(*value);
             }
             (ControlKey::PostGain, value) => {
-                let Some(scalar) = control_to_non_negative_scalar(Some(value)) else {
-                    return None;
-                };
+                let scalar = control_to_non_negative_scalar(Some(value))?;
                 delta.post_gain = RuntimeControlValue::Set(scalar as f32);
             }
             (ControlKey::Gain, value) => {
-                let Some(scalar) = control_to_gain_scalar(Some(value)) else {
-                    return None;
-                };
+                let scalar = control_to_gain_scalar(Some(value))?;
                 delta.gain = RuntimeControlValue::Set(scalar as f32);
             }
             _ => return None,
@@ -169,6 +223,55 @@ impl AudioRuntimeControlDelta {
     pub fn from_runtime_controls_snapshot(controls: &ControlMap) -> Self {
         let mut delta = Self::default();
 
+        for (key, target) in [
+            (ControlKey::Gain, &mut delta.gain_signal),
+            (ControlKey::PlaybackRate, &mut delta.playback_rate_signal),
+            (ControlKey::LowPassCutoff, &mut delta.low_pass_signal),
+        ] {
+            match controls.get(&key) {
+                Some(ControlValue::Signal(signal)) => *target = RuntimeControlValue::Set(*signal),
+                Some(_) => *target = RuntimeControlValue::Reset,
+                None => {}
+            }
+        }
+        if let Some(ControlValue::Signal(signal)) = controls.get(&ControlKey::LowPassCutoff) {
+            delta.low_pass_cutoff_hz = RuntimeControlValue::Set(signal.eval(0.0).max(20.0));
+        }
+        if let Some(ControlValue::Bool(gate)) = controls.get(&ControlKey::Gate) {
+            delta.gate = RuntimeControlValue::Set(*gate);
+        }
+        if let Some(value) = control_to_positive_scalar(controls.get(&ControlKey::LowPassCutoff)) {
+            delta.low_pass_cutoff_hz = RuntimeControlValue::Set(value);
+        }
+        if let Some(value) = control_to_unit(controls.get(&ControlKey::LowPassResonance)) {
+            delta.low_pass_resonance = RuntimeControlValue::Set(value);
+        }
+        if let Some(value) = control_to_positive_scalar(controls.get(&ControlKey::HighPassCutoff)) {
+            delta.high_pass_cutoff_hz = RuntimeControlValue::Set(value);
+        }
+        if let Some(value) = control_to_unit(controls.get(&ControlKey::HighPassResonance)) {
+            delta.high_pass_resonance = RuntimeControlValue::Set(value);
+        }
+        if let Some(value) = control_to_reverb(controls.get(&ControlKey::ReverbSend)) {
+            delta.reverb = RuntimeControlValue::Set(value);
+        }
+        if let Some(value) = control_to_delay(controls.get(&ControlKey::DelaySend)) {
+            delta.delay = RuntimeControlValue::Set(value);
+        }
+        if let Some(value) = control_to_compressor(controls.get(&ControlKey::Compressor)) {
+            delta.compressor = RuntimeControlValue::Set(value);
+        }
+
+        if let Some(pan) = controls.get(&ControlKey::Pan).and_then(pan_from_control) {
+            delta.pan = RuntimeControlValue::Set(pan);
+        }
+
+        if let Some(transpose) = controls
+            .get(&ControlKey::Transpose)
+            .and_then(transpose_from_control)
+        {
+            delta.transpose = RuntimeControlValue::Set(transpose);
+        }
         if let Some(ControlValue::Bipolar(value)) = controls.get(&ControlKey::PitchBend) {
             delta.pitch_bend_semitones =
                 RuntimeControlValue::Set(value.value() * DEFAULT_PITCH_BEND_RANGE_SEMITONES);
@@ -196,7 +299,58 @@ impl AudioRuntimeControlDelta {
     }
 
     /// Applies the delta to a mutable runtime state.
-    pub fn apply_to(self, state: &mut AudioRuntimeControlState) {
+    pub fn apply_to(&self, state: &mut AudioRuntimeControlState) {
+        match self.gate {
+            RuntimeControlValue::Keep => {}
+            RuntimeControlValue::Set(value) => state.gate = value,
+            RuntimeControlValue::Reset => state.gate = true,
+        }
+        for (delta, target) in [
+            (
+                self.low_pass_cutoff_hz,
+                &mut state.filters.low_pass_cutoff_hz,
+            ),
+            (
+                self.high_pass_cutoff_hz,
+                &mut state.filters.high_pass_cutoff_hz,
+            ),
+        ] {
+            match delta {
+                RuntimeControlValue::Keep => {}
+                RuntimeControlValue::Set(value) if value.is_finite() && value > 0.0 => {
+                    *target = Some(value)
+                }
+                RuntimeControlValue::Set(_) | RuntimeControlValue::Reset => *target = None,
+            }
+        }
+        for (delta, target) in [
+            (
+                self.low_pass_resonance,
+                &mut state.filters.low_pass_resonance,
+            ),
+            (
+                self.high_pass_resonance,
+                &mut state.filters.high_pass_resonance,
+            ),
+        ] {
+            match delta {
+                RuntimeControlValue::Keep => {}
+                RuntimeControlValue::Set(value) => *target = value,
+                RuntimeControlValue::Reset => *target = UnitValue::new(0.0).unwrap(),
+            }
+        }
+        match self.pan {
+            RuntimeControlValue::Keep => {}
+            RuntimeControlValue::Set(value) if value.is_finite() => state.pan = value,
+            RuntimeControlValue::Set(_) | RuntimeControlValue::Reset => state.pan = 0.0,
+        }
+        match &self.transpose {
+            RuntimeControlValue::Keep => {}
+            RuntimeControlValue::Set(value) => state.transpose = value.clone(),
+            RuntimeControlValue::Reset => {
+                state.transpose = crate::domain::control::SemitoneControl::default()
+            }
+        }
         match self.pitch_bend_semitones {
             RuntimeControlValue::Keep => {}
             RuntimeControlValue::Set(value) => state.pitch_bend_semitones = value,
@@ -308,6 +462,17 @@ pub struct FilterPlan {
     pub high_pass_resonance: UnitValue,
 }
 
+impl Default for FilterPlan {
+    fn default() -> Self {
+        Self {
+            low_pass_cutoff_hz: None,
+            low_pass_resonance: UnitValue::new(0.0).unwrap(),
+            high_pass_cutoff_hz: None,
+            high_pass_resonance: UnitValue::new(0.0).unwrap(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 /// Send-effect routing shared by sample and synth voices.
 pub struct SendPlan {
@@ -343,6 +508,10 @@ pub struct SampleSourcePlan {
     pub playback_end: f64,
     /// Whether the sample plays in reverse.
     pub reverse: bool,
+    /// Optional target duration for rate-based region fitting, before rate/pitch offsets.
+    pub fit_duration: Option<Duration>,
+    /// Repeat the selected region until the envelope ends.
+    pub looped: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -384,6 +553,8 @@ pub struct SignalBinding {
 #[derive(Debug, Clone, PartialEq)]
 /// First-class audio voice plan consumed by lower renderer layers.
 pub struct AudioVoicePlan {
+    /// Validated immutable insert topology, prepared at the device sample rate.
+    pub inserts: crate::domain::inserts::InsertChain,
     /// Concrete voice instance this plan starts.
     pub voice_id: VoiceInstanceId,
     /// Source-specific playback settings.
@@ -415,13 +586,13 @@ pub struct AudioVoicePlan {
 /// Audio-facing event produced after scheduling and control resolution.
 pub enum ScheduledAudioEvent {
     /// Start one new voice instance.
-    StartVoice(AudioVoicePlan),
+    StartVoice(Box<AudioVoicePlan>),
     /// Update runtime control state for an existing voice.
     UpdateVoiceControls {
         /// Voice instance that should receive the update.
         voice_id: VoiceInstanceId,
         /// Runtime control delta to apply.
-        delta: AudioRuntimeControlDelta,
+        delta: Box<AudioRuntimeControlDelta>,
     },
     /// Release one existing voice instance.
     ReleaseVoice(VoiceInstanceId),
@@ -440,7 +611,8 @@ impl AudioVoicePlan {
 
         match event.intent() {
             crate::domain::intent::Intent::Sample(sample) => {
-                let mut controls = ambient_controls.clone();
+                let mut controls = sample.default_controls();
+                controls.extend(ambient_controls.clone());
                 controls.extend(event.controls().clone());
                 sample_voice_plan_from_controls(
                     voice_id,
@@ -453,11 +625,12 @@ impl AudioVoicePlan {
                 )
             }
             crate::domain::intent::Intent::Synth(intent) => {
-                let mut controls = ambient_controls.clone();
+                let mut controls = intent.default_controls();
+                controls.extend(ambient_controls.clone());
                 controls.extend(event.controls().clone());
                 synth_voice_plan_from_controls(
                     voice_id,
-                    intent.source,
+                    intent,
                     &controls,
                     None,
                     None,
@@ -479,8 +652,10 @@ impl AudioVoicePlan {
         live_note: Option<NoteNumber>,
         play_for: Duration,
     ) -> Option<Self> {
+        let mut merged = sample.default_controls();
+        merged.extend(controls.clone());
         sample_voice_plan_from_controls(
-            voice_id, sample, controls, velocity, live_note, play_for, None,
+            voice_id, sample, &merged, velocity, live_note, play_for, None,
         )
     }
 
@@ -495,12 +670,41 @@ impl AudioVoicePlan {
         play_for: Duration,
     ) -> Option<Self> {
         synth_voice_plan_from_controls(
-            voice_id, source, controls, velocity, live_note, play_for, None,
+            voice_id,
+            &crate::domain::intent::SynthIntent::new(source),
+            controls,
+            velocity,
+            live_note,
+            play_for,
+            None,
+        )
+    }
+
+    /// Builds a live synth plan, keeping preset defaults below caller controls.
+    #[must_use]
+    pub fn from_live_synth_intent(
+        voice_id: VoiceInstanceId,
+        intent: &crate::domain::intent::SynthIntent,
+        controls: &ControlMap,
+        velocity: Option<UnitValue>,
+        live_note: Option<NoteNumber>,
+        play_for: Duration,
+    ) -> Option<Self> {
+        let mut merged = intent.default_controls();
+        merged.extend(controls.clone());
+        synth_voice_plan_from_controls(
+            voice_id, intent, &merged, velocity, live_note, play_for, None,
         )
     }
 }
 
 impl ScheduledAudioEvent {
+    /// Creates an event that starts one prepared audio voice.
+    #[must_use]
+    pub fn start_voice(plan: AudioVoicePlan) -> Self {
+        Self::StartVoice(Box::new(plan))
+    }
+
     /// Lowers one scheduled intent into a concrete audio event.
     #[must_use]
     pub fn from_scheduled_intent_with_ambient(
@@ -510,14 +714,68 @@ impl ScheduledAudioEvent {
         match event.kind() {
             ScheduledIntentKind::StartVoice { .. } => {
                 AudioVoicePlan::from_scheduled_intent_with_ambient(event, ambient_controls)
+                    .map(Box::new)
                     .map(Self::StartVoice)
             }
             ScheduledIntentKind::UpdateVoiceControls { voice_id, .. } => {
+                let mut controls = match event.intent() {
+                    crate::domain::intent::Intent::Synth(intent) => intent.default_controls(),
+                    crate::domain::intent::Intent::Sample(intent) => intent.default_controls(),
+                    _ => ControlMap::new(),
+                };
+                controls.extend(ambient_controls.clone());
+                controls.extend(event.controls().clone());
+                let mut delta = AudioRuntimeControlDelta::from_runtime_controls_snapshot(&controls);
+                if matches!(delta.gain_signal, RuntimeControlValue::Set(_)) {
+                    delta.gain = RuntimeControlValue::Set(match event.intent() {
+                        crate::domain::intent::Intent::Sample(intent) => intent.gain as f32,
+                        _ => crate::application::synth::SynthTrigger::DEFAULT_GAIN as f32,
+                    });
+                }
+                if matches!(delta.playback_rate_signal, RuntimeControlValue::Set(_)) {
+                    delta.playback_rate = RuntimeControlValue::Set(match event.intent() {
+                        crate::domain::intent::Intent::Sample(intent) => intent.rate,
+                        _ => 1.0,
+                    });
+                }
+                if !controls.contains_key(&ControlKey::Gain) {
+                    delta.gain_signal = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::PlaybackRate) {
+                    delta.playback_rate_signal = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::LowPassCutoff) {
+                    delta.low_pass_signal = RuntimeControlValue::Reset;
+                }
+                // These scheduled DSP lanes are complete snapshots, including
+                // gaps between tiles. Live-only/runtime lanes remain partial.
+                if !controls.contains_key(&ControlKey::Gate) {
+                    delta.gate = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::LowPassCutoff) {
+                    delta.low_pass_cutoff_hz = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::LowPassResonance) {
+                    delta.low_pass_resonance = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::HighPassCutoff) {
+                    delta.high_pass_cutoff_hz = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::HighPassResonance) {
+                    delta.high_pass_resonance = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::ReverbSend) {
+                    delta.reverb = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::DelaySend) {
+                    delta.delay = RuntimeControlValue::Reset;
+                }
+                if !controls.contains_key(&ControlKey::Compressor) {
+                    delta.compressor = RuntimeControlValue::Reset;
+                }
                 Some(Self::UpdateVoiceControls {
                     voice_id,
-                    delta: AudioRuntimeControlDelta::from_runtime_controls_snapshot(
-                        event.controls(),
-                    ),
+                    delta: Box::new(delta),
                 })
             }
         }
@@ -533,16 +791,9 @@ fn sample_voice_plan_from_controls(
     play_for: Duration,
     event: Option<&ScheduledIntent>,
 ) -> Option<AudioVoicePlan> {
-    if matches!(
-        controls.get(&ControlKey::Gate),
-        Some(ControlValue::Bool(false))
-    ) {
-        return None;
-    }
-
-    let mut playback_start =
+    let playback_start =
         control_to_scalar(controls.get(&ControlKey::PlaybackStart)).unwrap_or(sample.start);
-    let mut playback_end =
+    let playback_end =
         control_to_scalar(controls.get(&ControlKey::PlaybackEnd)).unwrap_or(sample.end);
     let reverse = match controls.get(&ControlKey::Reverse) {
         Some(ControlValue::Bool(value)) => *value,
@@ -555,29 +806,20 @@ fn sample_voice_plan_from_controls(
         _ => None,
     };
 
-    if let Some(event) = event {
-        if let crate::application::scheduler::events::scheduled_intent::ScheduledEntry::InProgress {
-            elapsed,
+    if let Some(event) = event
+        && let crate::application::scheduler::events::scheduled_intent::ScheduledEntry::InProgress {
+            ..
         } = event.entry()
-        {
-            let progress = (elapsed / event.duration()).value().clamp(0.0, 1.0);
-            let entry_span = crate::domain::span::TransportSpan::new(
-                event.entry_time(),
-                event.voice_whole().end(),
-            )
-            .unwrap();
+    {
+        let entry_span =
+            crate::domain::span::TransportSpan::new(event.entry_time(), event.voice_whole().end())
+                .unwrap();
 
-            gain_ramp = gain_ramp.map(|ramp| ramp.slice_for(event.voice_whole(), entry_span));
-
-            if reverse {
-                playback_end = lerp(playback_start, playback_end, 1.0 - progress);
-            } else {
-                playback_start = lerp(playback_start, playback_end, progress);
-            }
-        }
+        gain_ramp = gain_ramp.map(|ramp| ramp.slice_for(event.voice_whole(), entry_span));
     }
 
     Some(AudioVoicePlan {
+        inserts: sample.inserts.clone(),
         voice_id,
         source: AudioSourcePlan::Sample(SampleSourcePlan {
             sample: sample.sample_id.clone(),
@@ -591,10 +833,19 @@ fn sample_voice_plan_from_controls(
             playback_start,
             playback_end,
             reverse,
+            fit_duration: matches!(
+                controls.get(&ControlKey::Fit),
+                Some(ControlValue::Bool(true))
+            )
+            .then(|| event.map_or(play_for, |event| event.play_for + event.elapsed_duration())),
+            looped: matches!(
+                controls.get(&ControlKey::Loop),
+                Some(ControlValue::Bool(true))
+            ),
         }),
         lifecycle: lifecycle_from_controls(controls, play_for, event),
         envelope: envelope_plan_from_controls(controls),
-        mix: mix_plan_from_controls(sample.gain, controls, velocity, gain_ramp),
+        mix: mix_plan_from_controls(sample.gain, controls, velocity, gain_ramp, event),
         spatial: voice_spatial_from_event(event),
         filters: filter_plan_from_controls(controls),
         sends: send_plan_from_controls(controls),
@@ -607,20 +858,13 @@ fn sample_voice_plan_from_controls(
 
 fn synth_voice_plan_from_controls(
     voice_id: VoiceInstanceId,
-    source: BuiltInSynthSource,
+    intent: &crate::domain::intent::SynthIntent,
     controls: &ControlMap,
     velocity: Option<UnitValue>,
     live_note: Option<NoteNumber>,
     play_for: Duration,
     event: Option<&ScheduledIntent>,
 ) -> Option<AudioVoicePlan> {
-    if matches!(
-        controls.get(&ControlKey::Gate),
-        Some(ControlValue::Bool(false))
-    ) {
-        return None;
-    }
-
     let mut gain_ramp = match controls.get(&ControlKey::Gain) {
         Some(ControlValue::Ramp { from, to }) => {
             Some(crate::application::sample::SampleGainRamp::new(*from, *to))
@@ -628,24 +872,23 @@ fn synth_voice_plan_from_controls(
         _ => None,
     };
 
-    if let Some(event) = event {
-        if matches!(
+    if let Some(event) = event
+        && matches!(
             event.entry(),
             crate::application::scheduler::events::scheduled_intent::ScheduledEntry::InProgress { .. }
-        ) {
-            let entry_span = crate::domain::span::TransportSpan::new(
-                event.entry_time(),
-                event.voice_whole().end(),
-            )
-            .unwrap();
-            gain_ramp = gain_ramp.map(|ramp| ramp.slice_for(event.voice_whole(), entry_span));
-        }
+        )
+    {
+        let entry_span =
+            crate::domain::span::TransportSpan::new(event.entry_time(), event.voice_whole().end())
+                .unwrap();
+        gain_ramp = gain_ramp.map(|ramp| ramp.slice_for(event.voice_whole(), entry_span));
     }
 
     Some(AudioVoicePlan {
+        inserts: intent.inserts.clone(),
         voice_id,
         source: AudioSourcePlan::Synth(SynthSourcePlan {
-            source,
+            source: intent.source,
             pitch: control_to_scalar(controls.get(&ControlKey::Pitch))
                 .unwrap_or(crate::application::synth::SynthTrigger::DEFAULT_PITCH),
         }),
@@ -656,6 +899,7 @@ fn synth_voice_plan_from_controls(
             controls,
             velocity,
             gain_ramp,
+            event,
         ),
         spatial: voice_spatial_from_event(event),
         filters: filter_plan_from_controls(controls),
@@ -679,7 +923,7 @@ const MODULATABLE_SIGNAL_LANES: [ControlKey; 3] = [
 fn cycle_clock(event: Option<&ScheduledIntent>) -> (f64, f64) {
     match event {
         Some(event) => {
-            let start_cycle = event.voice_whole().start().value();
+            let start_cycle = event.entry_time().value();
             let remaining_cycles = event.remaining_duration().value();
             let seconds = event.play_for.as_secs_f64();
             let cps = if seconds > 0.0 && remaining_cycles > 0.0 {
@@ -771,6 +1015,7 @@ fn mix_plan_from_controls(
     controls: &ControlMap,
     velocity: Option<UnitValue>,
     gain_ramp: Option<crate::application::sample::SampleGainRamp>,
+    event: Option<&ScheduledIntent>,
 ) -> MixPlan {
     let gain = match controls.get(&ControlKey::Gain) {
         Some(ControlValue::Scalar(value)) => *value,
@@ -779,9 +1024,17 @@ fn mix_plan_from_controls(
     };
 
     MixPlan {
-        velocity: control_to_unit(controls.get(&ControlKey::Velocity))
-            .or(velocity)
-            .unwrap_or_else(|| UnitValue::new(1.0).unwrap()),
+        velocity: match controls.get(&ControlKey::Velocity) {
+            Some(ControlValue::Signal(signal)) => {
+                let onset = event.map_or(crate::domain::rational::Time::ZERO, |event| {
+                    event.voice_whole().start()
+                });
+                UnitValue::new(signal.eval_at(onset).clamp(0.0, 1.0))
+            }
+            value => control_to_unit(value),
+        }
+        .or(velocity)
+        .unwrap_or_else(|| UnitValue::new(1.0).unwrap()),
         gain,
         gain_ramp,
         post_gain: control_to_non_negative_scalar(controls.get(&ControlKey::PostGain))
@@ -791,7 +1044,13 @@ fn mix_plan_from_controls(
 
 fn filter_plan_from_controls(controls: &ControlMap) -> FilterPlan {
     FilterPlan {
-        low_pass_cutoff_hz: control_to_positive_scalar(controls.get(&ControlKey::LowPassCutoff)),
+        low_pass_cutoff_hz: match controls.get(&ControlKey::LowPassCutoff) {
+            // A continuous cutoff still needs a real filter instance. Its
+            // coefficients are updated at the voice's actual cycle before the
+            // first rendered sample, including when starting mid-note.
+            Some(ControlValue::Signal(signal)) => Some(signal.eval(0.0).max(20.0)),
+            value => control_to_positive_scalar(value),
+        },
         low_pass_resonance: control_to_unit(controls.get(&ControlKey::LowPassResonance))
             .unwrap_or_else(|| UnitValue::new(0.0).unwrap()),
         high_pass_cutoff_hz: control_to_positive_scalar(controls.get(&ControlKey::HighPassCutoff)),
@@ -813,14 +1072,28 @@ fn dynamics_plan_from_controls(controls: &ControlMap) -> DynamicsPlan {
     }
 }
 
+fn transpose_from_control(value: &ControlValue) -> Option<crate::domain::control::SemitoneControl> {
+    use crate::domain::control::SemitoneControl;
+    match value {
+        ControlValue::Scalar(value) => SemitoneControl::constant(*value).ok(),
+        ControlValue::Signal(signal) => SemitoneControl::signal(*signal).ok(),
+        ControlValue::Semitones(control) => Some(control.clone()),
+        _ => None,
+    }
+}
+
+fn pan_from_control(value: &ControlValue) -> Option<f64> {
+    match value {
+        ControlValue::Bipolar(value) => Some(value.value()),
+        ControlValue::Pan(value) => Some(value.value()),
+        _ => None,
+    }
+}
+
 fn runtime_control_state_from_controls(controls: &ControlMap) -> AudioRuntimeControlState {
     let mut state = AudioRuntimeControlState::default();
     AudioRuntimeControlDelta::from_runtime_controls_snapshot(controls).apply_to(&mut state);
     state
-}
-
-fn lerp(start: f64, end: f64, progress: f64) -> f64 {
-    start + (end - start) * progress
 }
 
 fn control_to_scalar(value: Option<&ControlValue>) -> Option<f64> {
@@ -886,7 +1159,7 @@ fn scale_duration(duration: Duration, factor: f64) -> Duration {
 
 fn control_to_reverb(value: Option<&ControlValue>) -> Option<ReverbSettings> {
     match value {
-        Some(ControlValue::Reverb(settings)) => Some(settings.clone()),
+        Some(ControlValue::Reverb(settings)) => Some(*settings),
         Some(ControlValue::Unipolar(amount)) => Some(ReverbSettings::new(
             *amount,
             Duration::from_secs_f64(2.0),
@@ -903,7 +1176,7 @@ fn control_to_reverb(value: Option<&ControlValue>) -> Option<ReverbSettings> {
 
 fn control_to_delay(value: Option<&ControlValue>) -> Option<DelaySettings> {
     match value {
-        Some(ControlValue::Delay(settings)) => Some(settings.clone()),
+        Some(ControlValue::Delay(settings)) => Some(*settings),
         Some(ControlValue::Unipolar(amount)) => Some(DelaySettings::new(
             *amount,
             Duration::from_millis(360),
@@ -922,25 +1195,52 @@ fn control_to_delay(value: Option<&ControlValue>) -> Option<DelaySettings> {
 
 fn control_to_compressor(value: Option<&ControlValue>) -> Option<CompressorSettings> {
     match value {
-        Some(ControlValue::Compressor(settings)) => Some(settings.clone()),
+        Some(ControlValue::Compressor(settings)) => Some(*settings),
         _ => None,
     }
 }
 
-/// Backwards-compatible alias for the audio event sent toward the renderer
-/// bridge.
-pub type AudioTrigger = ScheduledAudioEvent;
+#[derive(Debug, thiserror::Error)]
+/// A bounded trigger channel rejected a message, returning its payload.
+pub enum AudioTriggerSendError {
+    /// Retry after the control loop drains the queue.
+    #[error("audio trigger queue is full")]
+    Full(Box<ScheduledAudioEvent>),
+    /// The trigger resolver has been dropped.
+    #[error("audio trigger receiver is disconnected")]
+    Disconnected(Box<ScheduledAudioEvent>),
+}
 
 #[derive(Clone)]
 /// Sender half of the mixed audio-trigger queue.
 pub struct AudioTriggerSender {
-    sender: Sender<AudioTrigger>,
+    sender: SyncSender<QueuedAudioTrigger>,
+    overflow: Arc<AtomicBool>,
 }
 
 impl AudioTriggerSender {
     /// Sends one mixed audio trigger.
-    pub fn send(&self, trigger: AudioTrigger) -> Result<(), SendError<AudioTrigger>> {
-        self.sender.send(trigger)
+    pub fn send(&self, trigger: ScheduledAudioEvent) -> Result<(), AudioTriggerSendError> {
+        self.send_at_frame(None, trigger)
+    }
+
+    /// Sends a trigger with an optional absolute output frame.
+    pub fn send_at_frame(
+        &self,
+        frame: Option<u64>,
+        trigger: ScheduledAudioEvent,
+    ) -> Result<(), AudioTriggerSendError> {
+        self.sender
+            .try_send(QueuedAudioTrigger { frame, trigger })
+            .map_err(|error| match error {
+                TrySendError::Full(queued) => {
+                    self.overflow.store(true, Ordering::Release);
+                    AudioTriggerSendError::Full(Box::new(queued.trigger))
+                }
+                TrySendError::Disconnected(queued) => {
+                    AudioTriggerSendError::Disconnected(Box::new(queued.trigger))
+                }
+            })
     }
 
     /// Creates a performer that reads no ambient controls.
@@ -960,37 +1260,58 @@ impl AudioTriggerSender {
     }
 }
 
+pub(crate) struct QueuedAudioTrigger {
+    pub frame: Option<u64>,
+    pub trigger: ScheduledAudioEvent,
+}
+
 /// Receiver half of the mixed audio-trigger queue.
 pub struct AudioTriggerReceiver {
-    receiver: Receiver<AudioTrigger>,
+    receiver: Receiver<QueuedAudioTrigger>,
+    overflow: Arc<AtomicBool>,
 }
 
 impl AudioTriggerReceiver {
+    pub(crate) fn take_overflow(&self) -> bool {
+        self.overflow.swap(false, Ordering::AcqRel)
+    }
     /// Attempts to receive one trigger without blocking.
-    pub fn try_recv(&self) -> Result<AudioTrigger, TryRecvError> {
+    pub fn try_recv(&self) -> Result<ScheduledAudioEvent, TryRecvError> {
+        self.receiver.try_recv().map(|queued| queued.trigger)
+    }
+
+    pub(crate) fn try_recv_timed(&self) -> Result<QueuedAudioTrigger, TryRecvError> {
         self.receiver.try_recv()
     }
 
     /// Drains all currently queued triggers.
     #[must_use]
-    pub fn drain(&self) -> Vec<AudioTrigger> {
-        self.receiver.try_iter().collect()
+    pub fn drain(&self) -> Vec<ScheduledAudioEvent> {
+        self.receiver
+            .try_iter()
+            .map(|queued| queued.trigger)
+            .collect()
     }
 }
 
 /// Creates a mixed audio-trigger channel.
 #[must_use]
 pub fn audio_trigger_channel() -> (AudioTriggerSender, AudioTriggerReceiver) {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(4096);
+    let overflow = Arc::new(AtomicBool::new(false));
 
     (
-        AudioTriggerSender { sender },
-        AudioTriggerReceiver { receiver },
+        AudioTriggerSender {
+            sender,
+            overflow: overflow.clone(),
+        },
+        AudioTriggerReceiver { receiver, overflow },
     )
 }
 
 /// Queue-backed performer that emits either sample or synth playback commands.
 pub struct AudioTriggerOutputPerformer {
+    frame_timing: Option<(Time, u64, Time, u32)>,
     trigger_sender: AudioTriggerSender,
     ambient_controls: Arc<RwLock<ControlMap>>,
 }
@@ -1006,7 +1327,12 @@ impl AudioTriggerOutputPerformer {
         Self {
             trigger_sender,
             ambient_controls,
+            frame_timing: None,
         }
+    }
+    /// Anchors musical time to the host audio frame clock for ahead-of-time dispatch.
+    pub fn set_frame_timing(&mut self, cycle: Time, frame: u64, cps: Time, sample_rate: u32) {
+        self.frame_timing = Some((cycle, frame, cps, sample_rate));
     }
 }
 
@@ -1021,7 +1347,15 @@ impl Performer for AudioTriggerOutputPerformer {
         if let Some(trigger) =
             ScheduledAudioEvent::from_scheduled_intent_with_ambient(&event, &ambient_controls)
         {
-            let _ = self.trigger_sender.send(trigger);
+            let frame = self.frame_timing.map(|(cycle, frame, cps, sample_rate)| {
+                let elapsed = ((event.entry_time() - cycle).max(Time::ZERO) / cps)
+                    * Time::whole_number(i64::from(sample_rate));
+                let frames = (i128::from(elapsed.numerator()) * 2
+                    + i128::from(elapsed.denominator()))
+                    / (i128::from(elapsed.denominator()) * 2);
+                frame.saturating_add(u64::try_from(frames).unwrap_or(u64::MAX))
+            });
+            let _ = self.trigger_sender.send_at_frame(frame, trigger);
         }
     }
 }
@@ -1041,7 +1375,7 @@ impl<F> AudioTriggerPerformer<F> {
 
 impl<F> Performer for AudioTriggerPerformer<F>
 where
-    F: Fn(AudioTrigger),
+    F: Fn(ScheduledAudioEvent),
 {
     fn perform(&self, event: ScheduledIntent) {
         if let Some(trigger) =
@@ -1102,7 +1436,7 @@ mod tests {
 
         let triggers = triggers.borrow();
         assert_eq!(triggers.len(), 1);
-        let AudioTrigger::StartVoice(plan) = &triggers[0] else {
+        let ScheduledAudioEvent::StartVoice(plan) = &triggers[0] else {
             panic!("expected start-voice event");
         };
         let AudioSourcePlan::Sample(source) = &plan.source else {
@@ -1128,7 +1462,7 @@ mod tests {
 
         let triggers = triggers.borrow();
         assert_eq!(triggers.len(), 1);
-        let AudioTrigger::StartVoice(plan) = &triggers[0] else {
+        let ScheduledAudioEvent::StartVoice(plan) = &triggers[0] else {
             panic!("expected start-voice event");
         };
         let AudioSourcePlan::Synth(source) = &plan.source else {
@@ -1159,10 +1493,10 @@ mod tests {
         let triggers = receiver.drain();
         assert_eq!(triggers.len(), 2);
         assert!(
-            matches!(&triggers[0], AudioTrigger::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Sample(source) if source.sample == "kick"))
+            matches!(&triggers[0], ScheduledAudioEvent::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Sample(source) if source.sample == "kick"))
         );
         assert!(
-            matches!(&triggers[1], AudioTrigger::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Synth(source) if source.source == BuiltInSynthSource::Sine))
+            matches!(&triggers[1], ScheduledAudioEvent::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Synth(source) if source.source == BuiltInSynthSource::Sine))
         );
     }
 
@@ -1189,17 +1523,21 @@ mod tests {
         )
         .unwrap();
 
-        sender.send(AudioTrigger::StartVoice(sample_plan)).unwrap();
-        sender.send(AudioTrigger::StartVoice(synth_plan)).unwrap();
+        sender
+            .send(ScheduledAudioEvent::start_voice(sample_plan))
+            .unwrap();
+        sender
+            .send(ScheduledAudioEvent::start_voice(synth_plan))
+            .unwrap();
 
         let triggers = receiver.drain();
 
         assert_eq!(triggers.len(), 2);
         assert!(
-            matches!(&triggers[0], AudioTrigger::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Sample(source) if source.sample == "kick"))
+            matches!(&triggers[0], ScheduledAudioEvent::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Sample(source) if source.sample == "kick"))
         );
         assert!(
-            matches!(&triggers[1], AudioTrigger::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Synth(source) if source.source == BuiltInSynthSource::Triangle))
+            matches!(&triggers[1], ScheduledAudioEvent::StartVoice(plan) if matches!(&plan.source, AudioSourcePlan::Synth(source) if source.source == BuiltInSynthSource::Triangle))
         );
     }
 

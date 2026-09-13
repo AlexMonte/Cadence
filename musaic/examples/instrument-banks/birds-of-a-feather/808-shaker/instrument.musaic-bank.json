@@ -1,0 +1,12 @@
+{
+  "variants": [
+    {
+      "path": "808 shaker.wav",
+      "bank": "RolandTR808",
+      "hat_choke": false,
+      "options": {
+        "root_pitch": 36
+      }
+    }
+  ]
+}

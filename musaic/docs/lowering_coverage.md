@@ -1,4 +1,4 @@
-//! Lowering coverage matrix for Musaic Tessera → Cadence handoff.
+# Lowering coverage
 
 Homomorphism rule: each `PatternNodeIr` arm maps 1:1 to `ScoreKind` and/or
 `ControlScoreKind` (see [`cadence/HOST_API.md`](../../cadence/HOST_API.md)).
@@ -6,7 +6,7 @@ Cadence owns score/control semantics; Musaic tests assert “maps X → X”.
 
 | PatternNodeIr | Event path (`Score`) | Control path (`ControlScore`) | UI placement |
 | --- | --- | --- | --- |
-| Note / Rest | Supported (`Mosaic` / empty) | — | Atoms in stack |
+| Note / Rest | Supported (`Events` / empty) | — | Atoms in stack |
 | Scalar stream | — | Gate `Track` | Scalar atoms |
 | Control stream | — | `Track` | Port inspector / control atoms |
 | Merge | `Merge` | `Merge` | Container kinds |

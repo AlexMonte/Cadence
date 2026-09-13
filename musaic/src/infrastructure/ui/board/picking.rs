@@ -2,13 +2,39 @@ use bevy::prelude::*;
 
 use crate::application::editor::interaction::{BoardPickEvent, BoardPickHit, BoardPickTargetKind};
 use crate::application::editor::{
-    BoardCursorHover, BoardPlacementPointer, CursorInteraction, EditorSession,
-    PickHit, blocks_board_picks_with_cursor,
+    BoardCursorHover, BoardPlacementPointer, CursorInteraction, EditorSession, PickHit,
+    blocks_board_picks_with_cursor,
 };
 use crate::application::pipeline::scene_sync::VisibleBoardState;
 
 use super::components::*;
 use super::helpers::SLOT_HEIGHT;
+
+/// Preserve the authored source until a real drag passes the distance threshold.
+pub(super) fn on_tile_pressed(
+    mut event: On<Pointer<Press>>,
+    targets: Query<&Board3dTile>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    session: Res<EditorSession>,
+    mut queue: ResMut<crate::application::editor::interaction::BoardTilePressQueue>,
+) {
+    if event.button != bevy::picking::pointer::PointerButton::Primary
+        || !matches!(session.mode, crate::application::editor::EditorMode::Idle)
+        || event.original_event_target() != event.entity
+    {
+        return;
+    }
+    if let Ok(tile) = targets.get(event.entity) {
+        let Some(start_screen) = windows.single().ok().and_then(Window::cursor_position) else {
+            return;
+        };
+        queue.pending = Some(crate::application::editor::interaction::BoardTilePressed {
+            node: tile.node.clone(),
+            start_screen,
+        });
+        event.propagate(false);
+    }
+}
 
 pub(super) fn on_tile_clicked(
     mut event: On<'_, '_, Pointer<Click>>,
@@ -156,4 +182,3 @@ pub(super) fn sample_board_placement_pointer(
     }
     pointer.cursor_world = Some(ray.origin + direction * t);
 }
-

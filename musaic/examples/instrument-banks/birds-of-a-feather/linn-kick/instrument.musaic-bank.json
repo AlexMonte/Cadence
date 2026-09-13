@@ -1,0 +1,12 @@
+{
+  "variants": [
+    {
+      "path": "Linn kick.wav",
+      "bank": "LinnDrum",
+      "hat_choke": false,
+      "options": {
+        "root_pitch": 36
+      }
+    }
+  ]
+}

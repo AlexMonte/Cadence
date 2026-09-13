@@ -1,7 +1,6 @@
 //! Dialog overlay + card chrome shared by unsaved-changes and future modals.
 
 use bevy::{picking::prelude::*, prelude::*};
-use bevy_feathers::theme::ThemedText;
 
 use crate::infrastructure::ui::theme::MusaicUiTheme;
 
@@ -15,6 +14,8 @@ pub fn spawn_dialog_overlay(
     commands
         .spawn((
             root,
+            crate::application::editor::interaction::keyboard_navigation::KeyboardModal,
+            bevy::input_focus::tab_navigation::TabGroup::modal(),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -27,7 +28,7 @@ pub fn spawn_dialog_overlay(
                 ..default()
             },
             BackgroundColor(theme.chrome.overlay_scrim),
-            ZIndex(1000),
+            GlobalZIndex(1000),
         ))
         .with_children(|overlay| {
             spawn_dialog_card(overlay, theme, build_card);
@@ -44,6 +45,9 @@ pub fn spawn_dialog_card(
         .spawn((
             Node {
                 min_width: Val::Px(360.0),
+                max_width: Val::Percent(90.0),
+                max_height: Val::Percent(90.0),
+                overflow: Overflow::scroll_y(),
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(theme.spacing.xl),
@@ -55,7 +59,26 @@ pub fn spawn_dialog_card(
             BackgroundColor(theme.chrome.panel_bg),
             BorderColor::all(theme.chrome.border),
         ))
-        .with_children(content);
+        .with_children(content)
+        .observe(scroll_dialog);
+}
+
+pub(crate) fn scroll_dialog(
+    mut event: On<Pointer<Scroll>>,
+    mut cards: Query<(&ComputedNode, &mut ScrollPosition)>,
+) {
+    let Ok((computed, mut position)) = cards.get_mut(event.entity) else {
+        return;
+    };
+    let scale = match event.unit {
+        bevy::input::mouse::MouseScrollUnit::Line => 28.0,
+        bevy::input::mouse::MouseScrollUnit::Pixel => 1.0,
+    };
+    let maximum = ((computed.content_size().y - computed.size().y)
+        * computed.inverse_scale_factor())
+    .max(0.0);
+    position.y = (position.y - event.y * scale).clamp(0.0, maximum);
+    event.propagate(false);
 }
 
 /// Dialog action row button using theme chrome colors.
@@ -84,7 +107,11 @@ pub fn spawn_dialog_action_button(
             Pickable::default(),
         ))
         .with_children(|btn| {
-            btn.spawn((Text::new(label.to_string()), ThemedText));
+            btn.spawn((
+                Text::new(label.to_string()),
+                TextColor(theme.chrome.text_main),
+                Pickable::IGNORE,
+            ));
         })
         .id()
 }

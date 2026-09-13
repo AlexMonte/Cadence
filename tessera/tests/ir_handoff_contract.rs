@@ -24,8 +24,9 @@ fn slow_transform_emits_time_scale_ir() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -34,9 +35,9 @@ fn slow_transform_emits_time_scale_ir() {
         },
     );
     root_nodes.insert(
-        NodeId::new("phrase"),
+        NodeId::new("pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     root_nodes.insert(
@@ -48,12 +49,12 @@ fn slow_transform_emits_time_scale_ir() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_authored(&authored(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
                 RootRelation::FlowsTo {
-                    from: StreamSource::node(NodeId::new("phrase")),
+                    from: StreamSource::node(NodeId::new("pattern")),
                     to: StreamTarget::TransformInput {
                         node: NodeId::new("slow"),
                         endpoint: transform_input("main"),
@@ -67,8 +68,9 @@ fn slow_transform_emits_time_scale_ir() {
                     },
                 },
             ],
-        })
-        .expect("program should compile");
+        }))
+        .expect("program should compile")
+        .ir;
 
     assert!(matches!(
         ir.outputs[0].root,
@@ -83,6 +85,7 @@ fn mask_flow_emits_mask_clip_ir() {
     containers.insert(
         ContainerId::new("main"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -93,6 +96,7 @@ fn mask_flow_emits_mask_clip_ir() {
     containers.insert(
         ContainerId::new("mask_src"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -123,7 +127,7 @@ fn mask_flow_emits_mask_clip_ir() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_authored(&authored(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -149,8 +153,9 @@ fn mask_flow_emits_mask_clip_ir() {
                     },
                 },
             ],
-        })
-        .expect("mask program should compile");
+        }))
+        .expect("mask program should compile")
+        .ir;
 
     assert!(matches!(ir.outputs[0].root, PatternNodeIr::MaskClip { .. }));
 }
@@ -163,6 +168,7 @@ fn three_chained_containers_emit_concat_ir() {
         containers.insert(
             ContainerId::new(id),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -182,7 +188,7 @@ fn three_chained_containers_emit_concat_ir() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_authored(&authored(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -202,8 +208,9 @@ fn three_chained_containers_emit_concat_ir() {
                     },
                 },
             ],
-        })
-        .expect("chained program should compile");
+        }))
+        .expect("chained program should compile")
+        .ir;
 
     fn contains_concat(node: &PatternNodeIr) -> bool {
         match node {
@@ -230,8 +237,9 @@ fn three_chained_containers_emit_concat_ir() {
 fn compiled_events_carry_container_provenance() {
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("kick_phrase"),
+        ContainerId::new("kick_pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -241,9 +249,9 @@ fn compiled_events_carry_container_provenance() {
     );
     let mut root_nodes = BTreeMap::new();
     root_nodes.insert(
-        NodeId::new("kick_phrase"),
+        NodeId::new("kick_pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("kick_phrase"),
+            container: ContainerId::new("kick_pattern"),
         },
     );
     root_nodes.insert(
@@ -251,24 +259,25 @@ fn compiled_events_carry_container_provenance() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_authored(&authored(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![RootRelation::FlowsTo {
-                from: StreamSource::node(NodeId::new("kick_phrase")),
+                from: StreamSource::node(NodeId::new("kick_pattern")),
                 to: StreamTarget::OutputInput {
                     node: NodeId::new("out"),
                     endpoint: output_input("main"),
                 },
             }],
-        })
-        .expect("program should compile");
+        }))
+        .expect("program should compile")
+        .ir;
     let events = ir.outputs[0].events();
     let source = events
         .first()
         .and_then(|event| event.source.as_ref())
         .expect("event should carry provenance");
-    assert_eq!(source.container, Some(ContainerId::new("kick_phrase")));
+    assert_eq!(source.container, Some(ContainerId::new("kick_pattern")));
 }
 
 #[test]
@@ -295,6 +304,7 @@ fn gain_with_pattern_modulator_emits_merge_with_control_stream() {
     containers.insert(
         ContainerId::new("main"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -305,6 +315,7 @@ fn gain_with_pattern_modulator_emits_merge_with_control_stream() {
     containers.insert(
         ContainerId::new("mod"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -338,7 +349,7 @@ fn gain_with_pattern_modulator_emits_merge_with_control_stream() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_authored(&authored(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -364,25 +375,41 @@ fn gain_with_pattern_modulator_emits_merge_with_control_stream() {
                     },
                 },
             ],
-        })
-        .expect("gain modulation should compile");
+        }))
+        .expect("gain modulation should compile")
+        .ir;
 
-    fn contains_control_merge(node: &PatternNodeIr) -> bool {
+    fn contains_controls(node: &PatternNodeIr) -> bool {
         match node {
-            PatternNodeIr::Merge { children } => {
-                children.iter().any(|child| {
-                    matches!(child, PatternNodeIr::ControlStream(_))
-                        || matches!(child, PatternNodeIr::EventStream(_))
-                }) && children.len() >= 2
+            PatternNodeIr::ControlStream(_) => true,
+            PatternNodeIr::Merge { children }
+            | PatternNodeIr::CycleRoute { children }
+            | PatternNodeIr::CycleSlots { children } => children.iter().any(contains_controls),
+            PatternNodeIr::Sequence { children } => {
+                children.iter().any(|child| contains_controls(&child.node))
             }
             PatternNodeIr::TimeScale { inner, .. } | PatternNodeIr::ReflectCycle { inner } => {
-                contains_control_merge(inner)
+                contains_controls(inner)
             }
             _ => false,
         }
     }
-
-    assert!(contains_control_merge(&ir.outputs[0].root));
+    assert!(
+        matches!(&ir.outputs[0].root, PatternNodeIr::Merge { children } if children.len() == 2)
+    );
+    assert!(contains_controls(&ir.outputs[0].root));
+    let queried = ir.outputs[0].root.query(tessera::prelude::CycleSpan::new(
+        tessera::prelude::CycleTime(Rational::from_integer(7)),
+        tessera::prelude::CycleDuration(Rational::one()),
+    ));
+    let controls = queried
+        .events
+        .iter()
+        .filter(|event| event.value.is_scalar())
+        .collect::<Vec<_>>();
+    assert_eq!(controls.len(), 2);
+    assert_eq!(controls[0].span.start.0, Rational::from_integer(7));
+    assert_eq!(controls[1].span.start.0, Rational::new(15, 2));
 }
 
 #[test]
@@ -390,8 +417,9 @@ fn pattern_ir_round_trips_through_serde_json() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -400,9 +428,9 @@ fn pattern_ir_round_trips_through_serde_json() {
         },
     );
     root_nodes.insert(
-        NodeId::new("phrase"),
+        NodeId::new("pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     root_nodes.insert(
@@ -410,19 +438,23 @@ fn pattern_ir_round_trips_through_serde_json() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_authored(&authored(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![RootRelation::FlowsTo {
-                from: StreamSource::node(NodeId::new("phrase")),
+                from: StreamSource::node(NodeId::new("pattern")),
                 to: StreamTarget::OutputInput {
                     node: NodeId::new("out"),
                     endpoint: output_input("main"),
                 },
             }],
-        })
-        .expect("program should compile");
+        }))
+        .expect("program should compile")
+        .ir;
     let json = serde_json::to_string(&ir).expect("serialize");
     let decoded: tessera::domain::PatternIr = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(ir, decoded);
 }
+#[path = "support/compiler.rs"]
+mod compiler_support;
+use compiler_support::authored;

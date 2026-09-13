@@ -1,7 +1,6 @@
 //! Loading state UI while load_up prepares Editor resources.
 
 use bevy::prelude::*;
-use bevy_feathers::theme::ThemedText;
 use load_up::prelude::{ActiveStateLoad, StateLoadBlocked, StateLoadReady};
 
 use crate::infrastructure::app::AppState;
@@ -59,12 +58,12 @@ fn spawn_loading_screen(
                     font_size: theme.typography.hero,
                     ..default()
                 },
-                ThemedText,
+                TextColor(theme.chrome.text_main),
             ));
             root.spawn((
                 LoadingStatusLabel,
                 Text::new(status.message.clone()),
-                ThemedText,
+                TextColor(theme.chrome.text_main),
             ));
         });
 }

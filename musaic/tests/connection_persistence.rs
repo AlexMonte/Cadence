@@ -1,10 +1,9 @@
 use musaic::domain::board::BoardSlot;
 use musaic::domain::document::{AtomValue, ContainerKind, NoteName};
 use musaic::domain::document::{
-    MusaicDocument, PlacementAddress, StackIndex, TileSpawnKind, bind_tiles_on_board,
-    hydrate_board_from_document,
+    MusaicDocument, PlacementAddress, StackIndex, TileSpawnKind, bind_tiles,
+    export_document_program,
 };
-use tessera::bevy::TesseraBoard;
 use tessera::prelude::SpatialSide;
 
 #[test]
@@ -40,33 +39,24 @@ fn connection_round_trip_preserves_relation_count() {
         .insert_tile(
             &mut document.surfaces,
             root,
-            // 2×2 footprints: sequence at (0,0) occupies through (1,1); east neighbor anchors at (2,0).
-            PlacementAddress::BoardSlot(BoardSlot::new(2, 0)),
+            // The 5×1 sequence fills columns 0–4; its east neighbor begins at column 5.
+            PlacementAddress::BoardSlot(BoardSlot::new(5, 0)),
             TileSpawnKind::Output {
                 name: "main".into(),
             },
         )
         .unwrap();
 
-    let mut board = TesseraBoard::new();
-    hydrate_board_from_document(&mut board, &document).expect("export");
-    bind_tiles_on_board(&mut board, &sequence, &output, SpatialSide::East).expect("bind");
-    document.tessera.authored_program = board.authored_program();
+    let mut program = export_document_program(&document).expect("export");
+    bind_tiles(&mut program, &sequence, &output, SpatialSide::East).expect("bind");
+    document.replace_connections_from(&program);
 
-    let relations = board
-        .authored_program()
-        .root_surface
-        .explicit_relations
-        .len()
-        + board.authored_program().root_surface.bindings.len();
+    let relations =
+        program.root_surface.explicit_relations.len() + program.root_surface.bindings.len();
     assert!(relations >= 1, "expected authored relations on board");
 
-    hydrate_board_from_document(&mut board, &document).expect("re-export");
-    let relations_after = board
-        .authored_program()
-        .root_surface
-        .explicit_relations
-        .len()
-        + board.authored_program().root_surface.bindings.len();
+    let reexported = export_document_program(&document).expect("re-export");
+    let relations_after =
+        reexported.root_surface.explicit_relations.len() + reexported.root_surface.bindings.len();
     assert_eq!(relations_after, relations);
 }

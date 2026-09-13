@@ -6,7 +6,6 @@ use super::pattern_ir::Rational;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum Side {
     Top,
     Right,
@@ -16,20 +15,89 @@ pub enum Side {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum TransformKind {
+    /// A routable connection that preserves its incoming stream exactly.
+    Wire,
+    Instrument,
+    Trick,
+    Delay,
+    Reverb,
+    Compressor,
     Slow,
     Fast,
     Rev,
     Transpose,
     Gain,
     Attack,
+    Decay,
+    Release,
+    Pan,
+    PlaybackRate,
+    PlaybackStart,
+    PlaybackEnd,
+    Reverse,
+    Fit,
+    Loop,
+    Velocity,
+    ClipLength,
+    PostGain,
+    PitchBend,
+    Expression,
+    HighPassCutoff,
+    HighPassResonance,
     Degrade,
+    Gate,
+    Legato,
+    Sustain,
+    LowPassCutoff,
+    LowPassResonance,
+    SampleVariant,
+}
+
+impl TransformKind {
+    pub fn parameter_key(self) -> Option<super::ParameterKey> {
+        use super::ParameterKey as P;
+        Some(match self {
+            Self::Delay => P::Delay,
+            Self::Reverb => P::Reverb,
+            Self::Compressor => P::Compressor,
+            Self::Fast => P::Fast,
+            Self::Slow => P::Slow,
+            Self::Gain => P::Gain,
+            Self::Attack => P::Attack,
+            Self::Decay => P::Decay,
+            Self::Release => P::Release,
+            Self::Pan => P::Pan,
+            Self::PlaybackRate => P::PlaybackRate,
+            Self::PlaybackStart => P::PlaybackStart,
+            Self::PlaybackEnd => P::PlaybackEnd,
+            Self::Reverse => P::Reverse,
+            Self::Fit => P::Fit,
+            Self::Loop => P::Loop,
+
+            Self::Velocity => P::Velocity,
+            Self::ClipLength => P::ClipLength,
+            Self::PostGain => P::PostGain,
+            Self::PitchBend => P::PitchBend,
+            Self::Expression => P::Expression,
+
+            Self::HighPassCutoff => P::HighPassCutoff,
+            Self::HighPassResonance => P::HighPassResonance,
+
+            Self::Transpose => P::Transpose,
+            Self::Gate => P::Gate,
+            Self::Legato => P::Legato,
+            Self::Sustain => P::Sustain,
+            Self::LowPassCutoff => P::LowPassCutoff,
+            Self::LowPassResonance => P::LowPassResonance,
+            Self::SampleVariant => P::SampleVariant,
+            Self::Instrument | Self::Trick | Self::Wire | Self::Rev | Self::Degrade => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum FlowControlKind {
     Layer,
     Merge,
@@ -43,7 +111,6 @@ pub enum FlowControlKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum NodeInputRole {
     Main,
     Aux,
@@ -57,7 +124,6 @@ pub enum NodeInputRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum ConnectionRule {
     Required,
     Optional,
@@ -65,7 +131,6 @@ pub enum ConnectionRule {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum PortCountRule {
     ZeroOrMore,
     OneOrMore,
@@ -85,7 +150,6 @@ impl PortCountRule {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum StreamShape {
     Any,
     NotePattern,
@@ -96,7 +160,6 @@ pub enum StreamShape {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct InputPort(pub String);
 
 impl InputPort {
@@ -107,7 +170,6 @@ impl InputPort {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct OutputPort(pub String);
 
 impl OutputPort {
@@ -118,7 +180,6 @@ impl OutputPort {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PortGroupId(pub String);
 
 impl PortGroupId {
@@ -129,7 +190,6 @@ impl PortGroupId {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PortMemberId(pub String);
 
 impl PortMemberId {
@@ -140,7 +200,6 @@ impl PortMemberId {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum DefaultStreamBehavior {
     ConstantScalar { value: Rational },
 }
@@ -154,7 +213,6 @@ impl DefaultStreamBehavior {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct InputSocketSpec {
     pub port: InputPort,
     pub role: NodeInputRole,
@@ -167,7 +225,6 @@ pub struct InputSocketSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct InputGroupSpec {
     pub group: PortGroupId,
     pub role: NodeInputRole,
@@ -176,7 +233,6 @@ pub struct InputGroupSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct OutputSocketSpec {
     pub port: OutputPort,
     pub shape: StreamShape,
@@ -185,7 +241,6 @@ pub struct OutputSocketSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct OutputGroupSpec {
     pub group: PortGroupId,
     pub shape: StreamShape,
@@ -193,7 +248,6 @@ pub struct OutputGroupSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct NodeSignature {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_sockets: Vec<InputSocketSpec>,
@@ -308,7 +362,6 @@ fn validate_socket_defaults(sockets: &[InputSocketSpec]) -> Result<(), String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum FlowControlPolicy {
     Layer,
     MergeAppend,
@@ -339,7 +392,6 @@ pub enum FlowControlPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct GroupMembers {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inputs: BTreeMap<PortGroupId, Vec<PortMemberId>>,
@@ -362,8 +414,13 @@ impl GroupMembers {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct TransformNode {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequence: Vec<(super::NodeId, Rational, u32)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<super::NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument: Option<super::NodeId>,
     pub kind: TransformKind,
     pub signature: NodeSignature,
 }
@@ -373,12 +430,31 @@ impl TransformNode {
         Self {
             kind,
             signature: default_transform_signature(kind),
+            sequence: Vec::new(),
+            reference: None,
+            argument: None,
         }
     }
 }
 
 fn default_transform_signature(kind: TransformKind) -> NodeSignature {
     match kind {
+        TransformKind::Instrument | TransformKind::Trick | TransformKind::Wire => NodeSignature {
+            input_sockets: vec![InputSocketSpec {
+                port: InputPort::new("main"),
+                role: NodeInputRole::Main,
+                shape: StreamShape::Any,
+                connection: ConnectionRule::Required,
+                side: Some(Side::Left),
+                default: None,
+            }],
+            output_sockets: vec![OutputSocketSpec {
+                port: OutputPort::new("out"),
+                shape: StreamShape::Any,
+                side: Some(Side::Right),
+            }],
+            ..NodeSignature::default()
+        },
         TransformKind::Slow => NodeSignature {
             input_sockets: vec![
                 InputSocketSpec {
@@ -451,10 +527,7 @@ fn default_transform_signature(kind: TransformKind) -> NodeSignature {
             }],
             ..NodeSignature::default()
         },
-        TransformKind::Transpose
-        | TransformKind::Gain
-        | TransformKind::Attack
-        | TransformKind::Degrade => NodeSignature {
+        TransformKind::Delay | TransformKind::Reverb | TransformKind::Compressor => NodeSignature {
             input_sockets: vec![
                 InputSocketSpec {
                     port: InputPort::new("main"),
@@ -467,11 +540,83 @@ fn default_transform_signature(kind: TransformKind) -> NodeSignature {
                 InputSocketSpec {
                     port: InputPort::new("amount"),
                     role: NodeInputRole::Aux,
-                    shape: StreamShape::ScalarPattern,
+                    shape: StreamShape::ControlPattern,
+                    connection: ConnectionRule::Optional,
+                    side: Some(Side::Top),
+                    default: None,
+                },
+            ],
+            output_sockets: vec![OutputSocketSpec {
+                port: OutputPort::new("out"),
+                shape: StreamShape::EventPattern,
+                side: Some(Side::Right),
+            }],
+            ..NodeSignature::default()
+        },
+        TransformKind::Transpose
+        | TransformKind::Gain
+        | TransformKind::Attack
+        | TransformKind::Decay
+        | TransformKind::Release
+        | TransformKind::Pan
+        | TransformKind::PlaybackRate
+        | TransformKind::PlaybackStart
+        | TransformKind::PlaybackEnd
+        | TransformKind::Reverse
+        | TransformKind::Fit
+        | TransformKind::Loop
+        | TransformKind::Velocity
+        | TransformKind::ClipLength
+        | TransformKind::PostGain
+        | TransformKind::PitchBend
+        | TransformKind::Expression
+        | TransformKind::HighPassCutoff
+        | TransformKind::HighPassResonance
+        | TransformKind::Degrade
+        | TransformKind::Gate
+        | TransformKind::Legato
+        | TransformKind::Sustain
+        | TransformKind::LowPassCutoff
+        | TransformKind::LowPassResonance
+        | TransformKind::SampleVariant => NodeSignature {
+            input_sockets: vec![
+                InputSocketSpec {
+                    port: InputPort::new("main"),
+                    role: NodeInputRole::Main,
+                    shape: StreamShape::EventPattern,
+                    connection: ConnectionRule::Required,
+                    side: Some(Side::Left),
+                    default: None,
+                },
+                InputSocketSpec {
+                    port: InputPort::new("amount"),
+                    role: NodeInputRole::Aux,
+                    shape: if matches!(
+                        kind,
+                        TransformKind::Gain
+                            | TransformKind::Velocity
+                            | TransformKind::PlaybackRate
+                            | TransformKind::LowPassCutoff
+                            | TransformKind::Transpose
+                    ) {
+                        StreamShape::ControlPattern
+                    } else {
+                        StreamShape::ScalarPattern
+                    },
                     connection: ConnectionRule::Optional,
                     side: Some(Side::Top),
                     default: Some(DefaultStreamBehavior::ConstantScalar {
-                        value: Rational::from_integer(1),
+                        value: if kind == TransformKind::Degrade {
+                            Rational::new(1, 2)
+                        } else {
+                            match kind.parameter_key().and_then(|key| key.spec().default) {
+                                Some(super::FieldValue::Rational { value }) => value,
+                                Some(super::FieldValue::Bool { value }) => {
+                                    Rational::from_integer(i64::from(value))
+                                }
+                                _ => Rational::one(),
+                            }
+                        },
                     }),
                 },
             ],
@@ -486,12 +631,10 @@ fn default_transform_signature(kind: TransformKind) -> NodeSignature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct FlowControlNode {
     pub kind: FlowControlKind,
     pub signature: NodeSignature,
     pub policy: FlowControlPolicy,
-    #[serde(default)]
     pub members: GroupMembers,
 }
 
@@ -736,7 +879,6 @@ fn default_flow_control_signature(kind: FlowControlKind) -> NodeSignature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct OutputNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -765,10 +907,13 @@ impl Default for OutputNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum RootSurfaceNodeKind {
-    Container { container: super::ContainerId },
+    /// A first-class numeric tile producing a constant scalar pattern.
+    Scalar(super::ScalarAtom),
+    Container {
+        container: super::ContainerId,
+    },
     Transform(TransformNode),
     FlowControl(FlowControlNode),
     Output(OutputNode),

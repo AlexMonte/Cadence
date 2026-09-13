@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use super::inserts::PreparedInsertChain;
 use crate::adapter::{
     audio::{Frame, LoadedSampleTrigger, SampleVoice, SynthVoice},
     sample_bank::ChokeGroup,
@@ -14,6 +15,9 @@ use crate::domain::control::{DelaySettings, ReverbSettings};
 
 const CHOKE_FADE_OUT: Duration = Duration::from_millis(8);
 const SYNTH_POLYPHONY_LIMIT: usize = 8;
+const VOICE_LIMIT: usize = 128;
+const EFFECT_BUS_LIMIT: usize = 16;
+const MAX_DELAY_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 enum ActiveVoice {
@@ -28,7 +32,11 @@ enum ActiveVoice {
 /// Mixes active sample and synth voices into output frames.
 pub struct AudioMixer {
     output_sample_rate: u32,
+    resource_limit_hits: u64,
     voices: Vec<ActiveVoice>,
+    // Separate bounded slot: previewing a hat or synth cannot choke or steal a
+    // song voice, even when the song already occupies its full voice budget.
+    audition: Option<ActiveVoice>,
     reverb_buses: Vec<(ReverbSettings, ReverbBus)>,
     delay_buses: Vec<(DelaySettings, DelayBus)>,
 }
@@ -39,14 +47,61 @@ impl AudioMixer {
     pub fn new(output_sample_rate: u32) -> Self {
         Self {
             output_sample_rate,
-            voices: Vec::new(),
-            reverb_buses: Vec::new(),
-            delay_buses: Vec::new(),
+            resource_limit_hits: 0,
+            voices: Vec::with_capacity(VOICE_LIMIT),
+            audition: None,
+            reverb_buses: Vec::with_capacity(EFFECT_BUS_LIMIT),
+            delay_buses: Vec::with_capacity(EFFECT_BUS_LIMIT),
         }
+    }
+
+    /// Clears voices and effect history after transport invalidation.
+    pub fn clear(&mut self) {
+        self.voices.clear();
+        self.audition = None;
+        self.reverb_buses.clear();
+        self.delay_buses.clear();
+    }
+
+    pub(crate) fn audition_sample(
+        &mut self,
+        loaded: LoadedSampleTrigger,
+        inserts: PreparedInsertChain,
+    ) {
+        self.audition =
+            SampleVoice::with_prepared_inserts(loaded, self.output_sample_rate, inserts).map(
+                |voice| ActiveVoice::Sample {
+                    choke_group: None,
+                    voice,
+                },
+            );
+    }
+
+    pub(crate) fn audition_synth(&mut self, trigger: SynthTrigger, inserts: PreparedInsertChain) {
+        self.audition =
+            SynthVoice::with_prepared_inserts(trigger, self.output_sample_rate, inserts)
+                .map(ActiveVoice::Synth);
+    }
+
+    pub(crate) fn stop_audition(&mut self) {
+        self.audition = None;
     }
 
     /// Adds a resolved sample voice to the mix.
     pub fn push(&mut self, loaded: LoadedSampleTrigger) {
+        let inserts = PreparedInsertChain::new(&loaded.trigger.inserts, self.output_sample_rate);
+        self.push_prepared(loaded, inserts);
+    }
+
+    pub(crate) fn push_prepared(
+        &mut self,
+        loaded: LoadedSampleTrigger,
+        inserts: PreparedInsertChain,
+    ) {
+        if self.voices.len() >= VOICE_LIMIT {
+            self.resource_limit_hits = self.resource_limit_hits.saturating_add(1);
+            return;
+        }
         let choke_group = loaded.choke_group;
 
         if let Some(group) = choke_group {
@@ -61,26 +116,42 @@ impl AudioMixer {
 
         // Choke groups let one incoming sample fade out earlier members of the
         // same family, such as closed hats muting open hats.
-        if let Some(voice) = SampleVoice::new(loaded, self.output_sample_rate) {
+        if let Some(voice) =
+            SampleVoice::with_prepared_inserts(loaded, self.output_sample_rate, inserts)
+        {
             self.voices.push(ActiveVoice::Sample { choke_group, voice });
         }
     }
 
     /// Adds a synth voice to the mix.
     pub fn push_synth(&mut self, trigger: SynthTrigger) {
+        let inserts = PreparedInsertChain::new(&trigger.inserts, self.output_sample_rate);
+        self.push_synth_prepared(trigger, inserts);
+    }
+
+    pub(crate) fn push_synth_prepared(
+        &mut self,
+        trigger: SynthTrigger,
+        inserts: PreparedInsertChain,
+    ) {
         if self
             .voices
             .iter()
             .filter(|voice| matches!(voice, ActiveVoice::Synth(_)))
             .count()
             >= SYNTH_POLYPHONY_LIMIT
+            && let Some(index) = self.stealable_synth_voice_index()
         {
-            if let Some(index) = self.stealable_synth_voice_index() {
-                self.voices.remove(index);
-            }
+            self.voices.remove(index);
         }
 
-        if let Some(voice) = SynthVoice::new(trigger, self.output_sample_rate) {
+        if self.voices.len() >= VOICE_LIMIT {
+            self.resource_limit_hits = self.resource_limit_hits.saturating_add(1);
+            return;
+        }
+        if let Some(voice) =
+            SynthVoice::with_prepared_inserts(trigger, self.output_sample_rate, inserts)
+        {
             self.voices.push(ActiveVoice::Synth(voice));
         }
     }
@@ -96,7 +167,7 @@ impl AudioMixer {
             .iter_mut()
             .filter(|active| active.voice_id() == voice_id)
         {
-            active.update_runtime_controls(delta);
+            active.update_runtime_controls(delta.clone());
         }
     }
 
@@ -118,18 +189,26 @@ impl AudioMixer {
         for mixed_frame in out.iter_mut() {
             let mut frame = Frame::ZERO;
 
-            for active in &mut self.voices {
+            for active in self.voices.iter_mut().chain(self.audition.iter_mut()) {
                 let rendered = active.render_next();
                 frame += rendered.dry;
 
                 if let Some((settings, send)) = rendered.reverb {
                     let bus = reverb_bus(&mut self.reverb_buses, settings, self.output_sample_rate);
-                    bus.push(send);
+                    if let Some(bus) = bus {
+                        bus.push(send);
+                    } else {
+                        self.resource_limit_hits = self.resource_limit_hits.saturating_add(1);
+                    }
                 }
 
                 if let Some((settings, send)) = rendered.delay {
                     let bus = delay_bus(&mut self.delay_buses, settings, self.output_sample_rate);
-                    bus.push(send);
+                    if let Some(bus) = bus {
+                        bus.push(send);
+                    } else {
+                        self.resource_limit_hits = self.resource_limit_hits.saturating_add(1);
+                    }
                 }
             }
 
@@ -144,12 +223,19 @@ impl AudioMixer {
         }
 
         self.voices.retain(|active| !active.finished());
+        if self.audition.as_ref().is_some_and(ActiveVoice::finished) {
+            self.audition = None;
+        }
+    }
+
+    pub(crate) fn take_resource_limit_hits(&mut self) -> u64 {
+        std::mem::take(&mut self.resource_limit_hits)
     }
 
     /// Returns the number of active voices currently being mixed.
     #[must_use]
     pub fn active_voice_count(&self) -> usize {
-        self.voices.len()
+        self.voices.len() + usize::from(self.audition.is_some())
     }
 
     fn stealable_synth_voice_index(&self) -> Option<usize> {
@@ -218,33 +304,39 @@ impl ActiveVoice {
     }
 }
 
-/// Backwards-compatible alias for [`AudioMixer`].
-pub type SampleMixer = AudioMixer;
-
 fn reverb_bus(
     buses: &mut Vec<(ReverbSettings, ReverbBus)>,
     settings: ReverbSettings,
     sample_rate: u32,
-) -> &mut ReverbBus {
+) -> Option<&mut ReverbBus> {
     if let Some(index) = buses.iter().position(|(existing, _)| *existing == settings) {
-        return &mut buses[index].1;
+        return Some(&mut buses[index].1);
     }
 
-    buses.push((settings.clone(), ReverbBus::new(settings, sample_rate)));
-    &mut buses.last_mut().unwrap().1
+    if buses.len() >= EFFECT_BUS_LIMIT {
+        return None;
+    }
+    buses.push((settings, ReverbBus::new(settings, sample_rate)));
+    Some(&mut buses.last_mut().unwrap().1)
 }
 
 fn delay_bus(
     buses: &mut Vec<(DelaySettings, DelayBus)>,
     settings: DelaySettings,
     sample_rate: u32,
-) -> &mut DelayBus {
+) -> Option<&mut DelayBus> {
+    if settings.time() > MAX_DELAY_DURATION {
+        return None;
+    }
     if let Some(index) = buses.iter().position(|(existing, _)| *existing == settings) {
-        return &mut buses[index].1;
+        return Some(&mut buses[index].1);
     }
 
-    buses.push((settings.clone(), DelayBus::new(settings, sample_rate)));
-    &mut buses.last_mut().unwrap().1
+    if buses.len() >= EFFECT_BUS_LIMIT {
+        return None;
+    }
+    buses.push((settings, DelayBus::new(settings, sample_rate)));
+    Some(&mut buses.last_mut().unwrap().1)
 }
 
 #[derive(Debug)]
@@ -376,6 +468,7 @@ mod tests {
         choke_group: Option<ChokeGroup>,
     ) -> LoadedSampleTrigger {
         LoadedSampleTrigger {
+            sustain_loop: None,
             trigger: SampleTrigger::builder()
                 .sample(name)
                 .envelope(envelope())
@@ -408,7 +501,7 @@ mod tests {
 
     #[test]
     fn mixes_two_voices_into_same_output_buffer() {
-        let mut mixer = SampleMixer::new(1);
+        let mut mixer = AudioMixer::new(1);
         mixer.push(loaded_trigger("kick", &[0.25], 1, None));
         mixer.push(loaded_trigger("snare", &[0.5], 1, None));
         let mut out = vec![Frame::ZERO; 1];
@@ -420,7 +513,7 @@ mod tests {
 
     #[test]
     fn removes_finished_voices_after_render() {
-        let mut mixer = SampleMixer::new(1);
+        let mut mixer = AudioMixer::new(1);
         mixer.push(loaded_trigger("kick", &[0.25], 1, None));
         let mut out = vec![Frame::ZERO; 2];
 
@@ -431,7 +524,7 @@ mod tests {
 
     #[test]
     fn hat_choke_replaces_prior_hat_voice_with_fade_out() {
-        let mut mixer = SampleMixer::new(1_000);
+        let mut mixer = AudioMixer::new(1_000);
         mixer.push(loaded_trigger(
             "hat_one",
             &[0.3; 20],
@@ -457,8 +550,9 @@ mod tests {
     fn release_note_releases_matching_live_voices() {
         let note = NoteNumber::new(60).unwrap();
         let voice_id = VoiceInstanceId::new(60);
-        let mut mixer = SampleMixer::new(8_000);
+        let mut mixer = AudioMixer::new(8_000);
         mixer.push(LoadedSampleTrigger {
+            sustain_loop: None,
             trigger: SampleTrigger::builder()
                 .voice_id(voice_id)
                 .sample("pad")
@@ -489,8 +583,9 @@ mod tests {
 
     #[test]
     fn reverb_and_delay_sends_add_wet_output() {
-        let mut mixer = SampleMixer::new(8_000);
+        let mut mixer = AudioMixer::new(8_000);
         mixer.push(LoadedSampleTrigger {
+            sustain_loop: None,
             trigger: SampleTrigger::builder()
                 .sample("pad")
                 .reverb(ReverbSettings::new(
@@ -522,7 +617,7 @@ mod tests {
 
     #[test]
     fn sample_and_synth_voices_can_coexist_in_the_same_mix() {
-        let mut mixer = SampleMixer::new(8_000);
+        let mut mixer = AudioMixer::new(8_000);
         mixer.push(loaded_trigger("kick", &[0.25; 16], 8_000, None));
         mixer.push_synth(synth_trigger(BuiltInSynthSource::Sine, 69.0));
         let mut out = vec![Frame::ZERO; 32];
@@ -536,7 +631,7 @@ mod tests {
     fn release_note_releases_matching_live_synth_voices() {
         let note = NoteNumber::new(64).unwrap();
         let voice_id = VoiceInstanceId::new(64);
-        let mut mixer = SampleMixer::new(8_000);
+        let mut mixer = AudioMixer::new(8_000);
         mixer.push_synth(
             SynthTrigger::builder()
                 .voice_id(voice_id)
@@ -565,7 +660,7 @@ mod tests {
 
     #[test]
     fn synth_polyphony_prefers_stealing_released_voices_then_oldest_active_voice() {
-        let mut mixer = SampleMixer::new(8_000);
+        let mut mixer = AudioMixer::new(8_000);
         let released = VoiceInstanceId::new(60);
 
         for note in 0..8 {
@@ -593,5 +688,29 @@ mod tests {
         mixer.push_synth(synth_trigger(BuiltInSynthSource::Square, 84.0));
 
         assert_eq!(mixer.active_voice_count(), 8);
+    }
+    #[test]
+    fn voice_and_effect_memory_limits_are_observable() {
+        let mut mixer = AudioMixer::new(1000);
+        for _ in 0..129 {
+            mixer.push(loaded_trigger("pulse", &[0.25; 20], 1000, None));
+        }
+        assert_eq!(mixer.active_voice_count(), 128);
+        assert_eq!(mixer.take_resource_limit_hits(), 1);
+        mixer.clear();
+        let mut loaded = loaded_trigger("pulse", &[0.25; 20], 1000, None);
+        loaded.trigger.delay = Some(DelaySettings::new(
+            UnitValue::new(0.5).unwrap(),
+            Duration::from_secs(3),
+            UnitValue::new(0.2).unwrap(),
+            UnitValue::new(0.2).unwrap(),
+        ));
+        mixer.push(loaded);
+        mixer.render(&mut [Frame::ZERO; 10]);
+        assert!(
+            mixer.delay_buses.is_empty(),
+            "over-budget delay must not allocate a truncated buffer"
+        );
+        assert!(mixer.take_resource_limit_hits() > 0);
     }
 }

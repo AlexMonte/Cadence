@@ -5,6 +5,7 @@ pub mod connection;
 pub mod interaction;
 pub mod layout;
 pub mod panels;
+pub mod preferences;
 pub mod selection;
 pub mod transaction;
 pub mod transport;

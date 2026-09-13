@@ -9,13 +9,15 @@ publish = false
 
 [dependencies]
 bevy = { version = "0.18", features = ["webgl2"] }
+bevy_input = { version = "0.18.1", features = ["serialize"] }
 bevy_feathers = "0.18.0"
 bevy_ui_widgets = "0.18.0"
+accesskit = "0.21"
 seldom_state = "0.16.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tessera = { workspace = true, features = ["bevy"] }
+tessera = { workspace = true }
 load_up = { workspace = true }
 cadence = { workspace = true, features = ["bevy"] }
 rfd = "0.17.2"
@@ -27,10 +29,7 @@ directories = "6.0.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-manganis = "0.7.3"
-serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = [
     "Blob",
     "BlobPropertyBag",

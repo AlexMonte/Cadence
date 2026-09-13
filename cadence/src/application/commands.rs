@@ -16,6 +16,3 @@ pub enum EngineCommand {
     /// Replace the active renderer.
     ReplaceRenderer(RendererCore),
 }
-
-/// Backwards-compatible alias for [`EngineCommand`].
-pub type Commands = EngineCommand;

@@ -64,6 +64,7 @@ pub fn node_resolves_to_stream(
         Some(RootSurfaceNodeKind::FlowControl(control)) => {
             signature_inputs_resolve(program, node_id, &control.signature, visiting)
         }
+        Some(RootSurfaceNodeKind::Scalar(_)) => true,
         Some(RootSurfaceNodeKind::Output(_)) | None => false,
     };
     visiting.remove(node_id);
@@ -76,6 +77,35 @@ fn validate_container_surface(
     container: &Container,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let mut ancestors = BTreeSet::new();
+    validate_container_surface_inner(
+        program,
+        container_id,
+        container,
+        diagnostics,
+        &mut ancestors,
+    );
+}
+
+fn validate_container_surface_inner(
+    program: &TesseraProgram,
+    container_id: &ContainerId,
+    container: &Container,
+    diagnostics: &mut Vec<Diagnostic>,
+    ancestors: &mut BTreeSet<crate::domain::ContainerId>,
+) {
+    if ancestors.len() >= 128 || !ancestors.insert(container_id.clone()) {
+        diagnostics.push(Diagnostic::new(
+            DiagnosticCategory::LocalGrammar,
+            DiagnosticKind::CompileFailed,
+            "Container nesting must be acyclic and at most 128 levels deep.",
+            Some(DiagnosticLocation::ContainerStack {
+                container: container_id.clone(),
+                index: 0,
+            }),
+        ));
+        return;
+    }
     for (index, tile) in container.stack.iter().enumerate() {
         match tile {
             ContainerSurfaceTile::Transform => diagnostics.push(Diagnostic::new(
@@ -98,7 +128,13 @@ fn validate_container_surface(
             )),
             ContainerSurfaceTile::NestedContainer(nested) => {
                 if let Some(nested_container) = program.containers.get(nested) {
-                    validate_container_surface(program, nested, nested_container, diagnostics);
+                    validate_container_surface_inner(
+                        program,
+                        nested,
+                        nested_container,
+                        diagnostics,
+                        ancestors,
+                    );
                 } else {
                     diagnostics.push(Diagnostic::new(
                         DiagnosticCategory::Placement,
@@ -114,6 +150,7 @@ fn validate_container_surface(
             ContainerSurfaceTile::Atom(_) => {}
         }
     }
+    ancestors.remove(container_id);
 }
 
 fn validate_relations(program: &TesseraProgram, diagnostics: &mut Vec<Diagnostic>) {
@@ -179,7 +216,7 @@ fn validate_relations(program: &TesseraProgram, diagnostics: &mut Vec<Diagnostic
             RootSurfaceNodeKind::Output(output) => {
                 validate_output_bindings(program, node_id, output, diagnostics);
             }
-            RootSurfaceNodeKind::Container { .. } => {}
+            RootSurfaceNodeKind::Container { .. } | RootSurfaceNodeKind::Scalar(_) => {}
         }
     }
 
@@ -442,6 +479,9 @@ fn source_endpoint_exists(program: &TesseraProgram, source: &StreamSource) -> bo
                         .is_some_and(|members| members.contains(member)),
                 }
         }
+        Some(RootSurfaceNodeKind::Scalar(_)) => {
+            matches!(&source.endpoint, OutputEndpoint::Socket(port) if port.0 == "out")
+        }
         Some(RootSurfaceNodeKind::Output(_)) | None => false,
     }
 }
@@ -451,6 +491,7 @@ fn source_endpoint_shape(
     source: &StreamSource,
 ) -> crate::domain::StreamShape {
     match program.root_nodes.get(&source.node) {
+        Some(RootSurfaceNodeKind::Scalar(_)) => crate::domain::StreamShape::ScalarPattern,
         Some(RootSurfaceNodeKind::Container { .. }) => crate::domain::StreamShape::Any,
         Some(RootSurfaceNodeKind::Transform(transform)) => {
             endpoint_shape_from_outputs(&transform.signature, &source.endpoint)
@@ -530,9 +571,13 @@ fn signature_inputs_resolve(
         let resolves = incoming_flow_sources_to_socket(program, node_id, &socket.port)
             .iter()
             .any(|source| node_resolves_to_stream(program, &source.node, visiting));
-        match socket.connection {
-            ConnectionRule::Required => resolves || socket.default.is_some(),
-            ConnectionRule::Optional => resolves || socket.default.is_some() || true,
+        if matches!(socket.role, NodeInputRole::Main) {
+            resolves || socket.default.is_some()
+        } else {
+            match socket.connection {
+                ConnectionRule::Required => resolves || socket.default.is_some(),
+                ConnectionRule::Optional => true,
+            }
         }
     }) && signature.input_groups.iter().all(|group| {
         let bindings = incoming_flow_sources_to_group(program, node_id, &group.group);

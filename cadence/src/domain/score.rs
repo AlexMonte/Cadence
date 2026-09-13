@@ -6,8 +6,9 @@ use std::sync::{
 };
 
 use crate::domain::{
+    arrangement::{ArrangementError, TimedControlScore, TimedScore},
     control::ControlTrack,
-    mosaic::Mosaic,
+    moment::Moment,
     prelude::Time,
     space::{Axis, Point3},
     voice::Voice,
@@ -99,6 +100,10 @@ pub enum DeduplicateKey {
     /// Lifecycles are duplicates when they start at the same transport time and
     /// carry the same source intent.
     StartAndIntent,
+    /// Same whole span and host musical value key (falling back to intent).
+    WholeSpanAndValue,
+    /// Same onset and host musical value key (falling back to intent).
+    StartAndValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +157,10 @@ pub enum ConflictPolicy {
     /// Lower-priority lifecycles conflict when their whole spans match exactly
     /// and they carry the same source intent.
     SameWholeSpanAndIntent,
+    /// Same onset and host musical value key (falling back to intent).
+    SameWholeStartAndValue,
+    /// Same whole span and host musical value key (falling back to intent).
+    SameWholeSpanAndValue,
     /// Lower-priority lifecycles conflict when their whole spans overlap.
     WholeSpanOverlap,
 }
@@ -249,18 +258,29 @@ impl WeightedControlScore {
 #[derive(Debug, Clone, PartialEq)]
 /// Public variants of the source score tree.
 pub enum ScoreKind {
+    /// An immutable host pattern queried on the planning thread.
+    QuerySource(super::query_source::ScoreSource),
     /// Single repeating voice leaf.
     Voice(Voice),
-    /// Already-projected transport-time material.
-    Mosaic(Mosaic),
+    /// Finite transport-time events.
+    Events(Vec<Moment>),
     /// Simultaneous children.
     Merge(Vec<Score>),
     /// Append children in transport-time order. Child *n+1* starts after child *n* ends.
     Concat(Vec<Score>),
+    /// Periodic timed uses; each segment repeat resets its source clock to zero.
+    Arrange {
+        /// Compact, validated timed uses.
+        segments: Vec<TimedScore>,
+        /// Sum of each duration multiplied by its repeats.
+        period: Time,
+    },
     /// Route cycles across children over time.
     CycleRoute(Vec<Score>),
     /// Assign specific cycle slots to children.
     CycleSlots(Vec<Score>),
+    /// Divide each cycle among children by their relative weights.
+    WeightedCycleSlots(Vec<WeightedScore>),
     /// Scale child time by `rate`.
     TimeScale {
         /// Child score being transformed.
@@ -372,16 +392,27 @@ struct ControlScoreNode {
 #[derive(Debug, Clone, PartialEq)]
 /// Public variants of the control-score tree.
 pub enum ControlScoreKind {
+    /// An immutable host control pattern queried on the planning thread.
+    QuerySource(super::query_source::ControlSource),
     /// Single repeating control track leaf.
     Track(ControlTrack),
     /// Simultaneous control children.
     Merge(Vec<ControlScore>),
     /// Append control children in transport-time order.
     Concat(Vec<ControlScore>),
+    /// Periodic timed controls, resetting local control time on each repeat.
+    Arrange {
+        /// Compact, validated timed control uses.
+        segments: Vec<TimedControlScore>,
+        /// Sum of each duration multiplied by its repeats.
+        period: Time,
+    },
     /// Route cycles across control children over time.
     CycleRoute(Vec<ControlScore>),
     /// Assign specific cycle slots to control children.
     CycleSlots(Vec<ControlScore>),
+    /// Divide each cycle among controls by their relative weights.
+    WeightedCycleSlots(Vec<WeightedControlScore>),
     /// Scale child control time by `rate`.
     TimeScale {
         /// Child control score being transformed.
@@ -434,6 +465,13 @@ pub enum ControlScoreKind {
 }
 
 impl Score {
+    /// Adds an immutable host source to the normal projection and scheduler path.
+    #[must_use]
+    pub fn query_source(source: impl super::query_source::ScoreQuerySource + 'static) -> Self {
+        Self::new(ScoreKind::QuerySource(super::query_source::ScoreSource(
+            Arc::new(source),
+        )))
+    }
     /// Returns an empty score.
     #[must_use]
     pub fn empty() -> Self {
@@ -446,10 +484,19 @@ impl Score {
         Self::new(ScoreKind::Voice(voice))
     }
 
-    /// Wraps already-projected material as a score leaf.
+    /// Creates a finite transport-time event leaf.
+    ///
+    /// Events are stored in deterministic span order. Events with identical
+    /// spans retain their input order.
     #[must_use]
-    pub fn mosaic(mosaic: Mosaic) -> Self {
-        Self::new(ScoreKind::Mosaic(mosaic))
+    pub fn events(mut events: Vec<Moment>) -> Self {
+        events.sort_by(|left, right| {
+            left.span()
+                .start()
+                .cmp(&right.span().start())
+                .then(left.span().end().cmp(&right.span().end()))
+        });
+        Self::new(ScoreKind::Events(events))
     }
 
     /// Creates a simultaneous merge of child scores.
@@ -468,6 +515,13 @@ impl Score {
         }
     }
 
+    /// Loops timed source uses without stretching, resetting each occurrence.
+    /// Whole event/lifecycle spans are clipped at each occurrence's bounds.
+    pub fn arrange(segments: Vec<TimedScore>) -> Result<Self, ArrangementError> {
+        let period = crate::domain::arrangement::period(&segments)?;
+        Ok(Self::new(ScoreKind::Arrange { segments, period }))
+    }
+
     /// Creates a cycle-routing score.
     #[must_use]
     pub fn cycle_route(children: Vec<Score>) -> Self {
@@ -478,6 +532,12 @@ impl Score {
     #[must_use]
     pub fn cycle_slots(children: Vec<Score>) -> Self {
         Self::new(ScoreKind::CycleSlots(children))
+    }
+
+    /// Assigns each child a weighted share of every cycle, preserving its local cycle phase.
+    #[must_use]
+    pub fn weighted_cycle_slots(children: Vec<WeightedScore>) -> Self {
+        Self::new(ScoreKind::WeightedCycleSlots(children))
     }
 
     /// Scales a child score in time.
@@ -618,13 +678,14 @@ impl From<Voice> for Score {
     }
 }
 
-impl From<Mosaic> for Score {
-    fn from(value: Mosaic) -> Self {
-        Self::mosaic(value)
-    }
-}
-
 impl ControlScore {
+    /// Adds an immutable host control source to normal control projection.
+    #[must_use]
+    pub fn query_source(source: impl super::query_source::ControlQuerySource + 'static) -> Self {
+        Self::new(ControlScoreKind::QuerySource(
+            super::query_source::ControlSource(Arc::new(source)),
+        ))
+    }
     /// Wraps one control track as a control-score leaf.
     #[must_use]
     pub fn track(track: ControlTrack) -> Self {
@@ -647,6 +708,12 @@ impl ControlScore {
         }
     }
 
+    /// Loops timed control uses with the same local-clock reset as source uses.
+    pub fn arrange(segments: Vec<TimedControlScore>) -> Result<Self, ArrangementError> {
+        let period = crate::domain::arrangement::period(&segments)?;
+        Ok(Self::new(ControlScoreKind::Arrange { segments, period }))
+    }
+
     /// Creates a cycle-routing control tree.
     #[must_use]
     pub fn cycle_route(children: Vec<ControlScore>) -> Self {
@@ -657,6 +724,12 @@ impl ControlScore {
     #[must_use]
     pub fn cycle_slots(children: Vec<ControlScore>) -> Self {
         Self::new(ControlScoreKind::CycleSlots(children))
+    }
+
+    /// Assigns each child control score a weighted share of every cycle.
+    #[must_use]
+    pub fn weighted_cycle_slots(children: Vec<WeightedControlScore>) -> Self {
+        Self::new(ControlScoreKind::WeightedCycleSlots(children))
     }
 
     /// Scales a child control tree in time.
@@ -743,5 +816,30 @@ impl PartialEq for ControlScore {
 impl From<ControlTrack> for ControlScore {
     fn from(value: ControlTrack) -> Self {
         Self::track(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{intent::Intent, span::TransportSpan};
+
+    #[test]
+    fn finite_events_are_stored_in_deterministic_span_order() {
+        let early = Moment::new(
+            TransportSpan::new(Time::ZERO, Time::new(1, 4)).unwrap(),
+            Intent::sample("early"),
+        );
+        let late = Moment::new(
+            TransportSpan::new(Time::new(1, 2), Time::ONE).unwrap(),
+            Intent::sample("late"),
+        );
+
+        let score = Score::events(vec![late, early.clone()]);
+        let ScoreKind::Events(events) = score.kind() else {
+            panic!("expected a finite event leaf");
+        };
+
+        assert_eq!(events.first(), Some(&early));
     }
 }

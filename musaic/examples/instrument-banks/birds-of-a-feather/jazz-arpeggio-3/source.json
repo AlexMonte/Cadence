@@ -1,0 +1,46 @@
+[
+  {
+    "zone": 8,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_FluidR3_GM_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 64.44,
+    "loop_frames": [
+      19667,
+      20124
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 10,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_FluidR3_GM_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 74.4,
+    "loop_frames": [
+      23631,
+      23851
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 9,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_FluidR3_GM_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 69.45,
+    "loop_frames": [
+      17180,
+      18402
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 7,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_FluidR3_GM_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 59.25,
+    "loop_frames": [
+      40799,
+      41063
+    ],
+    "ahdsr": true
+  }
+]

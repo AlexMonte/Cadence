@@ -3,7 +3,7 @@
 use std::{
     sync::{
         Arc, RwLock,
-        mpsc::{self, Receiver, SendError, Sender, TryRecvError},
+        mpsc::{self, Receiver, Sender, TryRecvError},
     },
     time::Duration,
 };
@@ -194,6 +194,8 @@ impl Eq for SampleEnvelope {}
 /// playback settings without owning any audio backend.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SampleTrigger {
+    /// Validated immutable ordered per-voice insert chain.
+    pub inserts: crate::domain::inserts::InsertChain,
     /// Concrete voice instance this trigger belongs to.
     pub voice_id: VoiceInstanceId,
     /// Initial runtime control state for the active voice.
@@ -216,12 +218,19 @@ pub struct SampleTrigger {
     pub spatial: VoiceSpatial,
     /// Final playback rate multiplier.
     pub playback_rate: f64,
+    /// Fitting and root-pitch multiplier retained when authored rate updates arrive.
+    /// Sample-bank resolution sets this; ordinary builders initialize it to one.
+    pub resolved_rate_scale: f64,
     /// Unit-range playback start position.
     pub playback_start: f64,
     /// Unit-range playback end position.
     pub playback_end: f64,
     /// Whether playback runs in reverse.
     pub reverse: bool,
+    /// Optional rate-fitting duration before explicit rate and pitch changes.
+    pub fit_duration: Option<Duration>,
+    /// Repeat the selected source region until the envelope ends.
+    pub looped: bool,
     /// Envelope settings for this playback.
     pub envelope: SampleEnvelope,
     /// Optional low-pass cutoff.
@@ -288,6 +297,7 @@ impl SampleTrigger {
         }
 
         Self {
+            inserts: settings.inserts,
             voice_id: settings.voice_id,
             runtime_controls: settings.runtime_controls,
             sample: settings.sample,
@@ -299,9 +309,12 @@ impl SampleTrigger {
             gain_ramp: settings.gain_ramp,
             spatial: settings.spatial,
             playback_rate: settings.playback_rate,
+            resolved_rate_scale: 1.0,
             playback_start: settings.playback_start,
             playback_end: settings.playback_end,
             reverse: settings.reverse,
+            fit_duration: settings.fit_duration,
+            looped: settings.looped,
             envelope: settings.envelope,
             low_pass_cutoff_hz: settings.low_pass_cutoff_hz,
             low_pass_resonance: settings.low_pass_resonance,
@@ -369,8 +382,9 @@ impl SampleTrigger {
         };
 
         let mut builder = Self::builder()
+            .inserts(plan.inserts.clone())
             .voice_id(plan.voice_id)
-            .runtime_controls(plan.runtime_controls)
+            .runtime_controls(plan.runtime_controls.clone())
             .sample(source.sample.clone())
             .velocity(plan.mix.velocity)
             .gain(plan.mix.gain)
@@ -379,6 +393,8 @@ impl SampleTrigger {
             .playback_start(source.playback_start)
             .playback_end(source.playback_end)
             .reverse(source.reverse)
+            .fit_duration(source.fit_duration)
+            .looped(source.looped)
             .envelope(SampleEnvelope::new(
                 plan.envelope.attack,
                 plan.envelope.decay,
@@ -411,13 +427,13 @@ impl SampleTrigger {
             builder = builder.high_pass_cutoff_hz(cutoff);
         }
         if let Some(reverb) = &plan.sends.reverb {
-            builder = builder.reverb(reverb.clone());
+            builder = builder.reverb(*reverb);
         }
         if let Some(delay) = &plan.sends.delay {
-            builder = builder.delay(delay.clone());
+            builder = builder.delay(*delay);
         }
         if let Some(compressor) = &plan.dynamics.compressor {
-            builder = builder.compressor(compressor.clone());
+            builder = builder.compressor(*compressor);
         }
         if let Some(note) = plan.live_note {
             builder = builder.live_note(note);
@@ -431,6 +447,8 @@ impl SampleTrigger {
 #[derive(Debug, Clone, PartialEq)]
 /// Field-based settings struct accepted by [`SampleTrigger::new`].
 pub struct SampleTriggerSettings {
+    /// Validated immutable ordered per-voice insert chain.
+    pub inserts: crate::domain::inserts::InsertChain,
     /// Concrete voice instance this trigger belongs to.
     pub voice_id: VoiceInstanceId,
     /// Initial runtime control state for the active voice.
@@ -459,6 +477,10 @@ pub struct SampleTriggerSettings {
     pub playback_end: f64,
     /// Reverse playback flag.
     pub reverse: bool,
+    /// Optional rate-fitting duration before explicit rate and pitch changes.
+    pub fit_duration: Option<Duration>,
+    /// Repeat the selected source region until the envelope ends.
+    pub looped: bool,
     /// Envelope settings.
     pub envelope: SampleEnvelope,
     /// Optional low-pass cutoff.
@@ -488,6 +510,7 @@ pub struct SampleTriggerSettings {
 #[derive(Debug, Clone, Default)]
 /// Builder for [`SampleTrigger`].
 pub struct SampleTriggerBuilder {
+    inserts: crate::domain::inserts::InsertChain,
     voice_id: Option<VoiceInstanceId>,
     runtime_controls: Option<AudioRuntimeControlState>,
     sample: Option<String>,
@@ -502,6 +525,8 @@ pub struct SampleTriggerBuilder {
     playback_start: Option<f64>,
     playback_end: Option<f64>,
     reverse: Option<bool>,
+    fit_duration: Option<Duration>,
+    looped: bool,
     envelope: Option<SampleEnvelope>,
     low_pass_cutoff_hz: Option<f64>,
     low_pass_resonance: Option<UnitValue>,
@@ -517,6 +542,11 @@ pub struct SampleTriggerBuilder {
 }
 
 impl SampleTriggerBuilder {
+    /// Replaces the ordered per-voice insert chain.
+    pub fn inserts(mut self, inserts: crate::domain::inserts::InsertChain) -> Self {
+        self.inserts = inserts;
+        self
+    }
     /// Creates an empty builder.
     #[must_use]
     pub fn new() -> Self {
@@ -642,6 +672,21 @@ impl SampleTriggerBuilder {
         self
     }
 
+    /// Fits the selected region to this duration by resampling; this changes pitch.
+    /// Explicit playback rate and pitch offsets are applied after fitting.
+    #[must_use]
+    pub fn fit_duration(mut self, duration: Option<Duration>) -> Self {
+        self.fit_duration = duration;
+        self
+    }
+
+    /// Repeats the selected source region until its envelope is released.
+    #[must_use]
+    pub fn looped(mut self, looped: bool) -> Self {
+        self.looped = looped;
+        self
+    }
+
     /// Sets the envelope.
     #[must_use]
     pub fn envelope(mut self, envelope: SampleEnvelope) -> Self {
@@ -747,6 +792,7 @@ impl SampleTriggerBuilder {
     #[must_use]
     pub fn build(self) -> Option<SampleTrigger> {
         Some(SampleTrigger::new(SampleTriggerSettings {
+            inserts: self.inserts,
             voice_id: self.voice_id.unwrap_or_else(VoiceInstanceId::next_live),
             runtime_controls: self.runtime_controls.unwrap_or_default(),
             sample: self.sample?,
@@ -769,6 +815,8 @@ impl SampleTriggerBuilder {
                 .playback_end
                 .unwrap_or(SampleTrigger::DEFAULT_PLAYBACK_END),
             reverse: self.reverse.unwrap_or(SampleTrigger::DEFAULT_REVERSE),
+            fit_duration: self.fit_duration,
+            looped: self.looped,
             envelope: self.envelope.unwrap_or_else(|| {
                 SampleEnvelope::new(
                     Duration::ZERO,
@@ -804,10 +852,17 @@ pub struct SampleTriggerSender {
     sender: Sender<SampleTrigger>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("sample trigger receiver is disconnected")]
+/// Failure to publish a sample trigger because its receiver is gone.
+pub struct SampleTriggerSendError;
+
 impl SampleTriggerSender {
     /// Sends one sample trigger.
-    pub fn send(&self, trigger: SampleTrigger) -> Result<(), SendError<SampleTrigger>> {
-        self.sender.send(trigger)
+    pub fn send(&self, trigger: SampleTrigger) -> Result<(), SampleTriggerSendError> {
+        self.sender
+            .send(trigger)
+            .map_err(|_| SampleTriggerSendError)
     }
 
     /// Creates a performer with no ambient controls.
@@ -856,7 +911,7 @@ pub fn sample_trigger_channel() -> (SampleTriggerSender, SampleTriggerReceiver) 
     )
 }
 
-/// Queue-backed sample performer for the future audio adapter boundary.
+/// Queue-backed sample performer for the audio adapter boundary.
 pub struct SampleTriggerOutputPerformer {
     trigger_sender: SampleTriggerSender,
     ambient_controls: Arc<RwLock<ControlMap>>,
@@ -1156,6 +1211,7 @@ mod tests {
         assert!(
             panic::catch_unwind(|| {
                 let _ = SampleTrigger::new(SampleTriggerSettings {
+                    inserts: Default::default(),
                     voice_id: VoiceInstanceId::new(99),
                     runtime_controls: AudioRuntimeControlState::default(),
                     sample: "kick".to_string(),
@@ -1170,6 +1226,8 @@ mod tests {
                     playback_start: 0.8,
                     playback_end: 0.8,
                     reverse: false,
+                    fit_duration: None,
+                    looped: false,
                     envelope: SampleEnvelope::new(
                         Duration::ZERO,
                         Duration::ZERO,
@@ -1199,6 +1257,8 @@ mod tests {
     fn scheduled_sample_translation_rejects_invalid_manual_sample_intents() {
         let event = scheduled_intent(
             Intent::Sample(SampleIntent {
+                sound_defaults: Default::default(),
+                inserts: Default::default(),
                 sample_id: "vox".to_string(),
                 gain: 0.5,
                 rate: 0.0,
@@ -1240,7 +1300,7 @@ mod tests {
     }
 
     #[test]
-    fn backfilled_forward_sample_starts_from_the_correct_interior_region() {
+    fn backfilled_forward_sample_keeps_region_and_carries_elapsed_source_time() {
         let event = scheduled_intent_with_visible(
             Intent::Sample(SampleIntent::new("vox").region(0.0, 1.0)),
             ((0, 1), (1, 1)),
@@ -1250,13 +1310,14 @@ mod tests {
 
         let trigger = SampleTrigger::from_scheduled_intent(&event).unwrap();
 
-        assert_eq!(trigger.playback_start, 0.25);
+        assert_eq!(trigger.playback_start, 0.0);
         assert_eq!(trigger.playback_end, 1.0);
+        assert_eq!(trigger.envelope.elapsed(), Duration::from_millis(250));
         assert_eq!(trigger.play_for, Duration::from_millis(750));
     }
 
     #[test]
-    fn backfilled_reverse_sample_starts_from_the_mirrored_region_point() {
+    fn backfilled_reverse_sample_keeps_region_and_carries_elapsed_source_time() {
         let event = scheduled_intent_with_visible(
             Intent::Sample(SampleIntent::new("vox").region(0.0, 1.0).reverse(true)),
             ((0, 1), (1, 1)),
@@ -1267,7 +1328,8 @@ mod tests {
         let trigger = SampleTrigger::from_scheduled_intent(&event).unwrap();
 
         assert_eq!(trigger.playback_start, 0.0);
-        assert_eq!(trigger.playback_end, 0.75);
+        assert_eq!(trigger.playback_end, 1.0);
+        assert_eq!(trigger.envelope.elapsed(), Duration::from_millis(250));
         assert!(trigger.reverse);
         assert_eq!(trigger.play_for, Duration::from_millis(750));
     }

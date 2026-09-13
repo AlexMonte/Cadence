@@ -1,6 +1,7 @@
 pub mod board;
 pub mod document;
 pub mod error;
+pub mod instrument;
 pub mod project;
 pub mod stack;
 pub mod tile;
@@ -14,3 +15,7 @@ pub use error::DomainError;
 pub use project::ProjectMetadata;
 pub use stack::{input_stack_piece_from_spawn, stack_piece_from_atom};
 pub use tile::*;
+
+pub mod flow;
+
+pub mod tricks;

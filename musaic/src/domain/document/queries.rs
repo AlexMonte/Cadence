@@ -1,10 +1,10 @@
-use tessera::prelude::{NodeId, NodeSpatialBindings, SpatialSide};
+use tessera::prelude::{NodeId, SpatialSide};
 
 use crate::domain::board::{BoardSlot, BoardSurfaceId, BoardSurfaceKind, SurfaceLayoutKind};
 
 use super::{
-    AuthoredBoardConnection, AuthoredTile, DocumentNode, DocumentNodeKind, MusaicDocument,
-    NodeLocation, StackIndex, connections_from_program, neighbor_at_side,
+    DocumentConnectionView, DocumentNode, DocumentNodeKind, MusaicDocument, NodeLocation,
+    StackIndex, connections_from_program, export_document_program, neighbor_at_side,
 };
 
 pub struct DocumentQueries<'a> {
@@ -19,38 +19,30 @@ impl<'a> DocumentQueries<'a> {
     pub fn active_surface_tiles(
         &self,
         surface: BoardSurfaceId,
-    ) -> impl Iterator<Item = &'a AuthoredTile> {
-        self.document
-            .tiles
-            .by_id
-            .values()
-            .filter(move |tile| tile.placement.map(|placement| placement.surface) == Some(surface))
+    ) -> impl Iterator<Item = (NodeLocation, &'a DocumentNode)> {
+        self.document.graph.nodes_on_surface(surface).into_iter()
     }
 
     pub fn node(&self, node: &NodeId) -> Option<&'a DocumentNode> {
         self.document.graph.node(node)
     }
 
-    pub fn authored_tile(&self, node: &NodeId) -> Option<&'a super::AuthoredTile> {
-        self.document.tiles.by_id.get(node)
-    }
-
-    pub fn connections_on_surface(&self, surface: BoardSurfaceId) -> Vec<AuthoredBoardConnection> {
+    pub fn connections_on_surface(&self, surface: BoardSurfaceId) -> Vec<DocumentConnectionView> {
         if surface != self.document.root_surface {
             return Vec::new();
         }
-        let program = &self.document.tessera.authored_program;
-        connections_from_program(program, &self.document.port_endpoints)
+        let Ok(program) = export_document_program(self.document) else {
+            return Vec::new();
+        };
+        connections_from_program(&program)
             .into_iter()
             .filter(|connection| {
                 let from_on_surface = self
-                    .authored_tile(&connection.from)
-                    .and_then(|tile| tile.placement)
-                    .is_some_and(|p| p.surface == surface);
+                    .location_of(&connection.from)
+                    .is_some_and(|location| location.surface == surface);
                 let to_on_surface = self
-                    .authored_tile(&connection.to)
-                    .and_then(|tile| tile.placement)
-                    .is_some_and(|p| p.surface == surface);
+                    .location_of(&connection.to)
+                    .is_some_and(|location| location.surface == surface);
                 from_on_surface && to_on_surface
             })
             .collect()
@@ -113,6 +105,8 @@ impl<'a> DocumentQueries<'a> {
     }
 
     pub fn neighbor_at_side(&self, node: &NodeId, side: SpatialSide) -> Option<NodeId> {
-        neighbor_at_side(&self.document.tessera.authored_program, node, side)
+        export_document_program(self.document)
+            .ok()
+            .and_then(|program| neighbor_at_side(&program, node, side))
     }
 }

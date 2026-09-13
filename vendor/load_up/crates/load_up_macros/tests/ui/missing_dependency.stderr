@@ -1,0 +1,5 @@
+error: missing #[dependency(...)] attribute. Use #[dependency(path = ...)], #[dependency(init = ...)], or #[dependency(default)].
+ --> tests/ui/missing_dependency.rs:6:5
+  |
+6 |     texture: Handle<Image>,
+  |     ^^^^^^^

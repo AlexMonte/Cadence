@@ -1,7 +1,8 @@
 use bevy::prelude::*;
-use bevy_feathers::theme::ThemedText;
+use bevy_ui_widgets::Activate;
 
 use super::launch::{EditorLaunchIntent, MenuUiRoot};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::adapter::persistence::load_recent_projects;
 use crate::infrastructure::app::AppState;
 use crate::infrastructure::ui::theme::MusaicUiTheme;
@@ -9,14 +10,22 @@ use crate::infrastructure::ui::theme::MusaicUiTheme;
 #[derive(Component)]
 struct MainMenuScreen;
 
+#[derive(Component)]
+struct MenuMessage;
+
 #[derive(Component, Clone)]
 struct MenuButton(MainMenuAction);
 
 #[derive(Clone, Debug)]
 pub enum MainMenuAction {
+    FirstLoop,
     NewProject,
+    OpenExample,
     OpenProject,
+    #[cfg(not(target_arch = "wasm32"))]
     OpenRecent(std::path::PathBuf),
+    #[cfg(not(target_arch = "wasm32"))]
+    Recover(std::path::PathBuf),
 }
 
 pub struct MainMenuUiPlugin;
@@ -53,6 +62,9 @@ fn spawn_main_menu(
     let screen = commands
         .spawn((
             MainMenuScreen,
+            bevy::input_focus::tab_navigation::TabGroup::new(0),
+            TextColor(theme.chrome.text_main),
+            bevy_feathers::theme::ThemeFontColor(bevy_feathers::tokens::TEXT_MAIN),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -73,15 +85,53 @@ fn spawn_main_menu(
                     font_size: theme.typography.brand,
                     ..default()
                 },
-                ThemedText,
+                TextColor(theme.chrome.text_main),
             ));
-            spawn_menu_button(menu, &theme, "New project".to_string(), MainMenuAction::NewProject);
+            menu.spawn((
+                MenuMessage,
+                Text::new(""),
+                TextFont {
+                    font_size: 13.0,
+                    ..default()
+                },
+                TextColor(theme.chrome.text_main),
+            ));
+            spawn_menu_button(
+                menu,
+                &theme,
+                "Start a first loop".into(),
+                MainMenuAction::FirstLoop,
+            );
+            spawn_menu_button(
+                menu,
+                &theme,
+                "Open example".to_string(),
+                MainMenuAction::OpenExample,
+            );
+            spawn_menu_button(
+                menu,
+                &theme,
+                "New project".to_string(),
+                MainMenuAction::NewProject,
+            );
             spawn_menu_button(
                 menu,
                 &theme,
                 "Open project…".to_string(),
                 MainMenuAction::OpenProject,
             );
+            #[cfg(not(target_arch = "wasm32"))]
+            for recovery in crate::adapter::persistence::recovery::list_recoveries()
+                .into_iter()
+                .take(3)
+            {
+                spawn_menu_button(
+                    menu,
+                    &theme,
+                    format!("Recover: {}", recovery.name),
+                    MainMenuAction::Recover(recovery.path),
+                );
+            }
             #[cfg(not(target_arch = "wasm32"))]
             for path in load_recent_projects().into_iter().take(6) {
                 let label = format!(
@@ -104,41 +154,33 @@ fn spawn_menu_button(
     action: MainMenuAction,
 ) {
     parent
-        .spawn((
+        .spawn(crate::infrastructure::ui::widgets::musaic_chrome_button(
+            theme,
+            label,
             MenuButton(action),
-            Node {
-                min_width: Val::Px(280.0),
-                height: Val::Px(40.0),
-                display: Display::Flex,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                padding: UiRect::horizontal(Val::Px(theme.spacing.xl)),
-                border: UiRect::all(Val::Px(1.0)),
-                ..default()
-            },
-            BackgroundColor(theme.chrome.button_bg),
-            BorderColor::all(theme.chrome.border),
-            Pickable::default(),
         ))
-        .observe(on_menu_button_click)
-        .with_children(|btn| {
-            btn.spawn((Text::new(label), ThemedText));
-        });
+        .insert(Node {
+            min_width: px(280),
+            height: px(40),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            padding: UiRect::horizontal(px(theme.spacing.xl)),
+            border: UiRect::all(px(1)),
+            border_radius: BorderRadius::all(px(theme.radii.md)),
+            ..default()
+        })
+        .observe(on_menu_button_click);
 }
 
 fn on_menu_button_click(
-    mut click: On<Pointer<Click>>,
+    click: On<Activate>,
     buttons: Query<&MenuButton>,
     mut pending: ResMut<PendingMainMenuAction>,
 ) {
-    if click.button != PointerButton::Primary {
-        return;
-    }
-    let Ok(MenuButton(action)) = buttons.get(click.event_target()) else {
+    let Ok(MenuButton(action)) = buttons.get(click.entity) else {
         return;
     };
     pending.0 = Some(action.clone());
-    click.propagate(false);
 }
 
 #[derive(Resource, Default)]
@@ -148,13 +190,25 @@ fn handle_menu_clicks(
     mut pending: ResMut<PendingMainMenuAction>,
     mut holder: ResMut<EditorLaunchIntentHolder>,
     mut next: ResMut<NextState<AppState>>,
+    #[cfg(not(target_arch = "wasm32"))] mut diagnostics: ResMut<
+        crate::infrastructure::diagnostics::DiagnosticStore,
+    >,
+    #[cfg(not(target_arch = "wasm32"))] mut message: Query<&mut Text, With<MenuMessage>>,
 ) {
     let Some(action) = pending.0.take() else {
         return;
     };
     match action {
+        MainMenuAction::FirstLoop => {
+            holder.0 = Some(EditorLaunchIntent::FirstLoop);
+            next.set(AppState::Editor);
+        }
         MainMenuAction::NewProject => {
             holder.0 = Some(EditorLaunchIntent::NewProject);
+            next.set(AppState::Editor);
+        }
+        MainMenuAction::OpenExample => {
+            holder.0 = Some(EditorLaunchIntent::Example);
             next.set(AppState::Editor);
         }
         MainMenuAction::OpenProject => {
@@ -173,6 +227,28 @@ fn handle_menu_clicks(
                 crate::adapter::persistence::wasm_io::request_open_project();
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        MainMenuAction::Recover(path) => {
+            match crate::adapter::persistence::recovery::load_recovery(&path) {
+                Ok(project) => {
+                    holder.0 = Some(EditorLaunchIntent::LoadedProject(Box::new(project)));
+                    next.set(AppState::Editor);
+                }
+                Err(error) => {
+                    for mut text in &mut message {
+                        **text = format!("Could not recover project: {error}");
+                    }
+                    use crate::infrastructure::diagnostics::*;
+                    diagnostics.push(LayeredDiagnostic {
+                        phase: DiagnosticPhase::Transaction,
+                        diagnostic: AppDiagnostic::Host(HostDiagnostic::TransactionRejected {
+                            message: format!("Could not recover project: {error}"),
+                        }),
+                    });
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         MainMenuAction::OpenRecent(path) => {
             holder.0 = Some(EditorLaunchIntent::OpenProject(path));
             next.set(AppState::Editor);
@@ -185,9 +261,7 @@ fn despawn_main_menu(
     mut root: ResMut<MenuUiRoot>,
     screens: Query<Entity, With<MainMenuScreen>>,
 ) {
-    if let Some(entity) = root.0.take() {
-        commands.entity(entity).despawn();
-    }
+    root.0 = None;
     for entity in screens.iter() {
         commands.entity(entity).despawn();
     }

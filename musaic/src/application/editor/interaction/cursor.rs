@@ -54,6 +54,16 @@ pub struct DrawerTilePressQueue {
     pub pending: Option<DrawerTilePressed>,
 }
 
+#[derive(Debug, Clone)]
+pub struct BoardTilePressed {
+    pub node: tessera::prelude::NodeId,
+    pub start_screen: Vec2,
+}
+#[derive(Resource, Default)]
+pub struct BoardTilePressQueue {
+    pub pending: Option<BoardTilePressed>,
+}
+
 /// Viewport pan/orbit latch (written by infrastructure camera nav each frame).
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct BoardViewportPointerInput {
@@ -95,6 +105,7 @@ pub fn register_cursor_interaction(app: &mut App) {
         .init_resource::<BoardPlacementPointer>()
         .init_resource::<BoardViewportPointerInput>()
         .init_resource::<DrawerTilePressQueue>()
+        .init_resource::<BoardTilePressQueue>()
         .init_resource::<CursorPanLatch>()
         .add_message::<CursorInteractionChanged>()
         .add_plugins(StateMachinePlugin::default().schedule(Update))
@@ -211,7 +222,7 @@ fn sync_cursor_interaction(
     mut cursor: ResMut<CursorInteraction>,
     mut changed: MessageWriter<CursorInteractionChanged>,
 ) {
-    let Ok((idle, panning, hovering, dragging)) = states.get(machine.0) else {
+    let Ok((_idle, panning, hovering, dragging)) = states.get(machine.0) else {
         return;
     };
 
@@ -221,8 +232,6 @@ fn sync_cursor_interaction(
         CursorInteractionPhase::Dragging
     } else if hovering {
         CursorInteractionPhase::HoveringTile
-    } else if idle {
-        CursorInteractionPhase::Idle
     } else {
         CursorInteractionPhase::Idle
     };
@@ -238,8 +247,6 @@ fn sync_cursor_interaction(
 
 #[cfg(test)]
 mod tests {
-    use bevy::prelude::*;
-
     use super::*;
     use crate::application::editor::EditorPlugin;
 

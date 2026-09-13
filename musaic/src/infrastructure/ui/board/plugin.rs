@@ -17,6 +17,8 @@ pub struct Board3dPlugin;
 
 impl Plugin for Board3dPlugin {
     fn build(&self, app: &mut App) {
+        super::playback_activity::register(app);
+        app.add_plugins(super::detail::plugin);
         // Board chrome reads MusaicUiTheme (clear color, materials). Ensure the
         // resource exists even when Board3dPlugin is mounted without the full
         // MusaicPlugin theme insert; full-app insert_musaic_ui_theme overwrites
@@ -54,8 +56,12 @@ impl Plugin for Board3dPlugin {
                 )
                     .after(MusaicEditorSet::MutateState)
                     .after(MusaicSet::SceneSync)
+                    // Replacing a face (e.g. C4 -> C5) despawns its old
+                    // entity. Pulse/overlay commands must see the replacement,
+                    // after reconciliation's deferred changes have applied.
+                    .after(sync_board_3d_scene)
                     .run_if(in_state(AppState::Editor)),
             );
+        super::keyboard_cursor::register(app);
     }
 }
-

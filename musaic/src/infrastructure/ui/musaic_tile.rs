@@ -8,16 +8,14 @@ use crate::{application::pipeline::scene_sync::VisibleNodeKind, domain::document
 
 use crate::adapter::tile_icons::TileIconId;
 
-use super::transform_tile::{
-    TileSheetKind, frames, tile_sheet_for_spawn, tile_sheet_for_visible,
-};
+use super::transform_tile::{TileSheetKind, frames, tile_sheet_for_spawn, tile_sheet_for_visible};
 
 /// Tile mesh size in world units (32×4×32 pixel proportions).
 pub const TILE_WORLD_WIDTH: f32 = 0.32;
 pub const TILE_WORLD_HEIGHT: f32 = 0.04;
 pub const TILE_WORLD_DEPTH: f32 = 0.32;
 
-/// Inset from slot edge for highlight rings and legacy footprint math.
+/// Inset from the slot edge for highlight rings and footprint math.
 pub const TILE_INSET: f32 = 0.18;
 
 /// Solid-marker height for stack insert / locked chrome (not the GLTF tile body).
@@ -30,13 +28,13 @@ pub const PALETTE_TILE_FOOTPRINT: f32 = 2.15;
 pub const ATOM_TILE_FOOTPRINT: f32 = 1.72;
 
 /// Root board macro tiles (containers, outputs).
-pub const BOARD_MACRO_TILE_FOOTPRINT: f32 = 0.68;
+pub const BOARD_MACRO_TILE_FOOTPRINT: f32 = 0.92;
 /// Root board transform / trick tiles.
-pub const BOARD_TRICK_TILE_FOOTPRINT: f32 = 0.58;
+pub const BOARD_TRICK_TILE_FOOTPRINT: f32 = 0.92;
 /// Atoms placed on a container stack track.
-pub const STACK_ATOM_FOOTPRINT: f32 = 0.46;
+pub const STACK_ATOM_FOOTPRINT: f32 = 0.92;
 /// Macro pieces on a stack track (rare; same slot width as board).
-pub const STACK_MACRO_FOOTPRINT: f32 = 0.62;
+pub const STACK_MACRO_FOOTPRINT: f32 = 0.92;
 
 pub fn board_footprint_for_kind(kind: VisibleNodeKind) -> f32 {
     match kind {

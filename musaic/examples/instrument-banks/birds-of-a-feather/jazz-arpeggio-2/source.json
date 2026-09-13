@@ -1,0 +1,68 @@
+[
+  {
+    "zone": 6,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 70.84,
+    "loop_frames": [
+      5302,
+      5392
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 9,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 83.62,
+    "loop_frames": [
+      4797,
+      4840
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 7,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 73.76,
+    "loop_frames": [
+      5272,
+      5348
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 8,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 78.75,
+    "loop_frames": [
+      4992,
+      5049
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 10,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 83.62,
+    "loop_frames": [
+      4797,
+      4840
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 4,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0260_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 65.85,
+    "loop_frames": [
+      5251,
+      5371
+    ],
+    "ahdsr": true
+  }
+]

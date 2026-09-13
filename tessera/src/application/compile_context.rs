@@ -11,6 +11,7 @@ pub struct ProvenanceFrame {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompileContext {
     pub cycle_index: usize,
+    pub(crate) trick_calls: usize,
     pub provenance_stack: Vec<ProvenanceFrame>,
 }
 
@@ -18,12 +19,14 @@ impl CompileContext {
     pub fn new(cycle_index: usize) -> Self {
         Self {
             cycle_index,
+            trick_calls: 0,
             provenance_stack: Vec::new(),
         }
     }
 
     pub fn current_provenance(&self) -> Option<PatternProvenance> {
         self.provenance_stack.last().map(|frame| PatternProvenance {
+            instrument: None,
             node: frame.node.clone(),
             container: frame.container.clone(),
             stack_index: frame.stack_index,

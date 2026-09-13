@@ -56,6 +56,7 @@ pub fn spawn_minimap_panel(
             ZIndex(3),
             BackgroundColor(theme.chrome.panel_bg),
         ),
+        theme,
         images,
         sprites,
         PanelBackdrop::Panel,
@@ -100,15 +101,29 @@ pub fn spawn_minimap_edge_handle(
                 top: px(0.0),
                 width: px(crate::application::editor::MinimapPanelState::EDGE_HIT_WIDTH),
                 height: percent(100),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
                 ..default()
             },
             ZIndex(4),
-            BackgroundColor(theme.chrome.edge_handle_active),
+            BackgroundColor(theme.chrome.edge_handle_idle),
             Pickable::default(),
         ))
         .observe(super::on_minimap_edge_drag_start)
         .observe(super::on_minimap_edge_drag)
-        .observe(super::on_minimap_edge_drag_end);
+        .observe(super::on_minimap_edge_drag_end)
+        .with_children(|grip| {
+            grip.spawn((
+                Node {
+                    width: px(3),
+                    height: px(44),
+                    border_radius: BorderRadius::all(px(2)),
+                    ..default()
+                },
+                BackgroundColor(theme.chrome.edge_handle),
+                Pickable::IGNORE,
+            ));
+        });
 }
 
 /// Full-width grip on the breadcrumb bar — drag upward to reveal the piano-roll band.
@@ -140,6 +155,7 @@ pub fn spawn_timeline_edge_handle(tabs_bar: &mut ChildSpawnerCommands<'_>, theme
                     ..default()
                 },
                 BackgroundColor(theme.chrome.edge_handle),
+                Pickable::IGNORE,
             ));
         });
 }

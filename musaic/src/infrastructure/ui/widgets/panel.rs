@@ -31,15 +31,22 @@ pub enum PanelBackdrop {
 pub fn spawn_shell_panel(
     parent: &mut ChildSpawnerCommands<'_>,
     panel: impl Bundle,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
     backdrop: PanelBackdrop,
     content: impl FnOnce(&mut ChildSpawnerCommands<'_>),
 ) {
-    parent.spawn(panel).with_children(|panel| {
-        if backdrop != PanelBackdrop::None {
-            ui_sprites::spawn_panel_backdrop(panel, images, sprites, backdrop);
-        }
-        content(panel);
-    });
+    parent
+        .spawn((
+            panel,
+            TextColor(theme.chrome.text_main),
+            bevy_feathers::theme::ThemeFontColor(bevy_feathers::tokens::TEXT_MAIN),
+        ))
+        .with_children(|panel| {
+            if backdrop != PanelBackdrop::None {
+                ui_sprites::spawn_panel_backdrop(panel, theme, images, sprites, backdrop);
+            }
+            content(panel);
+        });
 }

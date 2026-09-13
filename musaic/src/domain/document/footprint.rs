@@ -1,9 +1,9 @@
 use tessera::prelude::TileFootprint;
 
-use super::graph::DocumentNodeKind;
 use super::TileSpawnKind;
+use super::graph::DocumentNodeKind;
 
-/// Root-board tile categories whose authored Tessera placement spans 2×2 slots.
+/// Root-board tile categories with non-unit authored occupancy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootBoardTileKind {
     Container,
@@ -34,7 +34,8 @@ impl From<&DocumentNodeKind> for RootBoardTileKind {
 /// The authored Tessera occupancy for a tile placed on the root board.
 pub fn root_board_tile_footprint(kind: impl Into<RootBoardTileKind>) -> TileFootprint {
     match kind.into() {
-        RootBoardTileKind::Container | RootBoardTileKind::Output => TileFootprint::new(2, 2),
+        RootBoardTileKind::Container => TileFootprint::new(5, 1),
+        RootBoardTileKind::Output => TileFootprint::unit(),
         RootBoardTileKind::Other => TileFootprint::unit(),
     }
 }
@@ -46,20 +47,21 @@ mod tests {
     use crate::domain::document::{
         ContainerKind, DocumentGraphError, MusaicDocument, PlacementAddress,
     };
+    use crate::domain::instrument::{InstrumentDefinition, InstrumentSource, Waveform};
 
     #[test]
-    fn containers_and_outputs_occupy_two_by_two_root_board_slots() {
+    fn containers_occupy_five_cells_and_outputs_one() {
         assert_eq!(
             root_board_tile_footprint(&TileSpawnKind::Container {
                 kind: ContainerKind::Sequence,
             }),
-            TileFootprint::new(2, 2)
+            TileFootprint::new(5, 1)
         );
         assert_eq!(
             root_board_tile_footprint(&TileSpawnKind::Output {
                 name: "main".into(),
             }),
-            TileFootprint::new(2, 2)
+            TileFootprint::unit()
         );
         assert_eq!(
             root_board_tile_footprint(RootBoardTileKind::Other),
@@ -88,7 +90,7 @@ mod tests {
             .insert_tile(
                 &mut document.surfaces,
                 root,
-                PlacementAddress::BoardSlot(BoardSlot::new(1, 0)),
+                PlacementAddress::BoardSlot(BoardSlot::new(4, 0)),
                 TileSpawnKind::Output {
                     name: "main".into(),
                 },
@@ -96,5 +98,36 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, DocumentGraphError::OccupiedAddress { .. }));
+    }
+
+    #[test]
+    fn invalid_sound_is_rejected_before_document_identity_is_allocated() {
+        let mut document = MusaicDocument::new_empty();
+        let root = document.root_surface;
+        let mut invalid = InstrumentDefinition::new(InstrumentSource::Synth(Waveform::Sine));
+        invalid.rate = tessera::prelude::Rational::zero();
+
+        let err = document
+            .graph
+            .insert_tile(
+                &mut document.surfaces,
+                root,
+                PlacementAddress::BoardSlot(BoardSlot::new(0, 0)),
+                TileSpawnKind::sound(invalid),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DocumentGraphError::InvalidNode(_)));
+        assert!(document.graph.nodes().next().is_none());
+
+        let sound = document
+            .graph
+            .insert_tile(
+                &mut document.surfaces,
+                root,
+                PlacementAddress::BoardSlot(BoardSlot::new(0, 0)),
+                TileSpawnKind::sound(InstrumentDefinition::default()),
+            )
+            .unwrap();
+        assert_eq!(sound.0, "doc_1");
     }
 }

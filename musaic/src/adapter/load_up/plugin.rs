@@ -14,11 +14,17 @@ impl Plugin for LoadUpMusaicPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<NearestSamplerApplied>()
             .add_plugins(LoadUpPlugin::<AppState>::default())
-            .require_resource_for_state::<UiSpriteAssets>(AppState::Editor)
-            .require_resource_for_state::<OrthoTileAssets>(AppState::Editor)
-            .require_resource_for_state::<BoardTileIconAssets>(AppState::Editor)
-            .require_resource_for_state::<AtomTileAssets>(AppState::Editor)
-            .require_resource_for_state::<TileMeshSourceAssets>(AppState::Editor)
+            .require_resource_for_state::<UiSpriteAssets>(AppState::Editor, RetentionPolicy::Keep)
+            .require_resource_for_state::<OrthoTileAssets>(AppState::Editor, RetentionPolicy::Keep)
+            .require_resource_for_state::<BoardTileIconAssets>(
+                AppState::Editor,
+                RetentionPolicy::Keep,
+            )
+            .require_resource_for_state::<AtomTileAssets>(AppState::Editor, RetentionPolicy::Keep)
+            .require_resource_for_state::<TileMeshSourceAssets>(
+                AppState::Editor,
+                RetentionPolicy::Keep,
+            )
             .add_systems(
                 Update,
                 (apply_nearest_ui_samplers, apply_nearest_tile_samplers)

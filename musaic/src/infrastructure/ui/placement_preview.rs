@@ -39,7 +39,8 @@ pub fn resolve_placement_preview_center(
         return None;
     }
 
-    let hover = session.placement_hover()?;
+    let mut hover = session.placement_hover()?;
+    hover.address = visible.display_address(hover.address);
     let on_root_board = visible.layout == SurfaceLayoutKind::Board;
     let visual_footprint = if visible.layout == SurfaceLayoutKind::Stack {
         stack_footprint_for_kind(preview_kind)
@@ -60,6 +61,8 @@ pub fn resolve_placement_preview_center(
 pub fn tessera_footprint_for_preview(kind: VisibleNodeKind, on_root_board: bool) -> TileFootprint {
     if on_root_board {
         root_board_tile_footprint(RootBoardTileKind::from(kind))
+    } else if kind == VisibleNodeKind::Container {
+        TileFootprint::new(2, 1)
     } else {
         TileFootprint::unit()
     }
@@ -77,8 +80,15 @@ fn center_for_hover(
             let y = tile_center_y_for_footprint(visual_footprint, BOARD_PLANE_Y);
             Some(tessera_slot_center(slot, tessera_footprint, y))
         }
-        (SurfaceLayoutKind::Stack, PlacementAddress::StackIndex(index)) => {
-            Some(stack_flat_tile_center(index, preview_kind, BOARD_PLANE_Y))
+        (SurfaceLayoutKind::Stack, PlacementAddress::StackIndex(mut index)) => {
+            let columns = crate::domain::board::geometry::STACK_COLUMNS;
+            if index.0 % columns + tessera_footprint.width as usize > columns {
+                index.0 += columns - index.0 % columns;
+            }
+            Some(
+                stack_flat_tile_center(index, preview_kind, BOARD_PLANE_Y)
+                    + Vec3::X * (tessera_footprint.width.saturating_sub(1) as f32 * 0.5),
+            )
         }
         (_, PlacementAddress::BoardSlot(slot)) => {
             let footprint = SLOT_SIZE - TILE_INSET;
@@ -140,12 +150,9 @@ mod tests {
             ..Default::default()
         };
 
-        let center = resolve_placement_preview_center(
-            &session,
-            &visible,
-            VisibleNodeKind::Container,
-        )
-        .expect("last hover should anchor preview");
+        let center =
+            resolve_placement_preview_center(&session, &visible, VisibleNodeKind::Container)
+                .expect("last hover should anchor preview");
 
         assert!(center.y > 0.0);
         assert!(center.x.is_finite() && center.z.is_finite());
@@ -165,6 +172,30 @@ mod tests {
                 .is_none(),
             "ghost must not invent a slot from cursor when hover and last_hover are unset"
         );
+    }
+
+    #[test]
+    fn a_new_nested_container_preview_wraps_both_cells_together() {
+        let mut session = session_placing_sequence();
+        let surface = BoardSurfaceId(1);
+        session.placement_mut().unwrap().hover = Some(PlacementHover {
+            surface,
+            address: PlacementAddress::StackIndex(crate::domain::document::StackIndex(11)),
+        });
+        let visible = crate::application::pipeline::scene_sync::VisibleBoardState {
+            active_surface: Some(surface),
+            layout: SurfaceLayoutKind::Stack,
+            ..default()
+        };
+        let center =
+            resolve_placement_preview_center(&session, &visible, VisibleNodeKind::Container)
+                .unwrap();
+        let expected = stack_flat_tile_center(
+            crate::domain::document::StackIndex(12),
+            VisibleNodeKind::Container,
+            BOARD_PLANE_Y,
+        ) + Vec3::X * 0.5;
+        assert_eq!(center, expected);
     }
 
     #[test]
@@ -188,12 +219,9 @@ mod tests {
             ..Default::default()
         };
 
-        let center = resolve_placement_preview_center(
-            &session,
-            &visible,
-            VisibleNodeKind::Container,
-        )
-        .expect("active hover");
+        let center =
+            resolve_placement_preview_center(&session, &visible, VisibleNodeKind::Container)
+                .expect("active hover");
 
         let expected = tessera_slot_center(
             BoardSlot::new(4, 1),

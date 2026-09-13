@@ -4,8 +4,13 @@
 pub mod engine;
 /// Stereo frame type and interpolation helpers.
 pub mod frame;
+mod inserts;
 /// Voice mixer and effect buses.
 pub mod mixer;
+/// Bounded stereo WAV export through the playback runtime.
+pub mod offline;
+/// Bounded output delivery and native render worker.
+pub mod output;
 /// Position values inside a decoded sample.
 pub mod playback_position;
 /// Playback-region helpers.
@@ -24,9 +29,9 @@ pub mod transport;
 pub mod voice;
 
 pub use crate::adapter::sample_bank::LoadedSampleTrigger;
-pub use engine::AudioTriggerResolver;
+pub use engine::{AudioTriggerResolveError, AudioTriggerResolver};
 pub use frame::{Frame, interpolate_frame};
-pub use mixer::{AudioMixer, SampleMixer};
+pub use mixer::AudioMixer;
 pub use playback_position::PlaybackPosition;
 pub use region::{EndPosition, Region};
 pub use renderer::{

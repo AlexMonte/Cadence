@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
 use tessera::prelude::{
-    AtomExprKind, AtomModifier, AtomOperatorToken, AtomTile, ConnectionRule, Container,
-    ContainerAxis, ContainerId, ContainerKind, ContainerSurfaceTile, DefaultStreamBehavior,
-    DiagnosticKind, DiagnosticLocation, EventField, EventValue, FieldValue, FlowControlKind,
-    FlowControlNode, FlowControlPolicy, GroupMembers, InputEndpoint, InputGroupSpec, InputPort,
-    InputSocketSpec, MusicalValue, NodeId, NodeInputRole, NodeSignature, NoteAtom, OutputEndpoint,
-    OutputNode, PortCountRule, PortGroupId, PortMemberId, Rational, RootRelation,
-    RootSurfaceNodeKind, ScalarAtom, StreamShape, StreamSource, StreamTarget, TesseraCompiler,
-    TesseraProgram, TransformKind, TransformNode,
+    AtomExprKind, AtomModifier, AtomOperatorToken, AtomTile, CompileReport, ConnectionRule,
+    Container, ContainerAxis, ContainerId, ContainerKind, ContainerSurfaceTile, CycleSpan,
+    DefaultStreamBehavior, Diagnostic, DiagnosticKind, DiagnosticLocation, EventField, EventValue,
+    FieldValue, FlowControlKind, FlowControlNode, FlowControlPolicy, GroupMembers, InputEndpoint,
+    InputGroupSpec, InputPort, InputSocketSpec, MusicalValue, NodeId, NodeInputRole, NodeSignature,
+    NormalizedProgram, NoteAtom, OutputEndpoint, OutputNode, PatternIr, PortCountRule, PortGroupId,
+    PortMemberId, PreviewReport, Rational, RootRelation, RootSurfaceNodeKind, ScalarAtom,
+    StreamShape, StreamSource, StreamTarget, TesseraCompiler, TesseraProgram, TransformKind,
+    TransformNode, ValidationReport,
 };
 
 fn output_input(member: &str) -> InputEndpoint {
@@ -30,7 +31,7 @@ fn transform_without_main_input_is_rejected() {
         RootSurfaceNodeKind::Transform(TransformNode::new(TransformKind::Slow)),
     );
     let diagnostics = TesseraCompiler::new()
-        .validate(&TesseraProgram {
+        .validate_explicit(&TesseraProgram {
             root_nodes,
             containers: BTreeMap::new(),
             relations: vec![],
@@ -133,78 +134,12 @@ fn node_signature_rejects_socket_group_name_collision() {
 }
 
 #[test]
-fn note_adjacent_scalar_binds_absolute_octave() {
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        ContainerId::new("phrase"),
-        Container {
-            kind: ContainerKind::Sequence,
-            axis: ContainerAxis::Time,
-            stack: vec![
-                ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new("e"))),
-                ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(3))),
-            ],
-        },
-    );
-
-    let normalized = TesseraCompiler::new()
-        .normalize(&TesseraProgram {
-            root_nodes: BTreeMap::new(),
-            containers,
-            relations: vec![],
-        })
-        .expect("program should normalize");
-    let normalized = normalized
-        .containers
-        .get(&ContainerId::new("phrase"))
-        .expect("container should exist");
-
-    match &normalized.exprs[0].kind {
-        AtomExprKind::Value(MusicalValue::Note(note)) => {
-            assert_eq!(note.value, "e".into());
-            assert_eq!(note.octave, Some(3));
-        }
-        other => panic!("expected octave-bound note, got {other:?}"),
-    }
-}
-
-#[test]
-fn multiple_adjacent_scalars_after_note_are_ambiguous() {
-    let mut containers = BTreeMap::new();
-    containers.insert(
-        ContainerId::new("phrase"),
-        Container {
-            kind: ContainerKind::Sequence,
-            axis: ContainerAxis::Time,
-            stack: vec![
-                ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new("e"))),
-                ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
-                ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(1))),
-            ],
-        },
-    );
-
-    let diagnostics = TesseraCompiler::new()
-        .normalize(&TesseraProgram {
-            root_nodes: BTreeMap::new(),
-            containers,
-            relations: vec![],
-        })
-        .expect_err("ambiguous octave binding should fail");
-
-    assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.kind == DiagnosticKind::AmbiguousOctaveBinding)
-    );
-}
-
-#[test]
 fn normalization_preserves_nested_ids_and_broad_modifiers() {
     let mut containers = BTreeMap::new();
     containers.insert(
         ContainerId::new("child"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -215,6 +150,7 @@ fn normalization_preserves_nested_ids_and_broad_modifiers() {
     containers.insert(
         ContainerId::new("parent"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -230,7 +166,7 @@ fn normalization_preserves_nested_ids_and_broad_modifiers() {
     );
 
     let normalized = TesseraCompiler::new()
-        .normalize(&TesseraProgram {
+        .normalize_explicit(&TesseraProgram {
             root_nodes: BTreeMap::new(),
             containers,
             relations: vec![],
@@ -262,6 +198,7 @@ fn scalar_only_stream_is_rejected_by_default_output() {
     containers.insert(
         ContainerId::new("control"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -281,7 +218,7 @@ fn scalar_only_stream_is_rejected_by_default_output() {
     );
 
     let diagnostics = TesseraCompiler::new()
-        .validate(&TesseraProgram {
+        .validate_explicit(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![RootRelation::FlowsTo {
@@ -307,6 +244,7 @@ fn normalized_shape_inference_tracks_scalar_nested_choice_and_parallel_container
     containers.insert(
         ContainerId::new("scalar_child"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -317,6 +255,7 @@ fn normalized_shape_inference_tracks_scalar_nested_choice_and_parallel_container
     containers.insert(
         ContainerId::new("nested_scalar"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::NestedContainer(ContainerId::new(
@@ -327,6 +266,7 @@ fn normalized_shape_inference_tracks_scalar_nested_choice_and_parallel_container
     containers.insert(
         ContainerId::new("choice_scalar"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -339,6 +279,7 @@ fn normalized_shape_inference_tracks_scalar_nested_choice_and_parallel_container
     containers.insert(
         ContainerId::new("parallel_scalar"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -350,7 +291,7 @@ fn normalized_shape_inference_tracks_scalar_nested_choice_and_parallel_container
     );
 
     let normalized = TesseraCompiler::new()
-        .normalize(&TesseraProgram {
+        .normalize_explicit(&TesseraProgram {
             root_nodes: BTreeMap::new(),
             containers,
             relations: vec![],
@@ -396,6 +337,7 @@ fn compile_program_supports_aux_stream_modulation_and_output_collection() {
         containers.insert(
             ContainerId::new(id),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(tile)],
@@ -411,6 +353,7 @@ fn compile_program_supports_aux_stream_modulation_and_output_collection() {
     containers.insert(
         ContainerId::new("mod"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -491,7 +434,7 @@ fn compile_program_supports_aux_stream_modulation_and_output_collection() {
     };
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&program)
+        .compile_explicit_ir(&program)
         .expect("program should compile");
     let events = ir.outputs[0].events();
     assert_eq!(events.len(), 3);
@@ -515,6 +458,7 @@ fn diagnostics_carry_locations() {
     containers.insert(
         ContainerId::new("bad"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Transform],
@@ -529,7 +473,7 @@ fn diagnostics_carry_locations() {
     );
 
     let diagnostics = TesseraCompiler::new()
-        .validate(&TesseraProgram {
+        .validate_explicit(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![],
@@ -546,8 +490,9 @@ fn endpoint_diagnostics_name_unknown_input_socket() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -556,9 +501,9 @@ fn endpoint_diagnostics_name_unknown_input_socket() {
         },
     );
     root_nodes.insert(
-        NodeId::new("phrase"),
+        NodeId::new("pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     root_nodes.insert(
@@ -567,11 +512,11 @@ fn endpoint_diagnostics_name_unknown_input_socket() {
     );
 
     let diagnostics = TesseraCompiler::new()
-        .validate(&TesseraProgram {
+        .validate_explicit(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![RootRelation::FlowsTo {
-                from: StreamSource::node(NodeId::new("phrase")),
+                from: StreamSource::node(NodeId::new("pattern")),
                 to: StreamTarget::TransformInput {
                     node: NodeId::new("slow"),
                     endpoint: InputEndpoint::Socket(InputPort::new("not-real")),
@@ -594,8 +539,9 @@ fn unknown_input_group_member_is_rejected() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -604,9 +550,9 @@ fn unknown_input_group_member_is_rejected() {
         },
     );
     root_nodes.insert(
-        NodeId::new("phrase"),
+        NodeId::new("pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     root_nodes.insert(
@@ -615,11 +561,11 @@ fn unknown_input_group_member_is_rejected() {
     );
 
     let diagnostics = TesseraCompiler::new()
-        .validate(&TesseraProgram {
+        .validate_explicit(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![RootRelation::FlowsTo {
-                from: StreamSource::node(NodeId::new("phrase")),
+                from: StreamSource::node(NodeId::new("pattern")),
                 to: StreamTarget::FlowControlInput {
                     node: NodeId::new("layer"),
                     endpoint: InputEndpoint::GroupMember {
@@ -645,6 +591,7 @@ fn fast_zero_factor_is_diagnostic() {
     containers.insert(
         ContainerId::new("main"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -655,6 +602,7 @@ fn fast_zero_factor_is_diagnostic() {
     containers.insert(
         ContainerId::new("zero"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -684,7 +632,7 @@ fn fast_zero_factor_is_diagnostic() {
     );
 
     let diagnostics = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -727,6 +675,7 @@ fn flow_control_group_bindings_preserve_target_members() {
     containers.insert(
         ContainerId::new("a"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -737,6 +686,7 @@ fn flow_control_group_bindings_preserve_target_members() {
     containers.insert(
         ContainerId::new("b"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -766,7 +716,7 @@ fn flow_control_group_bindings_preserve_target_members() {
     );
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -821,8 +771,9 @@ fn public_api_compiles_simple_program() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -833,7 +784,7 @@ fn public_api_compiles_simple_program() {
     root_nodes.insert(
         NodeId::new("a"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     root_nodes.insert(
@@ -855,7 +806,9 @@ fn public_api_compiles_simple_program() {
         }],
     };
     let compiler = TesseraCompiler::new();
-    let report = compiler.compile(&program).expect("program should compile");
+    let report = compiler
+        .compile_explicit(&program)
+        .expect("program should compile");
     assert_eq!(report.ir.outputs.len(), 1);
 }
 
@@ -874,13 +827,13 @@ fn public_api_validation_report_returns_diagnostics() {
         relations: vec![],
     };
     let compiler = TesseraCompiler::new();
-    let report = compiler.validate(&program);
+    let report = compiler.validate_explicit(&program);
     assert!(report.is_invalid());
     assert!(!report.diagnostics.is_empty());
 }
 
 #[test]
-fn public_api_compile_ir_returns_ir_without_exposing_pipeline() {
+fn authored_compile_report_exposes_ir() {
     use tessera::prelude::*;
 
     let mut root_nodes = BTreeMap::new();
@@ -894,7 +847,7 @@ fn public_api_compile_ir_returns_ir_without_exposing_pipeline() {
         relations: vec![],
     };
     let compiler = TesseraCompiler::new();
-    let result = compiler.compile_ir(&program);
+    let result = compiler.compile_explicit_ir(&program);
     assert!(result.is_err());
 }
 
@@ -906,6 +859,7 @@ fn preview_alternate_respects_cycle_index() {
     containers.insert(
         ContainerId::new("alt"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Alternate,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -927,16 +881,16 @@ fn preview_alternate_respects_cycle_index() {
     };
     let note_at = |cycle_index: usize| {
         compiler
-            .preview_container(&program, ContainerId::new("alt"), span, cycle_index)
+            .preview_explicit_container(&program, ContainerId::new("alt"), span, cycle_index)
             .expect("preview should compile")
             .stream
             .events[0]
             .value
             .clone()
     };
-    assert!(matches!(note_at(0), EventValue::Note { value, .. } if value.to_string() == "a"));
-    assert!(matches!(note_at(1), EventValue::Note { value, .. } if value.to_string() == "b"));
-    assert!(matches!(note_at(2), EventValue::Note { value, .. } if value.to_string() == "c"));
+    assert!(matches!(note_at(0), EventValue::Note { value, .. } if value == "a"));
+    assert!(matches!(note_at(1), EventValue::Note { value, .. } if value == "b"));
+    assert!(matches!(note_at(2), EventValue::Note { value, .. } if value == "c"));
 }
 
 #[test]
@@ -947,6 +901,7 @@ fn preview_choice_expr_respects_cycle_index() {
     containers.insert(
         ContainerId::new("pick"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -970,16 +925,16 @@ fn preview_choice_expr_respects_cycle_index() {
     };
     let note_at = |cycle_index: usize| {
         compiler
-            .preview_container(&program, ContainerId::new("pick"), span, cycle_index)
+            .preview_explicit_container(&program, ContainerId::new("pick"), span, cycle_index)
             .expect("preview should compile")
             .stream
             .events[0]
             .value
             .clone()
     };
-    assert!(matches!(note_at(0), EventValue::Note { value, .. } if value.to_string() == "a"));
-    assert!(matches!(note_at(1), EventValue::Note { value, .. } if value.to_string() == "b"));
-    assert!(matches!(note_at(2), EventValue::Note { value, .. } if value.to_string() == "c"));
+    assert!(matches!(note_at(0), EventValue::Note { value, .. } if value == "a"));
+    assert!(matches!(note_at(1), EventValue::Note { value, .. } if value == "b"));
+    assert!(matches!(note_at(2), EventValue::Note { value, .. } if value == "c"));
 }
 
 #[test]
@@ -988,8 +943,9 @@ fn public_api_preview_container_uses_program_context() {
 
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1004,9 +960,9 @@ fn public_api_preview_container_uses_program_context() {
     };
     let compiler = TesseraCompiler::new();
     let report = compiler
-        .preview_container(
+        .preview_explicit_container(
             &program,
-            ContainerId::new("phrase"),
+            ContainerId::new("pattern"),
             CycleSpan {
                 start: CycleTime(Rational::zero()),
                 duration: CycleDuration(Rational::one()),
@@ -1017,7 +973,7 @@ fn public_api_preview_container_uses_program_context() {
     assert_eq!(report.stream.events.len(), 1);
 
     let diagnostics = compiler
-        .preview_container(
+        .preview_explicit_container(
             &program,
             ContainerId::new("missing"),
             CycleSpan {
@@ -1040,8 +996,9 @@ fn sequence_elongate_weights_slot_durations() {
 
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -1062,7 +1019,7 @@ fn sequence_elongate_weights_slot_durations() {
         duration: CycleDuration(Rational::one()),
     };
     let events = TesseraCompiler::new()
-        .preview_container(&program, ContainerId::new("phrase"), span, 0)
+        .preview_explicit_container(&program, ContainerId::new("pattern"), span, 0)
         .expect("preview should compile")
         .stream
         .events;
@@ -1077,8 +1034,9 @@ fn invalid_note_label_emits_container_stack_diagnostic() {
 
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1087,7 +1045,7 @@ fn invalid_note_label_emits_container_stack_diagnostic() {
         },
     );
     let diagnostics = TesseraCompiler::new()
-        .normalize(&TesseraProgram {
+        .normalize_explicit(&TesseraProgram {
             root_nodes: BTreeMap::new(),
             containers,
             relations: vec![],
@@ -1105,12 +1063,13 @@ fn invalid_note_label_emits_container_stack_diagnostic() {
 }
 
 #[test]
-fn atom_degrade_filters_events_transform_degrade_annotates_field() {
+fn atom_and_transform_degrade_preserve_the_same_recursive_policy() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
         ContainerId::new("atom"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -1130,7 +1089,7 @@ fn atom_degrade_filters_events_transform_degrade_annotates_field() {
         RootSurfaceNodeKind::Output(OutputNode::default()),
     );
     let atom_ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes: root_nodes.clone(),
             containers: containers.clone(),
             relations: vec![RootRelation::FlowsTo {
@@ -1147,6 +1106,7 @@ fn atom_degrade_filters_events_transform_degrade_annotates_field() {
     containers.insert(
         ContainerId::new("main"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1165,7 +1125,7 @@ fn atom_degrade_filters_events_transform_degrade_annotates_field() {
         RootSurfaceNodeKind::Transform(TransformNode::new(TransformKind::Degrade)),
     );
     let transform_ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -1187,13 +1147,10 @@ fn atom_degrade_filters_events_transform_degrade_annotates_field() {
         })
         .expect("transform degrade should compile");
     let transform_events = transform_ir.outputs[0].events();
-    assert!(atom_events < transform_events.len() || transform_events.len() == 1);
-    assert!(transform_events.iter().all(|event| {
-        event
-            .fields
-            .iter()
-            .any(|field| matches!(field, EventField::Degrade(_)))
-    }));
+    assert_eq!(atom_events, transform_events.len());
+    assert!(matches!(&transform_ir.outputs[0].root,
+        tessera::prelude::PatternNodeIr::Degrade { keep_probability, .. }
+        if *keep_probability == Rational::new(1, 2)));
 }
 
 #[test]
@@ -1207,6 +1164,7 @@ fn chained_to_after_transform_uses_transformed_duration() {
         containers.insert(
             ContainerId::new(id),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(tile)],
@@ -1222,6 +1180,7 @@ fn chained_to_after_transform_uses_transformed_duration() {
     containers.insert(
         ContainerId::new("factor"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -1245,7 +1204,7 @@ fn chained_to_after_transform_uses_transformed_duration() {
     );
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -1288,8 +1247,9 @@ fn split_outputs_are_endpoint_addressed() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -1299,9 +1259,9 @@ fn split_outputs_are_endpoint_addressed() {
         },
     );
     root_nodes.insert(
-        NodeId::new("phrase"),
+        NodeId::new("pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     root_nodes.insert(
@@ -1318,7 +1278,7 @@ fn split_outputs_are_endpoint_addressed() {
         containers,
         relations: vec![
             RootRelation::FlowsTo {
-                from: StreamSource::node(NodeId::new("phrase")),
+                from: StreamSource::node(NodeId::new("pattern")),
                 to: StreamTarget::FlowControlInput {
                     node: NodeId::new("split"),
                     endpoint: transform_input("main"),
@@ -1354,7 +1314,7 @@ fn split_outputs_are_endpoint_addressed() {
     };
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&program)
+        .compile_explicit_ir(&program)
         .expect("split program should compile");
     assert_eq!(ir.outputs[0].events().len(), 2);
 }
@@ -1367,6 +1327,7 @@ fn flow_control_layer_compiles_and_normalized_entrypoint_matches() {
         containers.insert(
             ContainerId::new(id),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1425,7 +1386,7 @@ fn flow_control_layer_compiles_and_normalized_entrypoint_matches() {
     };
 
     let report = TesseraCompiler::new()
-        .compile(&program)
+        .compile_explicit(&program)
         .expect("program should compile");
     assert_eq!(report.normalized.containers.len(), 2);
     assert_eq!(report.ir.outputs[0].events().len(), 2);
@@ -1439,6 +1400,7 @@ fn merge_append_chains_streams_sequentially() {
         containers.insert(
             ContainerId::new(id),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1466,7 +1428,7 @@ fn merge_append_chains_streams_sequentially() {
     );
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -1513,6 +1475,7 @@ fn mask_scale_adds_gain_from_mask_stream() {
     containers.insert(
         ContainerId::new("main"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1523,6 +1486,7 @@ fn mask_scale_adds_gain_from_mask_stream() {
     containers.insert(
         ContainerId::new("mask"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -1554,7 +1518,7 @@ fn mask_scale_adds_gain_from_mask_stream() {
     );
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -1598,8 +1562,9 @@ fn route_by_label_partitions_named_note_streams() {
     let mut root_nodes = BTreeMap::new();
     let mut containers = BTreeMap::new();
     containers.insert(
-        ContainerId::new("phrase"),
+        ContainerId::new("pattern"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![
@@ -1609,9 +1574,9 @@ fn route_by_label_partitions_named_note_streams() {
         },
     );
     root_nodes.insert(
-        NodeId::new("phrase"),
+        NodeId::new("pattern"),
         RootSurfaceNodeKind::Container {
-            container: ContainerId::new("phrase"),
+            container: ContainerId::new("pattern"),
         },
     );
     let mut route =
@@ -1630,12 +1595,12 @@ fn route_by_label_partitions_named_note_streams() {
     );
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
                 RootRelation::FlowsTo {
-                    from: StreamSource::node(NodeId::new("phrase")),
+                    from: StreamSource::node(NodeId::new("pattern")),
                     to: StreamTarget::FlowControlInput {
                         node: NodeId::new("route"),
                         endpoint: transform_input("main"),
@@ -1682,6 +1647,7 @@ fn switch_control_value_selects_candidate_index() {
         containers.insert(
             ContainerId::new(id),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
@@ -1699,6 +1665,7 @@ fn switch_control_value_selects_candidate_index() {
     containers.insert(
         ContainerId::new("ctrl"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -1725,7 +1692,7 @@ fn switch_control_value_selects_candidate_index() {
     );
 
     let ir = TesseraCompiler::new()
-        .compile_ir(&TesseraProgram {
+        .compile_explicit_ir(&TesseraProgram {
             root_nodes,
             containers,
             relations: vec![
@@ -1771,5 +1738,65 @@ fn switch_control_value_selects_candidate_index() {
     match &events[0].value {
         EventValue::Note { value, .. } => assert_eq!(value, "b"),
         other => panic!("expected note event, got {other:?}"),
+    }
+}
+#[path = "support/compiler.rs"]
+mod compiler_support;
+use compiler_support::authored;
+
+trait ExplicitProgramTestAssertions {
+    fn compile_explicit(&self, program: &TesseraProgram) -> Result<CompileReport, Vec<Diagnostic>>;
+
+    fn compile_explicit_ir(&self, program: &TesseraProgram) -> Result<PatternIr, Vec<Diagnostic>>;
+
+    fn validate_explicit(&self, program: &TesseraProgram) -> ValidationReport;
+
+    fn normalize_explicit(
+        &self,
+        program: &TesseraProgram,
+    ) -> Result<NormalizedProgram, Vec<Diagnostic>>;
+
+    fn preview_explicit_container(
+        &self,
+        program: &TesseraProgram,
+        container_id: ContainerId,
+        span: CycleSpan,
+        cycle_index: usize,
+    ) -> Result<PreviewReport, Vec<Diagnostic>>;
+}
+
+impl ExplicitProgramTestAssertions for TesseraCompiler {
+    fn compile_explicit(&self, program: &TesseraProgram) -> Result<CompileReport, Vec<Diagnostic>> {
+        self.compile_authored(&authored(program))
+    }
+
+    fn compile_explicit_ir(&self, program: &TesseraProgram) -> Result<PatternIr, Vec<Diagnostic>> {
+        self.compile_authored(&authored(program))
+            .map(|report| report.ir)
+    }
+
+    fn validate_explicit(&self, program: &TesseraProgram) -> ValidationReport {
+        self.validate_authored(&authored(program))
+    }
+
+    fn normalize_explicit(
+        &self,
+        program: &TesseraProgram,
+    ) -> Result<NormalizedProgram, Vec<Diagnostic>> {
+        let report = self.validate_authored(&authored(program));
+        match report.normalized {
+            Some(normalized) if report.diagnostics.is_empty() => Ok(normalized),
+            _ => Err(report.diagnostics),
+        }
+    }
+
+    fn preview_explicit_container(
+        &self,
+        program: &TesseraProgram,
+        container_id: ContainerId,
+        span: CycleSpan,
+        cycle_index: usize,
+    ) -> Result<PreviewReport, Vec<Diagnostic>> {
+        self.preview_authored_container(&authored(program), container_id, span, cycle_index)
     }
 }

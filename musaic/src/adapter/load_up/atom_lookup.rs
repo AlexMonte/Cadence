@@ -15,11 +15,18 @@ impl AtomTileAssets {
             AtomValue::NoteName(NoteName::F) => &self.note_f,
             AtomValue::NoteName(NoteName::G) => &self.note_g,
             AtomValue::Rest => &self.note_silence,
+            // Named hits use the board's compact text glyph rather than a
+            // pitch-specific atlas image.
+            AtomValue::DrumHit(_) => return None,
             AtomValue::Accidental(Accidental::Sharp) => &self.accidental_sharp,
             AtomValue::Accidental(Accidental::Flat) => &self.accidental_flat,
             AtomValue::Accidental(Accidental::Natural) => &self.note_silence,
             AtomValue::Octave(o) => self.scalar_for_octave(*o)?,
             AtomValue::Number(n) => self.scalar_for_number(*n)?,
+            // Ratios use the compact mesh glyph path because arbitrary
+            // numerator/denominator pairs do not fit a finite raster atlas.
+            AtomValue::Ratio(_) | AtomValue::Modifier(_) => return None,
+            AtomValue::Operator(OperatorValue::Choice | OperatorValue::Parallel) => return None,
             AtomValue::Operator(OperatorValue::Power) => &self.operator_replication,
             AtomValue::Operator(OperatorValue::At) => &self.operator_elongation,
             AtomValue::Operator(OperatorValue::Multiply) => &self.operator_multiply,

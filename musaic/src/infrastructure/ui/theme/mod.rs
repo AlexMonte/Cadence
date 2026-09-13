@@ -15,7 +15,7 @@ pub(crate) use motion::{
     UiInspectorBody, UiInspectorHeader, UiInspectorViewport, drive_inspector_slides,
     finish_active_slides,
 };
-pub use semantic::{ArtistPalette, SemanticColors, atom_value_color};
+pub use semantic::SemanticColors;
 
 /// Canonical Musaic UI theme resource.
 #[derive(Resource, Debug, Clone)]
@@ -31,14 +31,15 @@ pub struct MusaicUiTheme {
 
 impl MusaicUiTheme {
     pub fn default_dark() -> Self {
+        let semantic = SemanticColors::artist_default();
         Self {
             spacing: SpacingScale::default_dark(),
             radii: RadiiScale::default_dark(),
             typography: TypeScale::default_dark(),
             chrome: ChromeColors::default_dark(),
-            semantic: SemanticColors::artist_default(),
+            semantic,
             motion: MotionTokens::default_dark(),
-            board: BoardMaterialColors::default_dark(),
+            board: BoardMaterialColors::from_semantic(semantic),
         }
     }
 }
@@ -69,9 +70,9 @@ impl SpacingScale {
             md: 8.0,
             lg: 12.0,
             xl: 16.0,
-            panel_gap: 12.0,
-            shell_padding: 10.0,
-            panel_padding: 14.0,
+            panel_gap: 1.0,
+            shell_padding: 0.0,
+            panel_padding: 16.0,
         }
     }
 }
@@ -140,30 +141,31 @@ pub struct ChromeColors {
 }
 
 impl ChromeColors {
+    /// The approved paper, forest and brass editor palette.
     pub const fn default_dark() -> Self {
         Self {
-            window_bg: Color::srgb(0.08, 0.09, 0.12),
-            panel_bg: Color::srgb(0.14, 0.15, 0.19),
-            panel_inset: Color::srgb(0.10, 0.11, 0.14),
-            section_tint: Color::srgb(0.19, 0.20, 0.25),
-            border: Color::srgba(0.35, 0.38, 0.45, 1.0),
-            button_bg: Color::srgba(0.22, 0.24, 0.30, 1.0),
-            button_border: Color::srgba(0.40, 0.43, 0.50, 1.0),
-            overlay_scrim: Color::srgba(0.0, 0.0, 0.0, 0.55),
-            accent: Color::srgb(0.18, 0.75, 0.85),
-            danger: Color::srgb(0.85, 0.28, 0.28),
-            playhead: Color::srgba(1.0, 0.85, 0.2, 0.9),
-            edge_handle: Color::srgba(0.72, 0.76, 0.82, 0.85),
-            edge_handle_idle: Color::srgba(0.35, 0.40, 0.50, 0.22),
-            edge_handle_active: Color::srgba(0.35, 0.40, 0.50, 0.15),
-            diagnostics_bg: Color::srgba(0.1, 0.1, 0.12, 0.85),
-            crumb_active_text: Color::srgb(0.13, 0.14, 0.18),
-            crumb_selected_bg: Color::srgba(1.0, 1.0, 1.0, 0.14),
-            text_main: Color::srgb(1.0, 1.0, 1.0),
-            text_dim: Color::srgb(0.70, 0.72, 0.76),
-            board_clear: Color::srgb(0.11, 0.12, 0.15),
-            palette_clear: Color::srgb(0.10, 0.11, 0.14),
-            palette_fallback_tile: Color::srgb(0.22, 0.24, 0.30),
+            window_bg: Color::srgb(0.961, 0.957, 0.941),
+            panel_bg: Color::WHITE,
+            panel_inset: Color::srgb(0.937, 0.937, 0.918),
+            section_tint: Color::srgb(0.961, 0.957, 0.941),
+            border: Color::srgb(0.863, 0.882, 0.851),
+            button_bg: Color::WHITE,
+            button_border: Color::srgb(0.863, 0.882, 0.851),
+            overlay_scrim: Color::srgba(0.10, 0.14, 0.12, 0.45),
+            accent: Color::srgb(0.157, 0.420, 0.310),
+            danger: Color::srgb(0.67, 0.25, 0.22),
+            playhead: Color::srgb(0.157, 0.420, 0.310),
+            edge_handle: Color::srgba(0.39, 0.44, 0.42, 0.7),
+            edge_handle_idle: Color::srgba(0.39, 0.44, 0.42, 0.14),
+            edge_handle_active: Color::srgba(0.16, 0.42, 0.31, 0.3),
+            diagnostics_bg: Color::srgb(0.961, 0.957, 0.941),
+            crumb_active_text: Color::srgb(0.157, 0.420, 0.310),
+            crumb_selected_bg: Color::srgb(0.886, 0.933, 0.898),
+            text_main: Color::srgb(0.153, 0.200, 0.184),
+            text_dim: Color::srgb(0.396, 0.443, 0.416),
+            board_clear: Color::srgb(0.961, 0.957, 0.941),
+            palette_clear: Color::srgb(0.961, 0.957, 0.941),
+            palette_fallback_tile: Color::srgb(0.886, 0.933, 0.898),
         }
     }
 }
@@ -189,23 +191,28 @@ pub struct BoardMaterialColors {
 }
 
 impl BoardMaterialColors {
-    pub const fn default_dark() -> Self {
+    /// Board PBR fallbacks share semantic artist colors so 3D and 2D chrome match.
+    pub const fn from_semantic(semantic: SemanticColors) -> Self {
         Self {
-            board: Color::srgb(0.10, 0.105, 0.13),
-            grid_line: Color::srgb(0.28, 0.31, 0.38),
-            container: Color::srgb(0.29, 0.36, 0.52),
-            atom: Color::srgb(0.22, 0.48, 0.34),
-            output: Color::srgb(0.61, 0.42, 0.18),
-            trick: Color::srgb(0.45, 0.32, 0.60),
-            generic: Color::srgb(0.38, 0.40, 0.46),
-            selected: Color::srgb(0.95, 0.78, 0.22),
-            focused: Color::srgb(0.18, 0.75, 0.85),
-            locked_slot: Color::srgb(0.05, 0.055, 0.07),
-            connection_scalar: Color::srgb(0.20, 0.78, 0.92),
-            connection_control: Color::srgb(0.95, 0.55, 0.18),
-            connection_preview: Color::srgba(0.55, 0.85, 1.0, 0.45),
+            board: Color::srgb(0.925, 0.933, 0.914),
+            grid_line: Color::srgb(0.843, 0.863, 0.831),
+            container: semantic.container,
+            atom: semantic.atom_operator,
+            output: semantic.output,
+            trick: semantic.flow_control,
+            generic: semantic.transform_generic,
+            selected: semantic.focus_accent,
+            focused: semantic.focus_accent,
+            locked_slot: Color::srgb(0.925, 0.933, 0.906),
+            connection_scalar: semantic.flow_scalar,
+            connection_control: semantic.flow_control,
+            connection_preview: semantic.flow_control,
             drag_preview: Color::srgba(0.86, 0.90, 0.98, 0.55),
-            gltf_fallback: Color::srgb(0.5, 0.4, 0.3),
+            gltf_fallback: semantic.transform_generic,
         }
+    }
+
+    pub const fn default_dark() -> Self {
+        Self::from_semantic(SemanticColors::artist_default())
     }
 }

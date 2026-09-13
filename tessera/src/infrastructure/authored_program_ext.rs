@@ -95,6 +95,7 @@ impl AuthoredTesseraProgramExt for AuthoredTesseraProgram {
         self.containers.insert(
             container_id.clone(),
             Container {
+                source_nodes: Default::default(),
                 kind,
                 axis: crate::domain::ContainerAxis::Time,
                 stack,
@@ -291,6 +292,9 @@ impl AuthoredTesseraProgramExt for Board {
         match kind {
             ContainerKind::Sequence => {
                 slot_builder.sequence(stack).expect("place sequence");
+            }
+            ContainerKind::Arrangement => {
+                slot_builder.arrangement(stack).expect("place arrangement");
             }
             ContainerKind::Alternate => {
                 slot_builder.alternate(stack).expect("place alternate");

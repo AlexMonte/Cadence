@@ -1,8 +1,7 @@
 use crate::domain::{
     AtomExpr, AtomExprKind, AtomModifier, AtomOperatorToken, AtomTile, ContainerId, ContainerKind,
     ContainerSurfaceTile, Diagnostic, DiagnosticCategory, DiagnosticKind, DiagnosticLocation,
-    MusicalValue, NormalizedContainer, NormalizedProgram, Rational, TesseraProgram,
-    try_parse_note_value,
+    NormalizedContainer, NormalizedProgram, TesseraProgram, try_parse_note_value,
 };
 
 pub fn normalize_container(
@@ -38,13 +37,18 @@ pub fn normalize_container(
         }
     }
 
-    if diagnostics.is_empty() && container.kind != ContainerKind::Sequence {
+    if diagnostics.is_empty()
+        && !matches!(
+            container.kind,
+            ContainerKind::Sequence | ContainerKind::Arrangement
+        )
+    {
         for (index, expr) in exprs.iter().enumerate() {
             if expr_contains_elongate(expr) {
                 diagnostics.push(Diagnostic::new(
                     DiagnosticCategory::LocalGrammar,
                     DiagnosticKind::InvalidModifierArgument,
-                    "Elongate is only valid inside sequence containers where it weights slot duration.",
+                    "Elongate is valid inside Sequence as a slot weight, or Arrangement as a duration in cycles.",
                     Some(DiagnosticLocation::ContainerStack {
                         container: container_id.clone(),
                         index,
@@ -72,10 +76,7 @@ fn parse_atom_expr(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<AtomExpr> {
     let mut expr = parse_simple_expr(program, container_id, stack, index, diagnostics)?;
-    loop {
-        let Some(ContainerSurfaceTile::Atom(AtomTile::Operator(token))) = stack.get(*index) else {
-            break;
-        };
+    while let Some(ContainerSurfaceTile::Atom(AtomTile::Operator(token))) = stack.get(*index) {
         let group_kind = match token {
             AtomOperatorToken::Choice => Some(AtomExprKind::Choice(Vec::new())),
             AtomOperatorToken::Parallel => Some(AtomExprKind::Parallel(Vec::new())),
@@ -112,6 +113,7 @@ fn parse_atom_expr(
         while matches!(
             stack.get(*index),
             Some(ContainerSurfaceTile::Atom(AtomTile::Note(_)))
+                | Some(ContainerSurfaceTile::Atom(AtomTile::Sound(_)))
                 | Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(_)))
                 | Some(ContainerSurfaceTile::Atom(AtomTile::Rest))
                 | Some(ContainerSurfaceTile::NestedContainer(_))
@@ -130,6 +132,7 @@ fn parse_atom_expr(
             _ => unreachable!(),
         };
         expr = AtomExpr {
+            source_node: None,
             kind: group_kind,
             modifiers: Vec::new(),
         };
@@ -144,179 +147,136 @@ fn parse_simple_expr(
     index: &mut usize,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<AtomExpr> {
-    let position = *index;
-    let location = || DiagnosticLocation::ContainerStack {
-        container: container_id.clone(),
-        index: position,
+    use crate::domain::{StackCompound, StackPiece, StackReject};
+    let start = *index;
+    let mut pieces = Vec::new();
+    let error = |kind, message: &str| {
+        Diagnostic::new(
+            DiagnosticCategory::LocalGrammar,
+            kind,
+            message,
+            Some(DiagnosticLocation::ContainerStack {
+                container: container_id.clone(),
+                index: start,
+            }),
+        )
     };
-
-    let value = match stack.get(*index)? {
+    match stack.get(start)? {
         ContainerSurfaceTile::Atom(AtomTile::Note(note)) => {
-            let mut note = note.clone();
-            if !note.label.is_empty() && try_parse_note_value(&note.label).is_err() {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidNote,
-                    "Note label must be one of a, b, c, d, e, f, g.",
-                    Some(location()),
-                ));
+            if !note.label.is_empty() && try_parse_note_value(&note.label).is_none() {
+                diagnostics.push(error(DiagnosticKind::InvalidNote, "Note label must be one of a, b, c, d, e, f, g; accidentals have their own pitch role."));
                 *index += 1;
                 return None;
             }
-            if !note.label.is_empty() {
-                note.value = try_parse_note_value(&note.label).expect("validated above");
+            pieces.push(StackPiece::note(note.value.clone(), note.label.clone()));
+            if let Some(octave) = note.octave {
+                pieces.push(StackPiece::Octave(octave));
             }
-            if let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(octave))) =
-                stack.get(*index + 1)
-            {
-                if matches!(
-                    stack.get(*index + 2),
-                    Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(_)))
-                ) {
-                    diagnostics.push(Diagnostic::new(
-                        DiagnosticCategory::LocalGrammar,
-                        DiagnosticKind::AmbiguousOctaveBinding,
-                        "More than one scalar directly after a note is ambiguous.",
-                        Some(DiagnosticLocation::ContainerStack {
-                            container: container_id.clone(),
-                            index: *index + 1,
-                        }),
-                    ));
-                    while matches!(
-                        stack.get(*index + 1),
-                        Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(_)))
-                    ) {
-                        *index += 1;
-                    }
-                } else if octave.value.denominator == 1 {
-                    note.octave = Some(octave.value.numerator);
-                    *index += 1;
-                } else {
-                    diagnostics.push(Diagnostic::new(
-                        DiagnosticCategory::LocalGrammar,
-                        DiagnosticKind::AmbiguousOctaveBinding,
-                        "Octave binding requires an integer scalar directly after a note.",
-                        Some(DiagnosticLocation::ContainerStack {
-                            container: container_id.clone(),
-                            index: *index + 1,
-                        }),
-                    ));
-                    *index += 1;
-                }
+            if let Some(accidental) = note.accidental {
+                pieces.push(StackPiece::Accidental(accidental));
             }
-            MusicalValue::Note(note)
         }
-        ContainerSurfaceTile::Atom(AtomTile::Rest) => MusicalValue::Rest,
-        ContainerSurfaceTile::Atom(AtomTile::Scalar(scalar)) => {
-            MusicalValue::Scalar(scalar.clone())
+        ContainerSurfaceTile::Atom(AtomTile::Sound(value)) => {
+            pieces.push(StackPiece::Sound(value.clone()));
         }
-        ContainerSurfaceTile::NestedContainer(nested) => {
-            MusicalValue::NestedContainer(nested.clone())
+        ContainerSurfaceTile::Atom(AtomTile::Modifier(modifier))
+            if modifier.effect_value().is_some() =>
+        {
+            pieces.push(StackPiece::Modifier(modifier.clone()));
         }
-        ContainerSurfaceTile::Transform => {
-            diagnostics.push(Diagnostic::new(
-                DiagnosticCategory::Placement,
-                DiagnosticKind::TransformInsideContainer,
-                "Transform tiles cannot appear inside a container stack.",
-                Some(location()),
+        ContainerSurfaceTile::Atom(AtomTile::Rest) => pieces.push(StackPiece::Rest),
+        ContainerSurfaceTile::Atom(AtomTile::Scalar(value)) => {
+            pieces.push(StackPiece::Scalar(value.value))
+        }
+        ContainerSurfaceTile::NestedContainer(id) => pieces.push(StackPiece::Nested(id.clone())),
+        unexpected => {
+            let kind = match unexpected {
+                ContainerSurfaceTile::Transform => DiagnosticKind::TransformInsideContainer,
+                ContainerSurfaceTile::Output => DiagnosticKind::OutputInsideContainer,
+                _ => DiagnosticKind::OperatorWithoutLeftValue,
+            };
+            diagnostics.push(error(
+                kind,
+                "This tile needs a musical expression to own it.",
             ));
             *index += 1;
             return None;
         }
-        ContainerSurfaceTile::Output => {
-            diagnostics.push(Diagnostic::new(
-                DiagnosticCategory::Placement,
-                DiagnosticKind::OutputInsideContainer,
-                "Output tiles cannot appear inside a container stack.",
-                Some(location()),
-            ));
-            *index += 1;
-            return None;
-        }
-        ContainerSurfaceTile::Atom(AtomTile::Operator(_)) => {
-            diagnostics.push(Diagnostic::new(
-                DiagnosticCategory::LocalGrammar,
-                DiagnosticKind::OperatorWithoutLeftValue,
-                "An operator requires a musical value on its left.",
-                Some(location()),
-            ));
-            *index += 1;
-            return None;
-        }
-    };
-
+    }
     *index += 1;
-    let mut modifiers = Vec::new();
-    while *index < stack.len() {
-        let next_location = Some(DiagnosticLocation::ContainerStack {
-            container: container_id.clone(),
-            index: *index,
-        });
-        match &stack[*index] {
-            ContainerSurfaceTile::Atom(AtomTile::Operator(
-                AtomOperatorToken::Choice | AtomOperatorToken::Parallel,
-            )) => {
-                break;
+    loop {
+        match stack.get(*index) {
+            Some(ContainerSurfaceTile::Atom(AtomTile::Accidental(value))) => {
+                pieces.push(StackPiece::Accidental(*value));
+                *index += 1;
             }
-            ContainerSurfaceTile::Atom(AtomTile::Operator(token)) => match token {
-                AtomOperatorToken::Degrade => {
-                    if let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(scalar))) =
-                        stack.get(*index + 1)
-                    {
-                        if scalar.value < Rational::zero() || scalar.value > Rational::one() {
-                            diagnostics.push(Diagnostic::new(
-                                DiagnosticCategory::LocalGrammar,
-                                DiagnosticKind::InvalidModifierArgument,
-                                "Degrade probability must be within 0..=1.",
-                                next_location.clone(),
-                            ));
-                        }
-                        modifiers.push(AtomModifier::Degrade(Some(scalar.value)));
-                        *index += 2;
-                    } else {
-                        modifiers.push(AtomModifier::Degrade(None));
-                        *index += 1;
-                    }
+            Some(ContainerSurfaceTile::Atom(AtomTile::Octave(value))) => {
+                pieces.push(StackPiece::Octave(*value));
+                *index += 1;
+            }
+            Some(ContainerSurfaceTile::Atom(AtomTile::Modifier(modifier))) => {
+                // Standalone complete effect values occupy successive time slots.
+                // Once a note owns the group, ordinary modifier stacking remains unchanged.
+                if matches!(pieces.first(), Some(StackPiece::Modifier(root)) if root.effect_value().is_some())
+                    && modifier.effect_value().is_some()
+                {
+                    break;
                 }
-                AtomOperatorToken::Fast
-                | AtomOperatorToken::Slow
-                | AtomOperatorToken::Elongate
-                | AtomOperatorToken::Replicate
-                | AtomOperatorToken::Euclid
-                | AtomOperatorToken::EuclidRot => {
-                    let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(scalar))) =
-                        stack.get(*index + 1)
+                pieces.push(StackPiece::Modifier(modifier.clone()));
+                *index += 1;
+            }
+            Some(ContainerSurfaceTile::Atom(AtomTile::Operator(
+                AtomOperatorToken::Choice | AtomOperatorToken::Parallel,
+            ))) => break,
+            Some(ContainerSurfaceTile::Atom(AtomTile::Operator(operator))) => {
+                pieces.push(StackPiece::Operator(*operator));
+                *index += 1;
+                let count = match operator {
+                    AtomOperatorToken::Euclid => 2,
+                    AtomOperatorToken::EuclidRot => 3,
+                    _ => 1,
+                };
+                for _ in 0..count {
+                    let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(value))) =
+                        stack.get(*index)
                     else {
-                        diagnostics.push(Diagnostic::new(
-                            DiagnosticCategory::LocalGrammar,
-                            DiagnosticKind::OperatorWithoutRightScalar,
-                            "This modifier requires a scalar on its right.",
-                            next_location,
-                        ));
-                        *index += 1;
                         break;
                     };
-                    let modifier = build_modifier(
-                        token,
-                        scalar.value,
-                        stack,
-                        index,
-                        container_id,
-                        diagnostics,
-                    );
-                    modifiers.push(modifier);
+                    pieces.push(StackPiece::Scalar(value.value));
+                    *index += 1;
                 }
-                AtomOperatorToken::Choice | AtomOperatorToken::Parallel => unreachable!(),
-            },
-            ContainerSurfaceTile::Atom(AtomTile::Scalar(_)) => break,
+            }
             _ => break,
         }
     }
-
-    Some(AtomExpr {
-        kind: AtomExprKind::Value(value),
-        modifiers,
-    })
+    match StackCompound::from_layers(pieces).resolve() {
+        Ok(mut expr) => {
+            expr.source_node = _program
+                .containers
+                .get(container_id)
+                .and_then(|container| container.source_nodes.get(&start))
+                .cloned();
+            Some(expr)
+        }
+        Err(reject) => {
+            let (kind, message) = match reject {
+                StackReject::MissingModifierArgument { .. } => (
+                    DiagnosticKind::OperatorWithoutRightScalar,
+                    "This modifier owns a missing operand; add its value without taking another group's number.",
+                ),
+                StackReject::UnassignedScalar { .. } | StackReject::DuplicateOctave => (
+                    DiagnosticKind::InvalidModifierArgument,
+                    "Numbers must be independent values or operands owned by a modifier; a note accepts at most one octave tile.",
+                ),
+                _ => (
+                    DiagnosticKind::InvalidModifierArgument,
+                    "This stack has an invalid pitch or modifier group.",
+                ),
+            };
+            diagnostics.push(error(kind, message));
+            None
+        }
+    }
 }
 
 fn expr_contains_elongate(expr: &AtomExpr) -> bool {
@@ -333,163 +293,6 @@ fn expr_contains_elongate(expr: &AtomExpr) -> bool {
         }
         AtomExprKind::Value(_) => false,
     }
-}
-
-fn build_modifier(
-    token: &AtomOperatorToken,
-    scalar: Rational,
-    stack: &[ContainerSurfaceTile],
-    index: &mut usize,
-    container_id: &ContainerId,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> AtomModifier {
-    let next_location = Some(DiagnosticLocation::ContainerStack {
-        container: container_id.clone(),
-        index: *index,
-    });
-    let modifier = match token {
-        AtomOperatorToken::Fast => {
-            if scalar <= Rational::zero() {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidModifierArgument,
-                    "Fast expects a positive non-zero rational factor.",
-                    next_location.clone(),
-                ));
-            }
-            *index += 2;
-            AtomModifier::Fast(scalar)
-        }
-        AtomOperatorToken::Slow => {
-            if scalar <= Rational::zero() {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidModifierArgument,
-                    "Slow expects a positive non-zero rational factor.",
-                    next_location.clone(),
-                ));
-            }
-            *index += 2;
-            AtomModifier::Slow(scalar)
-        }
-        AtomOperatorToken::Elongate => {
-            if scalar <= Rational::zero() {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidModifierArgument,
-                    "Elongate expects a positive non-zero rational weight.",
-                    next_location.clone(),
-                ));
-            }
-            *index += 2;
-            AtomModifier::Elongate(scalar)
-        }
-        AtomOperatorToken::Replicate => {
-            *index += 2;
-            if scalar.denominator != 1 || scalar.numerator < 1 {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidModifierArgument,
-                    "Replicate expects a positive integer scalar.",
-                    next_location,
-                ));
-                AtomModifier::Replicate(1)
-            } else {
-                AtomModifier::Replicate(scalar.numerator as u32)
-            }
-        }
-        AtomOperatorToken::Euclid => {
-            let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(steps))) = stack.get(*index + 2)
-            else {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::OperatorWithoutRightScalar,
-                    "Euclid expects pulses and steps scalar operands.",
-                    next_location.clone(),
-                ));
-                *index += 2;
-                return AtomModifier::Euclid {
-                    pulses: 1,
-                    steps: 1,
-                };
-            };
-            if scalar.denominator != 1
-                || steps.value.denominator != 1
-                || scalar.numerator < 0
-                || steps.value.numerator <= 0
-                || scalar.numerator > steps.value.numerator
-            {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidModifierArgument,
-                    "Euclid expects integer pulses and steps with 0 <= pulses <= steps and steps > 0.",
-                    next_location.clone(),
-                ));
-            }
-            *index += 3;
-            AtomModifier::Euclid {
-                pulses: scalar.numerator.max(0) as u32,
-                steps: steps.value.numerator.max(1) as u32,
-            }
-        }
-        AtomOperatorToken::EuclidRot => {
-            let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(steps))) = stack.get(*index + 2)
-            else {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::OperatorWithoutRightScalar,
-                    "EuclidRot expects pulses, steps, and rotation scalar operands.",
-                    next_location.clone(),
-                ));
-                *index += 2;
-                return AtomModifier::EuclidRot {
-                    pulses: 1,
-                    steps: 1,
-                    rotation: 0,
-                };
-            };
-            let Some(ContainerSurfaceTile::Atom(AtomTile::Scalar(rotation))) =
-                stack.get(*index + 3)
-            else {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::OperatorWithoutRightScalar,
-                    "EuclidRot expects a rotation scalar operand.",
-                    next_location.clone(),
-                ));
-                *index += 3;
-                return AtomModifier::EuclidRot {
-                    pulses: 1,
-                    steps: 1,
-                    rotation: 0,
-                };
-            };
-            if scalar.denominator != 1
-                || steps.value.denominator != 1
-                || rotation.value.denominator != 1
-                || scalar.numerator < 0
-                || steps.value.numerator <= 0
-                || scalar.numerator > steps.value.numerator
-            {
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCategory::LocalGrammar,
-                    DiagnosticKind::InvalidModifierArgument,
-                    "EuclidRot expects integer pulses, steps, and rotation with 0 <= pulses <= steps and steps > 0.",
-                    next_location.clone(),
-                ));
-            }
-            *index += 4;
-            AtomModifier::EuclidRot {
-                pulses: scalar.numerator.max(0) as u32,
-                steps: steps.value.numerator.max(1) as u32,
-                rotation: rotation.value.numerator as i32,
-            }
-        }
-        AtomOperatorToken::Degrade | AtomOperatorToken::Choice | AtomOperatorToken::Parallel => {
-            unreachable!()
-        }
-    };
-    modifier
 }
 
 pub fn normalize_program(program: &TesseraProgram) -> Result<NormalizedProgram, Vec<Diagnostic>> {
@@ -525,7 +328,7 @@ mod tests {
 
     #[test]
     fn normalizes_broad_modifier_subset() {
-        let container_id = ContainerId::new("phrase");
+        let container_id = ContainerId::new("pattern");
         let mut containers = BTreeMap::new();
         containers.insert(
             container_id.clone(),
@@ -568,10 +371,10 @@ mod tests {
 
     #[test]
     fn stack_compound_matches_normalize_for_stacked_modifiers() {
-        let container_id = ContainerId::new("phrase");
+        let container_id = ContainerId::new("pattern");
         let stack = vec![
             ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new("e"))),
-            ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
+            ContainerSurfaceTile::Atom(AtomTile::Octave(2)),
             ContainerSurfaceTile::Atom(AtomTile::Operator(AtomOperatorToken::Elongate)),
             ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
         ];

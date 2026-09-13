@@ -30,6 +30,31 @@ pub struct SampleLoadOptions {
     pub root_pitch: Option<f64>,
     /// Optional pitch zone for this decoded sample.
     pub pitch_range: Option<SamplePitchRange>,
+    /// Source frames repeated after the recording's initial attack.
+    pub sustain_loop: Option<SampleLoopRegion>,
+}
+
+/// Half-open source-frame loop, unaffected by playback pitch or output rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SampleLoopRegion {
+    start_frame: u64,
+    end_frame: u64,
+}
+
+impl SampleLoopRegion {
+    /// Returns `None` for empty or backwards loops. Loaders must also check the
+    /// end against the decoded recording's length.
+    #[must_use]
+    pub fn new(start_frame: u64, end_frame: u64) -> Option<Self> {
+        (start_frame < end_frame).then_some(Self {
+            start_frame,
+            end_frame,
+        })
+    }
+
+    pub(crate) fn region(self, frame_count: usize) -> Option<crate::adapter::audio::Region> {
+        (self.end_frame <= frame_count as u64).then(|| (self.start_frame..self.end_frame).into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,6 +99,8 @@ pub struct LoadedSample {
     pub root_pitch: Option<f64>,
     /// Optional pitch zone.
     pub pitch_range: Option<SamplePitchRange>,
+    /// Source frames repeated after the attack.
+    pub sustain_loop: Option<SampleLoopRegion>,
 }
 
 /// Typed trigger plus resolved decoded sample payload for the active audio path.
@@ -89,6 +116,8 @@ pub struct LoadedSampleTrigger {
     pub playback_limit: Option<Duration>,
     /// Optional choke group for mixer behavior.
     pub choke_group: Option<ChokeGroup>,
+    /// Source frames repeated after the attack.
+    pub sustain_loop: Option<SampleLoopRegion>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -102,6 +131,18 @@ impl SampleBank {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Removes every variant registered under this logical sample name.
+    ///
+    /// Call from a control thread when retiring project assets. Already-started
+    /// voices retain their own decoded-audio references and finish normally.
+    pub fn remove(&self, name: &str) -> bool {
+        self.samples
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name)
+            .is_some()
     }
 
     /// Inserts or overwrites a decoded sample by exact key.
@@ -125,6 +166,7 @@ impl SampleBank {
             bank: options.bank,
             root_pitch: options.root_pitch,
             pitch_range: options.pitch_range,
+            sustain_loop: options.sustain_loop,
         };
 
         let mut samples = self
@@ -138,6 +180,39 @@ impl SampleBank {
                 && entry.pitch_range == loaded.pitch_range)
         });
         entries.push(loaded);
+    }
+
+    /// Atomically replaces an explicitly ordered bank. Unlike incremental
+    /// `load_with_options`, equal hints are valid distinct variants here.
+    /// Empty input retires the logical name; active voices keep their buffers.
+    pub fn replace_variants(
+        &self,
+        name: impl Into<String>,
+        variants: impl IntoIterator<Item = (SampleBuffer, SampleLoadOptions)>,
+    ) {
+        let name = name.into();
+        let variants = variants
+            .into_iter()
+            .map(|(sample, options)| LoadedSample {
+                sample_key: name.clone(),
+                sample: Arc::new(sample),
+                playback_limit: options.playback_limit,
+                choke_group: options.choke_group,
+                bank: options.bank,
+                root_pitch: options.root_pitch,
+                pitch_range: options.pitch_range,
+                sustain_loop: options.sustain_loop,
+            })
+            .collect::<Vec<_>>();
+        let mut samples = self
+            .samples
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if variants.is_empty() {
+            samples.remove(&name);
+        } else {
+            samples.insert(name, variants);
+        }
     }
 
     /// Returns `true` when a decoded sample exists for the exact key.
@@ -168,9 +243,19 @@ impl SampleBank {
         let loaded = select_variant(variants, trigger)?;
         let mut resolved_trigger = trigger.clone();
 
+        if let Some(duration) = trigger.fit_duration {
+            // Use the exact decoded frame region, matching renderer rounding.
+            let start = (loaded.sample.len() as f64 * trigger.playback_start).floor();
+            let end = (loaded.sample.len() as f64 * trigger.playback_end).ceil();
+            let source_seconds = (end - start) / f64::from(loaded.sample.sample_rate());
+            resolved_trigger.playback_rate *= source_seconds / duration.as_secs_f64();
+        }
+
         if let (Some(target_pitch), Some(root_pitch)) = (trigger.pitch, loaded.root_pitch) {
             resolved_trigger.playback_rate *= pitch_ratio(target_pitch - root_pitch);
         }
+        resolved_trigger.resolved_rate_scale =
+            resolved_trigger.playback_rate / trigger.playback_rate;
 
         Some(LoadedSampleTrigger {
             trigger: resolved_trigger,
@@ -178,6 +263,7 @@ impl SampleBank {
             sample: Arc::clone(&loaded.sample),
             playback_limit: loaded.playback_limit,
             choke_group: loaded.choke_group,
+            sustain_loop: loaded.sustain_loop,
         })
     }
 }
@@ -204,7 +290,7 @@ fn select_variant<'a>(
             .copied();
     }
 
-    let selected = if let Some(pitch) = trigger.pitch {
+    if let Some(pitch) = trigger.pitch {
         let zoned: Vec<&LoadedSample> = bank_candidates
             .iter()
             .copied()
@@ -227,12 +313,11 @@ fn select_variant<'a>(
         })
     } else {
         bank_candidates
-            .into_iter()
+            .iter()
+            .copied()
             .find(|sample| sample.bank.is_none() && sample.root_pitch.is_none())
-            .or_else(|| variants.first())
-    };
-
-    selected
+            .or_else(|| bank_candidates.first().copied())
+    }
 }
 
 fn pitch_distance(sample: &LoadedSample, target_pitch: f64) -> f64 {
@@ -250,6 +335,52 @@ fn pitch_ratio(delta_semitones: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::adapter::audio::Frame;
+
+    #[test]
+    fn explicit_variant_replacement_preserves_equal_hints_and_active_buffers() {
+        let bank = SampleBank::new();
+        bank.replace_variants(
+            "takes",
+            [
+                (sample(&[0.25], 8_000), SampleLoadOptions::default()),
+                (sample(&[-0.5], 8_000), SampleLoadOptions::default()),
+            ],
+        );
+        let trigger = SampleTrigger::builder()
+            .sample("takes")
+            .sample_variant(1)
+            .build()
+            .unwrap();
+        let active = bank.resolve_trigger(&trigger).unwrap();
+        assert_eq!(active.sample.frame(0), Some(Frame::from_mono(-0.5)));
+        bank.replace_variants(
+            "takes",
+            [(sample(&[0.75], 8_000), SampleLoadOptions::default())],
+        );
+        assert_eq!(
+            bank.resolve_trigger(&trigger).unwrap().sample.frame(0),
+            Some(Frame::from_mono(0.75))
+        );
+        bank.replace_variants("takes", []);
+        assert!(!bank.contains("takes"));
+        assert_eq!(active.sample.frame(0), Some(Frame::from_mono(-0.5)));
+    }
+
+    #[test]
+    fn removing_a_name_retires_future_resolution_but_keeps_active_audio_alive() {
+        let bank = SampleBank::new();
+        bank.load("project:old", sample(&[0.25, 0.5], 8_000));
+        let trigger = SampleTrigger::builder()
+            .sample("project:old")
+            .build()
+            .unwrap();
+        let resolved = bank.resolve_trigger(&trigger).unwrap();
+        assert!(bank.remove("project:old"));
+        assert!(!bank.remove("project:old"));
+        assert!(!bank.contains("project:old"));
+        assert!(bank.resolve_trigger(&trigger).is_none());
+        assert_eq!(resolved.sample.frame(0), Some(Frame::from_mono(0.25)));
+    }
 
     fn sample(values: &[f32], sample_rate: u32) -> SampleBuffer {
         SampleBuffer::new(

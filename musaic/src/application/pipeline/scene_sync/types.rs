@@ -3,10 +3,97 @@
 use tessera::prelude::NodeId;
 
 use crate::application::editor::ConnectionEndpointView;
-use crate::domain::board::{BoardSlot, BoardSurfaceId, SurfaceLayoutKind};
+use crate::domain::board::BoardSlot;
 use crate::domain::document::{AtomValue, PlacementAddress, StackIndex};
 
-use super::board_scene::{BoardSceneAtomCompound, BoardSceneConnection, BoardSceneTile};
+/// Presentation layout for owned expressions and wide containers. Canonical
+/// musical addresses and authored rests never change when a face grows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct StackDisplayMap {
+    hidden: std::collections::BTreeMap<StackIndex, StackIndex>,
+    spans: Vec<(StackIndex, StackIndex, usize, usize)>,
+}
+
+impl StackDisplayMap {
+    pub(super) fn new(
+        hidden: std::collections::BTreeMap<StackIndex, StackIndex>,
+        widths: std::collections::BTreeMap<StackIndex, usize>,
+    ) -> Self {
+        let mut result = Self {
+            hidden,
+            spans: Vec::new(),
+        };
+        let mut extra = 0;
+        for (authored, width) in widths {
+            let compact = result.compact_index(authored);
+            let start = compact + extra;
+            let columns = crate::domain::board::geometry::STACK_COLUMNS;
+            let padding = if start % columns + width > columns {
+                columns - start % columns
+            } else {
+                0
+            };
+            result
+                .spans
+                .push((authored, StackIndex(start + padding), width, padding));
+            extra += width - 1 + padding;
+        }
+        result
+    }
+
+    fn compact_index(&self, authored: StackIndex) -> usize {
+        authored
+            .0
+            .saturating_sub(self.hidden.range(..authored).count())
+    }
+
+    pub fn display_index(&self, authored: StackIndex) -> StackIndex {
+        let anchor = self.hidden.get(&authored).copied().unwrap_or(authored);
+        let mut extra = 0;
+        for &(owner, display, width, _) in &self.spans {
+            if owner > anchor {
+                break;
+            }
+            if owner == anchor {
+                return display;
+            }
+            extra = display.0 + width - self.compact_index(owner) - 1;
+        }
+        StackIndex(self.compact_index(anchor) + extra)
+    }
+
+    /// Every cell of a wide face resolves to its owner; row-end padding inserts
+    /// before the next face instead of creating a hidden musical rest.
+    pub fn authored_index(&self, display: StackIndex) -> StackIndex {
+        let mut extra = 0;
+        for &(owner, start, width, padding) in &self.spans {
+            if display.0 < start.0.saturating_sub(padding) {
+                break;
+            }
+            if display.0 < start.0 + width {
+                return owner;
+            }
+            extra = start.0 + width - self.compact_index(owner) - 1;
+        }
+        let mut authored = display.0.saturating_sub(extra);
+        for hidden in self.hidden.keys() {
+            if hidden.0 > authored {
+                break;
+            }
+            authored = authored.saturating_add(1);
+        }
+        StackIndex(authored)
+    }
+
+    pub fn display_address(&self, authored: PlacementAddress) -> PlacementAddress {
+        match authored {
+            PlacementAddress::StackIndex(index) => {
+                PlacementAddress::StackIndex(self.display_index(index))
+            }
+            address => address,
+        }
+    }
+}
 
 /// Singular render focus derived from canonical [`EditorAttention`](crate::application::editor::EditorAttention).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,23 +125,54 @@ pub struct VisibleBoardNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TileSurfaceContent {
+    Wire {
+        ports: crate::domain::document::PortEndpointConfig,
+    },
     Empty,
-    Scalar { display: String },
-    Compound { display: String },
-    Transform { label: String, aux: Option<String> },
+    Scalar {
+        display: String,
+    },
+    Compound {
+        display: String,
+        layers: usize,
+        /// Actual authored constituents, in stack order, for the face preview.
+        parts: Vec<String>,
+    },
+    Transform {
+        label: String,
+        aux: Option<String>,
+    },
+    Container {
+        kind: crate::domain::document::ContainerKind,
+        children: Vec<TilePreviewCell>,
+        /// All authored child tiles, including layers summarized by a compound.
+        child_count: usize,
+    },
+}
+
+/// A bounded thumbnail of authored content, using the same compound projection
+/// as the opened board. Positions retain the authored row and column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TilePreviewCell {
+    pub slot: BoardSlot,
+    pub kind: VisibleNodeKind,
+    pub content: TileSurfaceContent,
 }
 
 impl TileSurfaceContent {
     pub fn display(&self) -> Option<String> {
         match self {
             TileSurfaceContent::Empty => None,
-            TileSurfaceContent::Scalar { display } | TileSurfaceContent::Compound { display } => {
-                Some(display.clone())
-            }
+            TileSurfaceContent::Wire { .. } => Some("Wire".into()),
+            TileSurfaceContent::Scalar { display }
+            | TileSurfaceContent::Compound { display, .. } => Some(display.clone()),
             TileSurfaceContent::Transform { label, aux } => Some(match aux {
                 Some(aux) => format!("{label}\n{aux}"),
                 None => label.clone(),
             }),
+            TileSurfaceContent::Container {
+                kind, child_count, ..
+            } => Some(format!("{kind:?} · {child_count} tiles")),
         }
     }
 }
@@ -90,22 +208,10 @@ pub struct VisibleAtomCompound {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleBoardConnection {
+    pub side: tessera::prelude::SpatialSide,
     pub from: NodeId,
     pub to: NodeId,
     pub from_slot: BoardSlot,
     pub to_slot: BoardSlot,
     pub kind: crate::domain::document::PortSlotState,
-}
-
-/// Renderer-neutral projection of the authored board.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoardScene {
-    pub surface: BoardSurfaceId,
-    pub layout: SurfaceLayoutKind,
-    pub tiles: Vec<BoardSceneTile>,
-    pub compounds: Vec<BoardSceneAtomCompound>,
-    pub stack_inserts: Vec<StackIndex>,
-    pub stack_locked_slots: Vec<StackIndex>,
-    pub connections: Vec<BoardSceneConnection>,
-    pub focus: Option<RenderBoardFocus>,
 }

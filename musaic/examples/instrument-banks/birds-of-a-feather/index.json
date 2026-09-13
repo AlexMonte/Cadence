@@ -1,0 +1,14 @@
+{
+  "Kalimba": "kalimba/instrument.musaic-bank.json",
+  "Linn kick": "linn-kick/instrument.musaic-bank.json",
+  "Linn hi-hat": "linn-hi-hat/instrument.musaic-bank.json",
+  "808 shaker": "808-shaker/instrument.musaic-bank.json",
+  "Linn snare": "linn-snare/instrument.musaic-bank.json",
+  "Electric piano": "electric-piano/instrument.musaic-bank.json",
+  "Bass lead": "bass-lead/instrument.musaic-bank.json",
+  "Picked bass": "picked-bass/instrument.musaic-bank.json",
+  "Steel guitar": "steel-guitar/instrument.musaic-bank.json",
+  "Jazz arpeggio 2": "jazz-arpeggio-2/instrument.musaic-bank.json",
+  "Jazz arpeggio 3": "jazz-arpeggio-3/instrument.musaic-bank.json",
+  "Organ": "organ/instrument.musaic-bank.json"
+}

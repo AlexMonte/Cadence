@@ -112,7 +112,10 @@ fn input_endpoint_exists(node: &RootSurfaceNodeKind, endpoint: &InputEndpoint) -
 }
 
 fn output_endpoint_exists(node: &RootSurfaceNodeKind, endpoint: &OutputEndpoint) -> bool {
-    if matches!(node, RootSurfaceNodeKind::Container { .. }) {
+    if matches!(
+        node,
+        RootSurfaceNodeKind::Container { .. } | RootSurfaceNodeKind::Scalar(_)
+    ) {
         return matches!(endpoint, OutputEndpoint::Socket(port) if port.0 == "out");
     }
     let Some(signature) = node_signature(node) else {
@@ -126,7 +129,7 @@ fn output_endpoint_exists(node: &RootSurfaceNodeKind, endpoint: &OutputEndpoint)
 
 fn node_signature(node: &RootSurfaceNodeKind) -> Option<&crate::domain::NodeSignature> {
     match node {
-        RootSurfaceNodeKind::Container { .. } => None,
+        RootSurfaceNodeKind::Container { .. } | RootSurfaceNodeKind::Scalar(_) => None,
         RootSurfaceNodeKind::Transform(transform) => Some(&transform.signature),
         RootSurfaceNodeKind::FlowControl(flow) => Some(&flow.signature),
         RootSurfaceNodeKind::Output(output) => Some(&output.signature),

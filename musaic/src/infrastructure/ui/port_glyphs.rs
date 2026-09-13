@@ -1,11 +1,10 @@
 //! Port compass glyphs on board tiles (3D billboards) and in the inspector panel.
 
-use bevy::{math::primitives::Cuboid, prelude::*, ui::widget::Text as UiText};
-use bevy_feathers::theme::ThemedText;
+use bevy::{math::primitives::Cuboid, prelude::*};
 use tessera::prelude::{NodeId, SpatialSide};
 
 use crate::{
-    adapter::load_up::{UiSpriteAssets, pixel_ui_display_size},
+    adapter::load_up::UiSpriteAssets,
     application::command::EditorCommand,
     application::editor::interaction::{BoardPickEvent, BoardPickHit, BoardPickTargetKind},
     application::editor::{
@@ -14,10 +13,8 @@ use crate::{
     },
     domain::board::BoardSurfaceId,
     infrastructure::ui::{
-        InspectorButtonAction,
-        board::BoardPickTarget,
-        render_layers::SCENE_NODE_VISIBILITY,
-        ui_sprites::{self, port_slot_image},
+        InspectorButtonAction, board::BoardPickTarget, render_layers::SCENE_NODE_VISIBILITY,
+        ui_sprites::port_slot_image,
     },
 };
 
@@ -127,123 +124,139 @@ pub fn on_port_side_clicked(
 
 pub fn spawn_inspector_port_compass(
     parent: &mut ChildSpawnerCommands<'_>,
-    images: &Assets<Image>,
-    sprites: Option<&UiSpriteAssets>,
+    _images: &Assets<Image>,
+    _sprites: Option<&UiSpriteAssets>,
     node: &NodeId,
     view: &ConnectionEndpointView,
+    glyph: &str,
 ) {
+    let theme = super::theme::MusaicUiTheme::default();
     parent
-        .spawn(Node {
-            display: Display::Grid,
-            grid_template_columns: RepeatedGridTrack::flex(3, 1.0),
-            grid_template_rows: RepeatedGridTrack::flex(3, 1.0),
-            row_gap: px(4.0),
-            column_gap: px(4.0),
-            margin: UiRect::top(px(8.0)),
-            ..default()
-        })
-        .with_children(|grid| {
-            grid.spawn(Node::default());
-            if let Some(sprites) = sprites {
-                spawn_inspector_port_button(
-                    grid,
-                    images,
-                    Some(sprites),
-                    node,
-                    SpatialSide::North,
-                    view.north,
-                );
-            }
-            grid.spawn(Node::default());
-
-            if let Some(sprites) = sprites {
-                spawn_inspector_port_button(
-                    grid,
-                    images,
-                    Some(sprites),
-                    node,
-                    SpatialSide::West,
-                    view.west,
-                );
-            }
-            grid.spawn(Node::default());
-            if let Some(sprites) = sprites {
-                spawn_inspector_port_button(
-                    grid,
-                    images,
-                    Some(sprites),
-                    node,
-                    SpatialSide::East,
-                    view.east,
-                );
-            }
-
-            grid.spawn(Node::default());
-            if let Some(sprites) = sprites {
-                spawn_inspector_port_button(
-                    grid,
-                    images,
-                    Some(sprites),
-                    node,
-                    SpatialSide::South,
-                    view.south,
-                );
-            }
-            grid.spawn(Node::default());
-        });
-}
-
-fn spawn_inspector_port_button(
-    parent: &mut ChildSpawnerCommands<'_>,
-    images: &Assets<Image>,
-    sprites: Option<&UiSpriteAssets>,
-    node: &NodeId,
-    side: SpatialSide,
-    state: PortSlotState,
-) {
-    let label = side_label(side);
-    parent
-        .spawn((super::controls::musaic_clickable(
+        .spawn((
             Node {
-                min_width: px(72.0),
-                min_height: px(36.0),
-                display: Display::Flex,
+                width: percent(100),
+                padding: UiRect::all(px(12)),
+                margin: UiRect::top(px(8)),
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: px(2.0),
-                padding: UiRect::all(px(4.0)),
+                row_gap: px(10),
+                border: UiRect::all(px(1)),
+                border_radius: BorderRadius::all(px(6)),
                 ..default()
             },
-            InspectorButtonAction(EditorCommand::BindOutputSide {
-                node: node.clone(),
-                side,
-            }),
-            format!("{label} port"),
-        ),))
-        .observe(super::on_inspector_button_activated)
-        .with_children(|btn| {
-            if let Some(sprites) = sprites {
-                let handle = port_slot_image(sprites, state);
-                if let Some(size) = pixel_ui_display_size(images, handle) {
-                    btn.spawn((
-                        ui_sprites::image_node(handle),
+            BackgroundColor(theme.chrome.panel_inset),
+            BorderColor::all(theme.chrome.border),
+        ))
+        .with_children(|card| {
+            card.spawn((
+                Text::new("Connections"),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(theme.chrome.text_main),
+            ));
+            card.spawn(Node {
+                width: percent(100),
+                display: Display::Grid,
+                grid_template_columns: RepeatedGridTrack::flex(3, 1.0),
+                grid_template_rows: RepeatedGridTrack::px(3, 48.0),
+                column_gap: px(5),
+                row_gap: px(5),
+                ..default()
+            })
+            .with_children(|grid| {
+                for (row, col, side, state) in [
+                    (1, 2, SpatialSide::North, view.north),
+                    (2, 3, SpatialSide::East, view.east),
+                    (3, 2, SpatialSide::South, view.south),
+                    (2, 1, SpatialSide::West, view.west),
+                ] {
+                    let symbol = match state {
+                        PortSlotState::None => "·",
+                        PortSlotState::Input => "[ ]",
+                        PortSlotState::Output => match side {
+                            SpatialSide::North => "↑",
+                            SpatialSide::East => "→",
+                            SpatialSide::South => "↓",
+                            _ => "←",
+                        },
+                    };
+                    let label = format!(
+                        "{}: {}. Set output on this side",
+                        side_label(side),
+                        port_state_label(state)
+                    );
+                    grid.spawn(super::widgets::musaic_button(
                         Node {
-                            width: px(size.x),
-                            height: px(size.y),
-                            flex_shrink: 0.0,
+                            grid_row: GridPlacement::start(row),
+                            grid_column: GridPlacement::start(col),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            flex_direction: FlexDirection::Column,
+                            border: UiRect::all(px(1)),
+                            border_radius: BorderRadius::all(px(4)),
                             ..default()
                         },
-                    ));
+                        (
+                            InspectorButtonAction(EditorCommand::BindOutputSide {
+                                node: node.clone(),
+                                side,
+                            }),
+                            super::widgets::ButtonAccessibilityLabel(label),
+                        ),
+                        symbol,
+                    ))
+                    .remove::<bevy_feathers::theme::ThemeFontColor>()
+                    .insert((
+                        TextFont {
+                            font_size: 23.0,
+                            ..default()
+                        },
+                        TextColor(if state == PortSlotState::Input {
+                            theme.semantic.atom_scalar
+                        } else {
+                            theme.semantic.atom_note
+                        }),
+                        BackgroundColor(if state == PortSlotState::None {
+                            theme.chrome.panel_bg
+                        } else {
+                            theme.chrome.crumb_selected_bg
+                        }),
+                        BorderColor::all(theme.chrome.border),
+                    ))
+                    .observe(super::on_inspector_button_activated);
                 }
-            }
-            btn.spawn((
-                UiText::new(format!("{label} · {}", port_state_label(state))),
+                grid.spawn((
+                    Node {
+                        grid_row: GridPlacement::start(2),
+                        grid_column: GridPlacement::start(2),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(1)),
+                        ..default()
+                    },
+                    BackgroundColor(theme.chrome.panel_bg),
+                    BorderColor::all(theme.semantic.atom_scalar),
+                ))
+                .with_children(|tile| {
+                    tile.spawn((
+                        crate::infrastructure::ui::inspector::panels::tile_inspect::selected_tile_glyph(node),
+                                    Text::new(glyph),
+                        TextFont {
+                            font_size: 20.0,
+                            ..default()
+                        },
+                        TextColor(theme.semantic.atom_scalar),
+                    ));
+                });
+            });
+            card.spawn((
+                Text::new("[ ] Input    → Output    · Unused"),
                 TextFont {
                     font_size: 10.0,
                     ..default()
                 },
-                ThemedText,
+                TextColor(theme.chrome.text_dim),
             ));
         });
 }
@@ -257,10 +270,9 @@ fn side_label(side: SpatialSide) -> &'static str {
         SpatialSide::Off => "Off",
     }
 }
-
 fn port_state_label(state: PortSlotState) -> &'static str {
     match state {
-        PortSlotState::None => "None",
+        PortSlotState::None => "Unused",
         PortSlotState::Input => "Input",
         PortSlotState::Output => "Output",
     }

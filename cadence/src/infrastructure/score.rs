@@ -1,12 +1,14 @@
 //! Primary recursive authoring/query seam.
 
+pub use crate::application::preparation::{
+    AudioScheduleError, PreparedScore, estimate_audio_preparation,
+};
 pub use crate::domain::{
     control::{
         CompressorSettings, ControlKey, ControlMap, ControlTile, ControlTileId, ControlTrack,
         ControlTrackId, ControlValue, DelaySettings, ReverbSettings, SignedUnitValue, Symbol,
         UnitValue,
     },
-    mosaic::Mosaic,
     rational::Time,
     score::{
         ConflictPolicy, ControlScore, DeduplicateKey, DeduplicatePolicy, DeduplicateWinner,

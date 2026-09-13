@@ -4,7 +4,6 @@ use super::{ContainerId, InputEndpoint, NodeId, OutputEndpoint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum DiagnosticCategory {
     Placement,
     LocalGrammar,
@@ -19,7 +18,6 @@ pub enum DiagnosticCategory {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum DiagnosticKind {
     MissingContainer,
     MissingPlacement,
@@ -28,7 +26,6 @@ pub enum DiagnosticKind {
     UnknownBindingNode,
     TransformInsideContainer,
     OutputInsideContainer,
-    AmbiguousOctaveBinding,
     OperatorWithoutLeftValue,
     OperatorWithoutRightScalar,
     InvalidModifierArgument,
@@ -58,7 +55,6 @@ pub enum DiagnosticKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum DiagnosticLocation {
     RootNode(NodeId),
     RootRelation {
@@ -79,7 +75,6 @@ pub enum DiagnosticLocation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct Diagnostic {
     pub category: DiagnosticCategory,
     pub kind: DiagnosticKind,

@@ -1,3 +1,12 @@
+mod demo;
+mod first_loop;
+mod samples;
+
+pub use first_loop::{FirstLoop, first_loop};
+
+pub(crate) use samples::LoadedProjectSample;
+pub use samples::{ProjectSamples, SampleAssetSnapshot};
+
 use bevy::prelude::*;
 
 use crate::domain::document::MusaicDocument;
@@ -11,6 +20,8 @@ use crate::domain::project::ProjectMetadata;
 pub struct MusaicProject {
     pub document: MusaicDocument,
     pub metadata: ProjectMetadata,
+    pub samples: ProjectSamples,
+    pub sound_library: crate::domain::instrument::SoundLibrary,
 }
 
 impl Default for MusaicProject {
@@ -23,15 +34,37 @@ impl MusaicProject {
     pub fn new_empty() -> Self {
         Self {
             document: MusaicDocument::new_empty(),
+            sound_library: Default::default(),
             metadata: ProjectMetadata {
                 display_name: "Untitled".into(),
                 ..default()
             },
+            samples: ProjectSamples::default(),
         }
     }
 
     pub fn mark_dirty(&mut self) {
         self.metadata.dirty = true;
+    }
+
+    pub fn sound_definition(
+        &self,
+        node: &tessera::prelude::NodeId,
+    ) -> Option<&crate::domain::instrument::InstrumentDefinition> {
+        self.document.graph.sound_definition(node)
+    }
+
+    pub fn set_sound_definition(
+        &mut self,
+        node: &tessera::prelude::NodeId,
+        definition: crate::domain::instrument::InstrumentDefinition,
+    ) -> Result<crate::domain::instrument::InstrumentDefinition, String> {
+        if let crate::domain::instrument::InstrumentSource::Sample(sample) = definition.source
+            && !self.samples.manifest().samples.contains_key(&sample)
+        {
+            return Err("That sample is not in this project".into());
+        }
+        self.document.graph.set_sound_definition(node, definition)
     }
 }
 

@@ -1,0 +1,5 @@
+error: retry, fallback, and on_fail directives are mutually exclusive
+ --> tests/ui/invalid_fallback_retry.rs:6:5
+  |
+6 |     #[dependency(path = "a.png", fallback = "b.png", retry = 2)]
+  |     ^

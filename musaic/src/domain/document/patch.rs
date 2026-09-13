@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use tessera::bevy::TesseraBoard;
-use tessera::prelude::{NodeId, NodeSpatialBindings};
+use tessera::prelude::NodeId;
 
 use super::graph::{DocumentGraph, DocumentNode, NodeLocation};
-use super::{BoardSurface, BoardSurfaceId, MusaicDocument};
+use super::{BoardSurface, BoardSurfaceId, DocumentConnections, MusaicDocument};
 
 /// Snapshot of a deleted subtree for undo restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -14,8 +13,7 @@ pub struct DocumentPatch {
     pub locations: BTreeMap<NodeId, NodeLocation>,
     pub container_surfaces: BTreeMap<NodeId, BoardSurfaceId>,
     pub surfaces: BTreeMap<BoardSurfaceId, BoardSurface>,
-    #[serde(default)]
-    pub tessera_bindings: BTreeMap<NodeId, NodeSpatialBindings>,
+    pub connections: Option<DocumentConnections>,
 }
 
 impl DocumentPatch {
@@ -24,7 +22,9 @@ impl DocumentPatch {
         self.locations.extend(other.locations);
         self.container_surfaces.extend(other.container_surfaces);
         self.surfaces.extend(other.surfaces);
-        self.tessera_bindings.extend(other.tessera_bindings);
+        if other.connections.is_some() {
+            self.connections = other.connections;
+        }
     }
 }
 
@@ -37,7 +37,10 @@ pub fn capture_subtree_patch(document: &MusaicDocument, roots: &[NodeId]) -> Doc
         }
     }
 
-    let mut patch = DocumentPatch::default();
+    let mut patch = DocumentPatch {
+        connections: Some(document.connections.clone()),
+        ..Default::default()
+    };
     for node_id in &node_ids {
         let Some(node) = document.graph.node(node_id).cloned() else {
             continue;
@@ -53,17 +56,6 @@ pub fn capture_subtree_patch(document: &MusaicDocument, roots: &[NodeId]) -> Doc
             if let Some(surface) = document.surfaces.get(local_surface) {
                 patch.surfaces.insert(local_surface, surface.clone());
             }
-        }
-        if let Some(bindings) = document
-            .tessera
-            .authored_program
-            .root_surface
-            .bindings
-            .get(node_id)
-        {
-            patch
-                .tessera_bindings
-                .insert(node_id.clone(), bindings.clone());
         }
     }
 
@@ -82,15 +74,12 @@ fn collect_subtree_ids(graph: &DocumentGraph, root: &NodeId, out: &mut BTreeSet<
     }
 }
 
-/// Restores a captured subtree into the document and re-exports the live board.
+/// Restores a captured subtree into the canonical document.
 pub fn apply_document_patch(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     patch: DocumentPatch,
 ) -> Result<(), String> {
     apply_patch_inner(document, &patch)?;
-    crate::domain::document::hydrate_board_from_document(board, document)
-        .map_err(|error| format!("board export after restore failed: {error:?}"))?;
     Ok(())
 }
 
@@ -130,16 +119,11 @@ fn apply_patch_inner(document: &mut MusaicDocument, patch: &DocumentPatch) -> Re
         }
     }
 
-    for (node_id, bindings) in &patch.tessera_bindings {
-        document
-            .tessera
-            .authored_program
-            .root_surface
-            .bindings
-            .insert(node_id.clone(), bindings.clone());
+    if let Some(connections) = &patch.connections {
+        document.connections = connections.clone();
     }
 
-    document.sync_tile_store_from_graph();
     document.bump_revision();
+    document.validate()?;
     Ok(())
 }

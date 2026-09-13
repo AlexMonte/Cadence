@@ -1,0 +1,20 @@
+{
+  "variants": [
+    {
+      "path": "Kalimba - zone 000.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 72.03,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 2024,
+          "end_frame": 2192
+        }
+      },
+      "pitch_zone": {
+        "low": 0.0,
+        "high": 84.0
+      }
+    }
+  ]
+}

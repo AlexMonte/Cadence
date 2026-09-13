@@ -2,20 +2,19 @@ use std::hash::{Hash, Hasher};
 
 use crate::application::audio::VoiceInstanceId;
 use crate::domain::{
+    arrangement::{Timed, TimedControlScore, TimedScore},
     control::{
         ControlKey, ControlMap, ControlMerge, ControlModelError, ControlTile, ControlTiming,
         ControlTrack, ControlValue, SignedUnitValue, UnitValue,
     },
     intent::Intent,
     moment::Moment,
-    mosaic::Mosaic,
     prelude::Time,
     projection::ProjectedMoment,
     score::{
         ConflictPolicy, ControlScore, ControlScoreKind, ControlScoreNodeId, DeduplicateKey,
-        WeightedControlScore,
         DeduplicatePolicy, DeduplicateWinner, DegradePolicy, PriorityMergePolicy, Score, ScoreKind,
-        ScoreNodeId, WeightedScore,
+        ScoreNodeId, WeightedControlScore, WeightedScore,
     },
     space::SpatialMotion,
     span::TransportSpan,
@@ -152,21 +151,21 @@ impl EvaluatedEvent {
     #[must_use]
     fn with_projected(self, owner: ScoreNodeId, projected: ProjectedMoment) -> Self {
         let key = self.key.with_owner(owner, projected.whole());
+        let voice_whole = projected.whole();
+        let voice_id = voice_instance_id(key, voice_whole);
         let kind = match self.kind {
-            EvaluatedEventKind::StartVoice { .. } => {
-                let voice_whole = projected.whole();
-                EvaluatedEventKind::StartVoice {
-                    voice_whole,
-                    voice_id: voice_instance_id(key, voice_whole),
-                }
-            }
-            EvaluatedEventKind::UpdateVoiceControls {
-                voice_whole,
-                voice_id,
-            } => EvaluatedEventKind::UpdateVoiceControls {
+            EvaluatedEventKind::StartVoice { .. } => EvaluatedEventKind::StartVoice {
                 voice_whole,
                 voice_id,
             },
+            // A time or ownership transform must carry updates to the same
+            // lifecycle as its start, including when only an update is visible.
+            EvaluatedEventKind::UpdateVoiceControls { .. } => {
+                EvaluatedEventKind::UpdateVoiceControls {
+                    voice_whole,
+                    voice_id,
+                }
+            }
         };
 
         Self {
@@ -263,8 +262,49 @@ fn evaluate_score_unsorted(
     window: &TransportSpan,
 ) -> Result<Vec<EvaluatedEvent>, ControlModelError> {
     match score.kind() {
+        ScoreKind::QuerySource(source) => {
+            let work = source
+                .0
+                .estimated_work((window.end() - window.start()).value());
+            if !work.is_finite() || work < 0.0 || work > 16_384.0 {
+                return Err(ControlModelError::QuerySource(
+                    "query exceeds its preparation budget".into(),
+                ));
+            }
+            let moments = source.0.query(window)?;
+            if moments.len() > 16_384 {
+                return Err(ControlModelError::QuerySource(
+                    "too many events in one window".into(),
+                ));
+            }
+            let mut result = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for item in moments {
+                let Some(visible) = item.moment.span().intersection(window) else {
+                    continue;
+                };
+                let whole = item.moment.span();
+                if !seen.insert((item.instance_key, whole)) {
+                    return Err(ControlModelError::QuerySource(
+                        "duplicate event identity in one window".into(),
+                    ));
+                }
+                let mut controls = ControlMap::new();
+                for (key, value) in item.controls {
+                    value.validate_for(&key)?;
+                    validate_control_support_for_intent(&key, item.moment.intent())?;
+                    let value = sample_onset_control(&key, &value, whole.start());
+                    merge_into_control_map(&mut controls, key, value)?;
+                }
+                result.push(EvaluatedEvent::new(
+                    QueryKey::new(score.id(), LeafEventId::new(item.instance_key), whole),
+                    ProjectedMoment::new(item.moment, visible, controls),
+                ));
+            }
+            Ok(result)
+        }
         ScoreKind::Voice(voice) => Ok(evaluate_voice_leaf(score.id(), voice, window)),
-        ScoreKind::Mosaic(mosaic) => Ok(evaluate_mosaic_leaf(score.id(), mosaic, window)),
+        ScoreKind::Events(events) => Ok(evaluate_events_leaf(score.id(), events, window)),
         ScoreKind::Merge(children) => {
             let mut events = Vec::new();
             for child in children {
@@ -273,8 +313,18 @@ fn evaluate_score_unsorted(
             Ok(events)
         }
         ScoreKind::Concat(children) => evaluate_score_concat(score.id(), children, window),
+        ScoreKind::Arrange { segments, period } => {
+            evaluate_score_arrangement(score.id(), segments, *period, window)
+        }
         ScoreKind::CycleRoute(children) => evaluate_score_cycle_route(children, window),
         ScoreKind::CycleSlots(children) => evaluate_score_cycle_slots(children, window),
+        ScoreKind::WeightedCycleSlots(children) => evaluate_score_weighted_slots(
+            &children
+                .iter()
+                .map(|child| (child.score(), child.weight()))
+                .collect::<Vec<_>>(),
+            window,
+        ),
         ScoreKind::TimeScale { inner, rate } => {
             let scaled_window =
                 TransportSpan::new(window.start() * *rate, window.end() * *rate).unwrap();
@@ -349,7 +399,7 @@ fn evaluate_score_unsorted(
         ScoreKind::MaskClip { source, mask } => Ok(mask_clip_events(
             score.id(),
             evaluate_score(source, window)?,
-            evaluate_control_score(mask, window),
+            evaluate_control_score(mask, window)?,
         )),
         ScoreKind::WithControls { source, controls } => {
             apply_controls(score.id(), source, controls, window)
@@ -363,27 +413,18 @@ fn group_lifecycles(events: Vec<EvaluatedEvent>) -> Vec<LifecycleGroup> {
 
     for event in events {
         let key = lifecycle_key(&event);
-        match event.kind() {
-            EvaluatedEventKind::StartVoice { .. } => {
-                assert!(
-                    !group_index.contains_key(&key),
-                    "each lifecycle group must contain exactly one start event"
-                );
-                let index = groups.len();
-                group_index.insert(key, index);
-                groups.push(LifecycleGroup {
-                    key,
-                    events: vec![event],
-                });
-            }
-            EvaluatedEventKind::UpdateVoiceControls { .. } => {
-                let index = group_index
-                    .get(&key)
-                    .copied()
-                    .expect("runtime control updates must follow an existing start event");
-                groups[index].events.push(event);
-            }
-        }
+        let index = *group_index.entry(key).or_insert_with(|| {
+            let index = groups.len();
+            groups.push(LifecycleGroup {
+                key,
+                events: Vec::new(),
+            });
+            index
+        });
+        // An interior query can contain updates only. Both row kinds carry
+        // complete lifecycle identity, and only the scheduler may promote an
+        // unseen update to a backfill start. Keep projection rows unchanged.
+        groups[index].events.push(event);
     }
 
     groups
@@ -409,7 +450,29 @@ fn filter_degraded_events(
     flatten_lifecycle_groups(
         groups
             .into_iter()
-            .filter(|group| lifecycle_survives_degrade(group.key, policy))
+            .filter(|group| {
+                if let Some(value) = group
+                    .representative()
+                    .projected()
+                    .as_moment()
+                    .value_identity()
+                {
+                    let mut hasher = StableHasher::default();
+                    hasher.write(value.as_str().as_bytes());
+                    let span = group.whole();
+                    for part in [
+                        span.start().numerator(),
+                        span.start().denominator(),
+                        span.end().numerator(),
+                        span.end().denominator(),
+                    ] {
+                        hasher.write(&part.to_le_bytes());
+                    }
+                    seeded_roll_unit(policy.seed(), hasher.finish()) < policy.keep_probability()
+                } else {
+                    lifecycle_survives_degrade(group.key, policy)
+                }
+            })
             .collect(),
     )
 }
@@ -482,6 +545,24 @@ fn duplicate_group_key(group: &LifecycleGroup, key_policy: DeduplicateKey) -> u6
         DeduplicateKey::Lifecycle => stable_hash(&group.key),
         DeduplicateKey::WholeSpanAndIntent => stable_hash(&(group.whole(), group.intent())),
         DeduplicateKey::StartAndIntent => stable_hash(&(group.whole().start(), group.intent())),
+        DeduplicateKey::WholeSpanAndValue => {
+            stable_hash(&(group.whole(), musical_value_key(group)))
+        }
+        DeduplicateKey::StartAndValue => {
+            stable_hash(&(group.whole().start(), musical_value_key(group)))
+        }
+    }
+}
+
+fn musical_value_key(group: &LifecycleGroup) -> u64 {
+    match group
+        .representative()
+        .projected()
+        .as_moment()
+        .value_identity()
+    {
+        Some(value) => stable_hash(&(true, value)),
+        None => stable_hash(&(false, group.intent())),
     }
 }
 
@@ -519,6 +600,13 @@ fn lifecycle_groups_conflict(
             left.whole() == right.whole() && left.intent() == right.intent()
         }
         ConflictPolicy::WholeSpanOverlap => left.whole().intersects(&right.whole()),
+        ConflictPolicy::SameWholeStartAndValue => {
+            left.whole().start() == right.whole().start()
+                && musical_value_key(left) == musical_value_key(right)
+        }
+        ConflictPolicy::SameWholeSpanAndValue => {
+            left.whole() == right.whole() && musical_value_key(left) == musical_value_key(right)
+        }
     }
 }
 
@@ -554,7 +642,7 @@ fn choose_weighted_option(
         return None;
     }
 
-    let roll = seeded_roll_below(seed, stable_hash(&cycle_index), total_weight);
+    let roll = seeded_roll_below(seed, choice_cycle_key(cycle_index), total_weight);
     let mut cursor = Time::ZERO;
     for option in options {
         cursor = cursor + option.weight();
@@ -638,10 +726,10 @@ fn evaluate_control_priority_merge(
     children: &[ControlScore],
     window: &TransportSpan,
     policy: PriorityMergePolicy,
-) -> Vec<EvaluatedControl> {
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
     let mut accepted = Vec::<EvaluatedControl>::new();
     for child in children {
-        for candidate in evaluate_control_score(child, window) {
+        for candidate in evaluate_control_score(child, window)? {
             if !accepted
                 .iter()
                 .any(|existing| control_tiles_conflict(existing, &candidate, policy.conflict()))
@@ -650,7 +738,7 @@ fn evaluate_control_priority_merge(
             }
         }
     }
-    accepted
+    Ok(accepted)
 }
 
 fn control_tiles_conflict(
@@ -664,6 +752,12 @@ fn control_tiles_conflict(
     match policy {
         ConflictPolicy::SameWholeStartAndIntent => left.whole.start() == right.whole.start(),
         ConflictPolicy::SameWholeSpanAndIntent => left.whole == right.whole,
+        ConflictPolicy::SameWholeStartAndValue => {
+            left.whole.start() == right.whole.start() && left.value == right.value
+        }
+        ConflictPolicy::SameWholeSpanAndValue => {
+            left.whole == right.whole && left.value == right.value
+        }
         ConflictPolicy::WholeSpanOverlap => left.whole.intersects(&right.whole),
     }
 }
@@ -672,9 +766,9 @@ fn evaluate_control_weighted_choice(
     options: &[WeightedControlScore],
     seed: u64,
     window: &TransportSpan,
-) -> Vec<EvaluatedControl> {
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
     if options.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let mut controls = Vec::new();
@@ -683,9 +777,9 @@ fn evaluate_control_weighted_choice(
         let Some(selected) = choose_weighted_control_option(options, seed, cycle_index) else {
             continue;
         };
-        controls.extend(evaluate_control_score(selected.score(), &cycle_window));
+        controls.extend(evaluate_control_score(selected.score(), &cycle_window)?);
     }
-    controls
+    Ok(controls)
 }
 
 fn choose_weighted_control_option(
@@ -700,7 +794,7 @@ fn choose_weighted_control_option(
         return None;
     }
 
-    let roll = seeded_roll_below(seed, stable_hash(&cycle_index), total_weight);
+    let roll = seeded_roll_below(seed, choice_cycle_key(cycle_index), total_weight);
     let mut cursor = Time::ZERO;
     for option in options {
         cursor = cursor + option.weight();
@@ -761,6 +855,12 @@ fn seeded_roll_unit(seed: u64, key: u64) -> Time {
     Time::new((value % DENOMINATOR as u64) as i64, DENOMINATOR)
 }
 
+fn choice_cycle_key(cycle: i64) -> u64 {
+    let mut hasher = StableHasher::default();
+    hasher.write(&cycle.to_le_bytes());
+    hasher.finish()
+}
+
 fn seeded_roll_below(seed: u64, key: u64, upper_bound: Time) -> Time {
     seeded_roll_unit(seed, key) * upper_bound
 }
@@ -772,34 +872,78 @@ fn splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-#[must_use]
-fn evaluate_control_score(score: &ControlScore, window: &TransportSpan) -> Vec<EvaluatedControl> {
-    let mut controls = evaluate_control_score_unsorted(score, window);
+fn evaluate_control_score(
+    score: &ControlScore,
+    window: &TransportSpan,
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
+    let mut controls = evaluate_control_score_unsorted(score, window)?;
     sort_controls(&mut controls);
-    controls
+    Ok(controls)
 }
 
-#[must_use]
 fn evaluate_control_score_unsorted(
     score: &ControlScore,
     window: &TransportSpan,
-) -> Vec<EvaluatedControl> {
-    match score.kind() {
-        ControlScoreKind::Track(track) => evaluate_control_track_leaf(score.id(), track, window),
-        ControlScoreKind::Merge(children) => children
-            .iter()
-            .flat_map(|child| evaluate_control_score(child, window))
-            .collect(),
-        ControlScoreKind::Concat(children) => {
-            evaluate_control_score_concat(score.id(), children, window)
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
+    Ok(match score.kind() {
+        ControlScoreKind::QuerySource(source) => {
+            let work = source
+                .0
+                .estimated_work((window.end() - window.start()).value());
+            if !work.is_finite() || work < 0.0 || work > 16_384.0 {
+                return Err(ControlModelError::QuerySource(
+                    "control query exceeds its preparation budget".into(),
+                ));
+            }
+            let values = source.0.query(window)?;
+            if values.len() > 16_384 {
+                return Err(ControlModelError::QuerySource(
+                    "too many control segments in one window".into(),
+                ));
+            }
+            let mut result = Vec::new();
+            for item in values {
+                item.value.validate_for(&item.key)?;
+                if let Some(visible) = item.span.intersection(window) {
+                    result.push(EvaluatedControl::new(
+                        score.id(),
+                        item.span,
+                        visible,
+                        item.key,
+                        item.value,
+                    ));
+                }
+            }
+            result
         }
-        ControlScoreKind::CycleRoute(children) => evaluate_control_cycle_route(children, window),
-        ControlScoreKind::CycleSlots(children) => evaluate_control_cycle_slots(children, window),
+        ControlScoreKind::Track(track) => evaluate_control_track_leaf(score.id(), track, window),
+        ControlScoreKind::Merge(children) => {
+            let mut controls = Vec::new();
+            for child in children {
+                controls.extend(evaluate_control_score(child, window)?);
+            }
+            controls
+        }
+        ControlScoreKind::Concat(children) => {
+            evaluate_control_score_concat(score.id(), children, window)?
+        }
+        ControlScoreKind::Arrange { segments, period } => {
+            evaluate_control_arrangement(score.id(), segments, *period, window)?
+        }
+        ControlScoreKind::CycleRoute(children) => evaluate_control_cycle_route(children, window)?,
+        ControlScoreKind::CycleSlots(children) => evaluate_control_cycle_slots(children, window)?,
+        ControlScoreKind::WeightedCycleSlots(children) => evaluate_control_weighted_slots(
+            &children
+                .iter()
+                .map(|child| (child.score(), child.weight()))
+                .collect::<Vec<_>>(),
+            window,
+        )?,
         ControlScoreKind::TimeScale { inner, rate } => {
             let scaled_window =
                 TransportSpan::new(window.start() * *rate, window.end() * *rate).unwrap();
 
-            evaluate_control_score(inner, &scaled_window)
+            evaluate_control_score(inner, &scaled_window)?
                 .into_iter()
                 .map(|control| {
                     control.remap(
@@ -815,7 +959,7 @@ fn evaluate_control_score_unsorted(
             let shifted_window =
                 TransportSpan::new(window.start() - *offset, window.end() - *offset).unwrap();
 
-            evaluate_control_score(inner, &shifted_window)
+            evaluate_control_score(inner, &shifted_window)?
                 .into_iter()
                 .map(|control| {
                     control.remap(
@@ -828,35 +972,38 @@ fn evaluate_control_score_unsorted(
                 .collect()
         }
         ControlScoreKind::ReflectCycle { inner } => {
-            evaluate_reflected_controls(score.id(), inner, window)
+            evaluate_reflected_controls(score.id(), inner, window)?
         }
         ControlScoreKind::PriorityMerge { children, policy } => {
-            evaluate_control_priority_merge(children, window, *policy)
+            evaluate_control_priority_merge(children, window, *policy)?
         }
         ControlScoreKind::WeightedChoice { options, seed } => {
-            evaluate_control_weighted_choice(options, *seed, window)
+            evaluate_control_weighted_choice(options, *seed, window)?
         }
         ControlScoreKind::MaskClip { source, mask } => mask_clip_controls(
             score.id(),
-            evaluate_control_score(source, window),
-            evaluate_control_score(mask, window),
+            evaluate_control_score(source, window)?,
+            evaluate_control_score(mask, window)?,
         ),
-    }
+    })
 }
 
 fn score_sequence_origin(score: &Score) -> Time {
     match score.kind() {
+        ScoreKind::QuerySource(_) => Time::ZERO,
         ScoreKind::Voice(voice) => voice
             .tiles()
             .iter()
             .map(|tile| tile.phase().start())
             .min()
             .unwrap_or(Time::ZERO),
-        ScoreKind::Mosaic(mosaic) => mosaic
-            .bounds()
-            .map(|bounds| bounds.start())
+        ScoreKind::Events(events) => events
+            .first()
+            .map(|event| event.span().start())
             .unwrap_or(Time::ZERO),
-        ScoreKind::Concat(_) => Time::ZERO,
+        ScoreKind::Concat(_) | ScoreKind::WeightedCycleSlots(_) | ScoreKind::Arrange { .. } => {
+            Time::ZERO
+        }
         ScoreKind::Merge(children)
         | ScoreKind::CycleRoute(children)
         | ScoreKind::CycleSlots(children) => children
@@ -890,23 +1037,45 @@ fn score_sequence_origin(score: &Score) -> Time {
 
 fn score_sequencing_extent(score: &Score) -> Time {
     match score.kind() {
+        ScoreKind::QuerySource(source) => source.0.extent(),
+        ScoreKind::Arrange { period, .. } => *period,
+        ScoreKind::WeightedCycleSlots(_) => Time::ONE,
         ScoreKind::Voice(voice) => voice.period(),
-        ScoreKind::Mosaic(mosaic) => mosaic
-            .bounds()
-            .map(|bounds| bounds.end() - bounds.start())
-            .unwrap_or(Time::ZERO),
+        ScoreKind::Events(events) => {
+            let Some(first) = events.first() else {
+                return Time::ZERO;
+            };
+            let start = first.span().start();
+            events
+                .iter()
+                .map(|event| event.span().end())
+                .max()
+                .unwrap_or(start)
+                - start
+        }
         ScoreKind::Concat(children) => children
             .iter()
             .map(score_sequencing_extent)
             .fold(Time::ZERO, |total, extent| total + extent),
-        ScoreKind::Merge(children)
-        | ScoreKind::CycleRoute(children)
-        | ScoreKind::CycleSlots(children) => children
+        ScoreKind::Merge(children) => {
+            let origin = children
+                .iter()
+                .map(score_sequence_origin)
+                .min()
+                .unwrap_or(Time::ZERO);
+            let end = children
+                .iter()
+                .map(|child| score_sequence_origin(child) + score_sequencing_extent(child))
+                .max()
+                .unwrap_or(origin);
+            end - origin
+        }
+        ScoreKind::CycleRoute(children) | ScoreKind::CycleSlots(children) => children
             .iter()
             .map(score_sequencing_extent)
             .max()
             .unwrap_or(Time::ZERO),
-        ScoreKind::TimeScale { inner, rate } => score_sequencing_extent(inner) * *rate,
+        ScoreKind::TimeScale { inner, rate } => score_sequencing_extent(inner) / *rate,
         ScoreKind::Shift { inner, .. }
         | ScoreKind::ReflectCycle { inner }
         | ScoreKind::SpaceShift { inner, .. }
@@ -932,6 +1101,9 @@ fn score_sequencing_extent(score: &Score) -> Time {
 
 fn control_sequencing_extent(score: &ControlScore) -> Time {
     match score.kind() {
+        ControlScoreKind::QuerySource(source) => source.0.extent(),
+        ControlScoreKind::Arrange { period, .. } => *period,
+        ControlScoreKind::WeightedCycleSlots(_) => Time::ONE,
         ControlScoreKind::Track(track) => track.period(),
         ControlScoreKind::Concat(children) => children
             .iter()
@@ -944,7 +1116,7 @@ fn control_sequencing_extent(score: &ControlScore) -> Time {
             .map(control_sequencing_extent)
             .max()
             .unwrap_or(Time::ZERO),
-        ControlScoreKind::TimeScale { inner, rate } => control_sequencing_extent(inner) * *rate,
+        ControlScoreKind::TimeScale { inner, rate } => control_sequencing_extent(inner) / *rate,
         ControlScoreKind::Shift { inner, .. }
         | ControlScoreKind::ReflectCycle { inner }
         | ControlScoreKind::MaskClip { source: inner, .. } => control_sequencing_extent(inner),
@@ -959,6 +1131,254 @@ fn control_sequencing_extent(score: &ControlScore) -> Time {
             .max()
             .unwrap_or(Time::ZERO),
     }
+}
+
+const MAX_ARRANGEMENT_QUERY_WORK: usize = 16_384;
+
+fn checked_arrangement_time(num: i128, den: i128) -> Result<Time, ControlModelError> {
+    let (mut a, mut b) = (num.abs(), den);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let numerator = i64::try_from(num / a).map_err(|_| ControlModelError::ArrangementQueryLimit)?;
+    let denominator =
+        i64::try_from(den / a).map_err(|_| ControlModelError::ArrangementQueryLimit)?;
+    Ok(Time::new(numerator, denominator))
+}
+
+fn arrangement_add(a: Time, b: Time) -> Result<Time, ControlModelError> {
+    checked_arrangement_time(
+        i128::from(a.numerator()) * i128::from(b.denominator())
+            + i128::from(b.numerator()) * i128::from(a.denominator()),
+        i128::from(a.denominator()) * i128::from(b.denominator()),
+    )
+}
+
+fn arrangement_shift(
+    span: TransportSpan,
+    offset: Time,
+) -> Result<TransportSpan, ControlModelError> {
+    Ok(TransportSpan::new(
+        arrangement_add(span.start(), offset)?,
+        arrangement_add(span.end(), offset)?,
+    )
+    .unwrap())
+}
+
+fn arrangement_floor_ratio(a: Time, b: Time) -> Result<i64, ControlModelError> {
+    let num = i128::from(a.numerator()) * i128::from(b.denominator());
+    let den = i128::from(a.denominator()) * i128::from(b.numerator());
+    i64::try_from(num.div_euclid(den)).map_err(|_| ControlModelError::ArrangementQueryLimit)
+}
+
+fn arrangement_occurrences<T>(
+    segments: &[Timed<T>],
+    period: Time,
+    window: &TransportSpan,
+    mut visit: impl FnMut(usize, &Timed<T>, Time, TransportSpan) -> Result<(), ControlModelError>,
+) -> Result<(), ControlModelError> {
+    // Bound work before iterating, including empty arrangements and direct seeks.
+    if window.start().value().abs() > 1_000_000_000.0
+        || window.end().value().abs() > 1_000_000_000.0
+    {
+        return Err(ControlModelError::ArrangementQueryLimit);
+    }
+    let first = arrangement_floor_ratio(window.start(), period)?;
+    let last = arrangement_floor_ratio(window.end(), period)?;
+    if (i128::from(last) - i128::from(first) + 1) * segments.len() as i128
+        > MAX_ARRANGEMENT_QUERY_WORK as i128
+    {
+        return Err(ControlModelError::ArrangementQueryLimit);
+    }
+    let mut work = 0;
+    for cycle in first..=last {
+        let cycle_start = checked_arrangement_time(
+            i128::from(period.numerator()) * i128::from(cycle),
+            i128::from(period.denominator()),
+        )?;
+        let mut offset = Time::ZERO;
+        for (index, segment) in segments.iter().enumerate() {
+            let group_start = arrangement_add(cycle_start, offset)?;
+            let extent = segment.duration() * Time::whole_number(i64::from(segment.repeats()));
+            offset = offset + extent;
+            let group_end = arrangement_add(group_start, extent)?;
+            let Some(overlap) =
+                window.intersection(&TransportSpan::new(group_start, group_end).unwrap())
+            else {
+                continue;
+            };
+            let local_start = arrangement_add(overlap.start(), Time::ZERO - group_start)?;
+            let mut repeat =
+                arrangement_floor_ratio(local_start, segment.duration())?.max(0) as u64;
+            while repeat < u64::from(segment.repeats()) {
+                let start = arrangement_add(
+                    group_start,
+                    segment.duration() * Time::whole_number(repeat as i64),
+                )?;
+                if start >= overlap.end() {
+                    break;
+                }
+                let end = arrangement_add(start, segment.duration())?;
+                let occurrence = TransportSpan::new(start, end).unwrap();
+                if let Some(visible) = overlap.intersection(&occurrence) {
+                    work += 1;
+                    if work > MAX_ARRANGEMENT_QUERY_WORK {
+                        return Err(ControlModelError::ArrangementQueryLimit);
+                    }
+                    visit(
+                        index,
+                        segment,
+                        start,
+                        arrangement_shift(visible, Time::ZERO - start)?,
+                    )?;
+                }
+                repeat += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn arrangement_control(
+    value: &ControlValue,
+    original: TransportSpan,
+    clipped: TransportSpan,
+    offset: Time,
+) -> ControlValue {
+    match slice_control_value(value, original, clipped) {
+        ControlValue::Signal(signal) => {
+            ControlValue::Signal(signal.with_phase(signal.phase() - signal.rate() * offset))
+        }
+        ControlValue::Semitones(control) => {
+            ControlValue::Semitones(control.clone().shifted(offset))
+        }
+        value => value,
+    }
+}
+
+fn evaluate_score_arrangement(
+    owner: ScoreNodeId,
+    segments: &[TimedScore],
+    period: Time,
+    window: &TransportSpan,
+) -> Result<Vec<EvaluatedEvent>, ControlModelError> {
+    let mut events = Vec::new();
+    arrangement_occurrences(
+        segments,
+        period,
+        window,
+        |index, segment, offset, local_window| {
+            let clip = TransportSpan::new(Time::ZERO, segment.duration()).unwrap();
+            for event in evaluate_score(segment.source(), &local_window)? {
+                let Some(whole) = event.projected().whole().intersection(&clip) else {
+                    continue;
+                };
+                let Some(visible) = event.projected().visible().intersection(&whole) else {
+                    continue;
+                };
+                let (voice_whole, old_voice_id, is_start) = match *event.kind() {
+                    EvaluatedEventKind::StartVoice {
+                        voice_whole,
+                        voice_id,
+                    } => (voice_whole, voice_id, true),
+                    EvaluatedEventKind::UpdateVoiceControls {
+                        voice_whole,
+                        voice_id,
+                    } => (voice_whole, voice_id, false),
+                };
+                let Some(voice_whole) = voice_whole.intersection(&clip) else {
+                    continue;
+                };
+                let voice_whole = arrangement_shift(voice_whole, offset)?;
+                let voice_id =
+                    VoiceInstanceId::new(stable_hash(&(owner, index, offset, old_voice_id)) as i64);
+                let kind = if is_start {
+                    EvaluatedEventKind::StartVoice {
+                        voice_whole,
+                        voice_id,
+                    }
+                } else {
+                    EvaluatedEventKind::UpdateVoiceControls {
+                        voice_whole,
+                        voice_id,
+                    }
+                };
+                let controls = event
+                    .projected()
+                    .controls()
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            arrangement_control(value, event.projected().whole(), whole, offset),
+                        )
+                    })
+                    .collect();
+                let global_whole = arrangement_shift(whole, offset)?;
+                let mut projected = remap_projected(
+                    event.projected(),
+                    global_whole,
+                    arrangement_shift(visible, offset)?,
+                    controls,
+                );
+                projected = ProjectedMoment::new(
+                    projected
+                        .as_moment()
+                        .clone()
+                        .with_position(projected.position().shifted_time(offset)),
+                    projected.visible(),
+                    projected.controls().clone(),
+                );
+                let key = QueryKey::new(
+                    owner,
+                    LeafEventId::new(stable_hash(&(index, event.key.owner, event.key.leaf_event))),
+                    global_whole,
+                );
+                events.push(EvaluatedEvent::new_with_kind(key, projected, kind));
+                if events.len() > MAX_ARRANGEMENT_QUERY_WORK {
+                    return Err(ControlModelError::ArrangementQueryLimit);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(events)
+}
+
+fn evaluate_control_arrangement(
+    owner: ControlScoreNodeId,
+    segments: &[TimedControlScore],
+    period: Time,
+    window: &TransportSpan,
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
+    let mut controls = Vec::new();
+    arrangement_occurrences(
+        segments,
+        period,
+        window,
+        |_, segment, offset, local_window| {
+            let clip = TransportSpan::new(Time::ZERO, segment.duration()).unwrap();
+            for control in evaluate_control_score(segment.source(), &local_window)? {
+                let Some(whole) = control.whole.intersection(&clip) else {
+                    continue;
+                };
+                let Some(visible) = control.visible.intersection(&whole) else {
+                    continue;
+                };
+                controls.push(control.remap(
+                    owner,
+                    arrangement_shift(whole, offset)?,
+                    arrangement_shift(visible, offset)?,
+                    arrangement_control(&control.value, control.whole, whole, offset),
+                ));
+                if controls.len() > MAX_ARRANGEMENT_QUERY_WORK {
+                    return Err(ControlModelError::ArrangementQueryLimit);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(controls)
 }
 
 fn evaluate_score_concat(
@@ -1002,7 +1422,7 @@ fn evaluate_control_score_concat(
     owner: ControlScoreNodeId,
     children: &[ControlScore],
     window: &TransportSpan,
-) -> Vec<EvaluatedControl> {
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
     let mut controls = Vec::new();
     let mut offset = Time::ZERO;
     for child in children {
@@ -1014,7 +1434,7 @@ fn evaluate_control_score_concat(
                     TransportSpan::new(child_window.start() - offset, child_window.end() - offset)
                         .unwrap();
                 controls.extend(
-                    evaluate_control_score(child, &shifted_window)
+                    evaluate_control_score(child, &shifted_window)?
                         .into_iter()
                         .map(|control| {
                             control.remap(
@@ -1029,7 +1449,7 @@ fn evaluate_control_score_concat(
         }
         offset = offset + extent;
     }
-    controls
+    Ok(controls)
 }
 
 fn evaluate_score_cycle_route(
@@ -1058,39 +1478,62 @@ fn evaluate_score_cycle_route(
 fn evaluate_control_cycle_route(
     children: &[ControlScore],
     window: &TransportSpan,
-) -> Vec<EvaluatedControl> {
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
     if children.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    split_by_cycle(window)
-        .into_iter()
-        .flat_map(|cycle_window| {
-            let cycle_index = cycle_window
-                .start()
-                .floor()
-                .rem_euclid(children.len() as i64);
-            evaluate_control_score(&children[cycle_index as usize], &cycle_window)
-        })
-        .collect()
+    let mut controls = Vec::new();
+    for cycle_window in split_by_cycle(window) {
+        let cycle_index = cycle_window
+            .start()
+            .floor()
+            .rem_euclid(children.len() as i64);
+        controls.extend(evaluate_control_score(
+            &children[cycle_index as usize],
+            &cycle_window,
+        )?);
+    }
+    Ok(controls)
 }
 
 fn evaluate_score_cycle_slots(
     children: &[Score],
     window: &TransportSpan,
 ) -> Result<Vec<EvaluatedEvent>, ControlModelError> {
+    evaluate_score_weighted_slots(
+        &children
+            .iter()
+            .map(|child| (child, Time::ONE))
+            .collect::<Vec<_>>(),
+        window,
+    )
+}
+
+fn evaluate_score_weighted_slots(
+    children: &[(&Score, Time)],
+    window: &TransportSpan,
+) -> Result<Vec<EvaluatedEvent>, ControlModelError> {
     if children.is_empty() {
         return Ok(Vec::new());
     }
 
-    let slot_width = Time::ONE / Time::whole_number(children.len() as i64);
+    if children.len() == 1 {
+        return evaluate_score(children[0].0, window);
+    }
+    let total = children
+        .iter()
+        .fold(Time::ZERO, |sum, (_, weight)| sum + *weight);
     let mut events = Vec::new();
 
     for cycle_window in split_by_cycle(window) {
         let cycle_start = cycle_start(cycle_window.start());
 
-        for (index, child) in children.iter().enumerate() {
-            let slot_start = cycle_start + slot_width * Time::whole_number(index as i64);
+        let mut offset = Time::ZERO;
+        for (child, weight) in children {
+            let slot_width = *weight / total;
+            let slot_start = cycle_start + offset;
+            offset = offset + slot_width;
             let slot_end = slot_start + slot_width;
             let slot = TransportSpan::new(slot_start, slot_end).unwrap();
             let Some(visible_slot) = cycle_window.intersection(&slot) else {
@@ -1136,19 +1579,40 @@ fn evaluate_score_cycle_slots(
 fn evaluate_control_cycle_slots(
     children: &[ControlScore],
     window: &TransportSpan,
-) -> Vec<EvaluatedControl> {
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
+    evaluate_control_weighted_slots(
+        &children
+            .iter()
+            .map(|child| (child, Time::ONE))
+            .collect::<Vec<_>>(),
+        window,
+    )
+}
+
+fn evaluate_control_weighted_slots(
+    children: &[(&ControlScore, Time)],
+    window: &TransportSpan,
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
     if children.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let slot_width = Time::ONE / Time::whole_number(children.len() as i64);
+    if children.len() == 1 {
+        return evaluate_control_score(children[0].0, window);
+    }
+    let total = children
+        .iter()
+        .fold(Time::ZERO, |sum, (_, weight)| sum + *weight);
     let mut controls = Vec::new();
 
     for cycle_window in split_by_cycle(window) {
         let cycle_start = cycle_start(cycle_window.start());
 
-        for (index, child) in children.iter().enumerate() {
-            let slot_start = cycle_start + slot_width * Time::whole_number(index as i64);
+        let mut offset = Time::ZERO;
+        for (child, weight) in children {
+            let slot_width = *weight / total;
+            let slot_start = cycle_start + offset;
+            offset = offset + slot_width;
             let slot_end = slot_start + slot_width;
             let slot = TransportSpan::new(slot_start, slot_end).unwrap();
             let Some(visible_slot) = cycle_window.intersection(&slot) else {
@@ -1162,7 +1626,7 @@ fn evaluate_control_cycle_slots(
             .unwrap();
 
             controls.extend(
-                evaluate_control_score(child, &inner_window)
+                evaluate_control_score(child, &inner_window)?
                     .into_iter()
                     .map(|control| {
                         control.remap(
@@ -1181,7 +1645,7 @@ fn evaluate_control_cycle_slots(
         }
     }
 
-    controls
+    Ok(controls)
 }
 
 fn evaluate_reflected_score(
@@ -1218,7 +1682,7 @@ fn evaluate_reflected_controls(
     owner: ControlScoreNodeId,
     inner: &ControlScore,
     window: &TransportSpan,
-) -> Vec<EvaluatedControl> {
+) -> Result<Vec<EvaluatedControl>, ControlModelError> {
     let mut controls = Vec::new();
 
     for cycle_window in split_by_cycle(window) {
@@ -1226,7 +1690,7 @@ fn evaluate_reflected_controls(
         let reflected_window = reflect_span(cycle_window, cycle);
 
         controls.extend(
-            evaluate_control_score(inner, &reflected_window)
+            evaluate_control_score(inner, &reflected_window)?
                 .into_iter()
                 .map(|control| {
                     control.remap(
@@ -1239,7 +1703,7 @@ fn evaluate_reflected_controls(
         );
     }
 
-    controls
+    Ok(controls)
 }
 
 fn evaluate_voice_leaf(
@@ -1259,11 +1723,8 @@ fn evaluate_voice_leaf(
         None => *window,
     };
 
-    let first_repetition = if effective_window.start() <= Time::ZERO {
-        0
-    } else {
-        (effective_window.start() / voice.period()).floor() as u64
-    };
+    let first_repetition =
+        first_repetition(voice.repeat(), voice.period(), effective_window.start());
 
     let mut projected = Vec::new();
     let mut repetition = first_repetition;
@@ -1308,11 +1769,8 @@ fn evaluate_control_track_leaf(
         None => *window,
     };
 
-    let first_repetition = if effective_window.start() <= Time::ZERO {
-        0
-    } else {
-        (effective_window.start() / track.period()).floor() as u64
-    };
+    let first_repetition =
+        first_repetition(track.repeat(), track.period(), effective_window.start());
 
     let mut projected = Vec::new();
     let mut repetition = first_repetition;
@@ -1340,12 +1798,12 @@ fn evaluate_control_track_leaf(
     projected
 }
 
-fn evaluate_mosaic_leaf(
+fn evaluate_events_leaf(
     origin: ScoreNodeId,
-    mosaic: &Mosaic,
+    events: &[Moment],
     window: &TransportSpan,
 ) -> Vec<EvaluatedEvent> {
-    mosaic
+    events
         .iter()
         .enumerate()
         .filter_map(|(index, moment)| {
@@ -1372,20 +1830,66 @@ fn apply_controls(
     window: &TransportSpan,
 ) -> Result<Vec<EvaluatedEvent>, ControlModelError> {
     let source_events = evaluate_score(source, window)?;
-    let control_spans = evaluate_control_score(controls, window);
+    let control_spans = evaluate_control_score(controls, window)?;
+    // A slow enclosing clock can make this visible window tiny while onset
+    // recovery still queries a full source cycle per held event. Bound that
+    // additional work before any widened query allocates control repetitions.
+    let recovery_queries = source_events
+        .iter()
+        .filter(|event| event.projected().whole().start() < window.start())
+        .count();
+    super::preparation::validate_onset_control_recovery(controls, recovery_queries).map_err(
+        |error| {
+            ControlModelError::QuerySource(format!("held-note onset control recovery: {error}"))
+        },
+    )?;
+    let owned_runtime_lanes: Vec<_> = [
+        ControlKey::Transpose,
+        ControlKey::Pan,
+        ControlKey::PostGain,
+        ControlKey::PitchBend,
+        ControlKey::Expression,
+    ]
+    .into_iter()
+    .filter(|key| control_score_contains_key(controls, key))
+    .collect();
     let mut resolved = Vec::new();
 
     for event in source_events {
+        // Seeking into a held note still samples its original onset, even if
+        // the controlling tile has already ended before this query window.
+        let onset = event.projected().whole().start();
+        let onset_spans = if onset < window.start() {
+            let recovery_end = onset
+                .numerator()
+                .checked_add(onset.denominator())
+                .map(|numerator| Time::new(numerator, onset.denominator()))
+                .ok_or_else(|| {
+                    ControlModelError::QuerySource(
+                        "held-note onset control recovery exceeds the supported time range".into(),
+                    )
+                })?;
+            Some(evaluate_control_score(
+                controls,
+                &TransportSpan::new(onset, recovery_end).unwrap(),
+            )?)
+        } else {
+            None
+        };
         let overlapping_controls = control_spans
             .iter()
             .filter(|control| control.whole.intersects(&event.projected().whole()))
             .collect::<Vec<_>>();
-        let onset_controls = overlapping_controls
+        let onset_candidates: Vec<_> = onset_spans
+            .as_ref()
+            .map(|spans| spans.iter().collect())
+            .unwrap_or_else(|| overlapping_controls.clone());
+        let onset_controls = onset_candidates
             .iter()
             .copied()
             .filter(|control| control.key.spec().timing() == ControlTiming::Onset)
             .collect::<Vec<_>>();
-        let lifecycle_controls = overlapping_controls
+        let lifecycle_controls = onset_candidates
             .iter()
             .copied()
             .filter(|control| control.key.spec().timing() == ControlTiming::VoiceLifecycle)
@@ -1449,6 +1953,13 @@ fn apply_controls(
             for (key, value) in runtime_snapshot.clone() {
                 merge_into_control_map(&mut controls_map, key, value)?;
             }
+            // A scheduler window can begin after this lane's last tile.
+            // Restore its identity while retaining any inherited nested value.
+            for key in &owned_runtime_lanes {
+                controls_map
+                    .entry(key.clone())
+                    .or_insert_with(|| runtime_lane_identity(key));
+            }
 
             let projected =
                 remap_projected(event.projected(), lifecycle_whole, visible, controls_map);
@@ -1468,16 +1979,17 @@ fn apply_controls(
                     },
                 ));
 
-                resolved.extend(runtime_update_events(
+                resolved.extend(runtime_update_events(RuntimeUpdateContext {
                     owner,
-                    &event,
-                    lifecycle_whole,
+                    event: &event,
+                    voice_whole: lifecycle_whole,
                     entry_time,
                     voice_id,
-                    &runtime_controls,
-                    &segment_boundaries,
+                    runtime_controls: &runtime_controls,
+                    segment_controls: &segment_controls,
+                    segment_boundaries: &segment_boundaries,
                     window,
-                )?);
+                })?);
             } else {
                 let update_key = event.key().with_owner(owner, segment_whole);
                 resolved.push(EvaluatedEvent::new_with_kind(
@@ -1493,6 +2005,35 @@ fn apply_controls(
     }
 
     Ok(resolved)
+}
+
+fn control_score_contains_key(score: &ControlScore, key: &ControlKey) -> bool {
+    match score.kind() {
+        ControlScoreKind::QuerySource(source) => source.0.contains_key(key),
+        ControlScoreKind::Arrange { segments, .. } => segments
+            .iter()
+            .any(|segment| control_score_contains_key(segment.source(), key)),
+        ControlScoreKind::Track(track) => track.tiles().iter().any(|tile| tile.key() == key),
+        ControlScoreKind::Merge(children)
+        | ControlScoreKind::Concat(children)
+        | ControlScoreKind::CycleRoute(children)
+        | ControlScoreKind::CycleSlots(children)
+        | ControlScoreKind::PriorityMerge { children, .. } => children
+            .iter()
+            .any(|child| control_score_contains_key(child, key)),
+        ControlScoreKind::WeightedCycleSlots(children)
+        | ControlScoreKind::WeightedChoice {
+            options: children, ..
+        } => children
+            .iter()
+            .any(|child| control_score_contains_key(child.score(), key)),
+        ControlScoreKind::TimeScale { inner, .. }
+        | ControlScoreKind::Shift { inner, .. }
+        | ControlScoreKind::ReflectCycle { inner }
+        | ControlScoreKind::MaskClip { source: inner, .. } => {
+            control_score_contains_key(inner, key)
+        }
+    }
 }
 
 fn partition_boundaries(base: TransportSpan, controls: &[&EvaluatedControl]) -> Vec<Time> {
@@ -1523,10 +2064,24 @@ fn apply_onset_controls(
         .filter(|control| span_contains_time(control.whole, at))
     {
         validate_control_support_for_intent(&control.key, intent)?;
-        merge_into_control_map(controls_map, control.key.clone(), control.value.clone())?;
+        let value = sample_onset_control(&control.key, &control.value, at);
+        merge_into_control_map(controls_map, control.key.clone(), value)?;
     }
 
     Ok(())
+}
+
+/// A velocity signal chooses one intensity for the entire note. Resolve it
+/// before outer timing transforms and before combining other velocity owners,
+/// so rate, reverse, arrangement, query windows and rendering block sizes
+/// cannot change the value of an existing onset.
+fn sample_onset_control(key: &ControlKey, value: &ControlValue, at: Time) -> ControlValue {
+    match (key, value) {
+        (ControlKey::Velocity, ControlValue::Signal(signal)) => {
+            ControlValue::Unipolar(UnitValue::new(signal.eval_at(at).clamp(0.0, 1.0)).unwrap())
+        }
+        _ => value.clone(),
+    }
 }
 
 fn apply_segment_controls(
@@ -1561,26 +2116,55 @@ fn runtime_control_snapshot(
         .filter(|control| span_contains_time(control.whole, at))
     {
         validate_control_support_for_intent(&control.key, intent)?;
-        merge_into_control_map(
-            &mut controls_map,
-            control.key.clone(),
-            control.value.clone(),
-        )?;
+        let value = if control.key == ControlKey::Transpose {
+            match control.value.clone() {
+                ControlValue::Ramp { from, to } => {
+                    ControlValue::Semitones(crate::domain::control::SemitoneControl::signal(
+                        crate::domain::signal::Signal::linear_ramp(
+                            control.whole.start(),
+                            control.whole.end(),
+                            from,
+                            to,
+                        ),
+                    )?)
+                }
+                value => value,
+            }
+        } else {
+            control.value.clone()
+        };
+        merge_into_control_map(&mut controls_map, control.key.clone(), value)?;
     }
 
     Ok(controls_map)
 }
 
-fn runtime_update_events(
+struct RuntimeUpdateContext<'a> {
     owner: ScoreNodeId,
-    event: &EvaluatedEvent,
+    event: &'a EvaluatedEvent,
     voice_whole: TransportSpan,
     entry_time: Time,
     voice_id: VoiceInstanceId,
-    runtime_controls: &[&EvaluatedControl],
-    segment_boundaries: &[Time],
-    window: &TransportSpan,
+    runtime_controls: &'a [&'a EvaluatedControl],
+    segment_controls: &'a [&'a EvaluatedControl],
+    segment_boundaries: &'a [Time],
+    window: &'a TransportSpan,
+}
+
+fn runtime_update_events(
+    context: RuntimeUpdateContext<'_>,
 ) -> Result<Vec<EvaluatedEvent>, ControlModelError> {
+    let RuntimeUpdateContext {
+        owner,
+        event,
+        voice_whole,
+        entry_time,
+        voice_id,
+        runtime_controls,
+        segment_controls,
+        segment_boundaries,
+        window,
+    } = context;
     let mut resolved = Vec::new();
     let boundaries = partition_boundaries(voice_whole, runtime_controls);
     let mut previous_snapshot =
@@ -1617,7 +2201,34 @@ fn runtime_update_events(
             continue;
         };
 
-        let projected = remap_projected(event.projected(), voice_whole, visible, snapshot.clone());
+        // Runtime updates carry the active segment settings too. Otherwise a
+        // pan/expression boundary would look like the end of an active filter
+        // or send when the audio renderer restores omitted segment lanes.
+        let mut update_controls = event.projected().controls().clone();
+        apply_onset_controls(
+            &mut update_controls,
+            segment_controls,
+            event.projected().intent(),
+            update_whole.start(),
+        )?;
+        for (key, value) in snapshot.clone() {
+            merge_into_control_map(&mut update_controls, key, value)?;
+        }
+        for key in [
+            ControlKey::Transpose,
+            ControlKey::Pan,
+            ControlKey::PostGain,
+            ControlKey::PitchBend,
+            ControlKey::Expression,
+        ] {
+            if previous_snapshot.contains_key(&key)
+                && !snapshot.contains_key(&key)
+                && !update_controls.contains_key(&key)
+            {
+                update_controls.insert(key.clone(), runtime_lane_identity(&key));
+            }
+        }
+        let projected = remap_projected(event.projected(), voice_whole, visible, update_controls);
         let key = event.key().with_owner(owner, update_whole);
         resolved.push(EvaluatedEvent::new_with_kind(
             key,
@@ -1646,6 +2257,25 @@ fn merge_into_control_map(
     }
 
     Ok(())
+}
+
+fn runtime_lane_identity(key: &ControlKey) -> ControlValue {
+    match key {
+        ControlKey::Transpose => {
+            ControlValue::Semitones(crate::domain::control::SemitoneControl::default())
+        }
+        ControlKey::Pan => ControlValue::Pan(crate::domain::control::PanControl::default()),
+        ControlKey::PostGain => ControlValue::Scalar(1.0),
+        ControlKey::PitchBend => {
+            ControlValue::Bipolar(crate::domain::control::SignedUnitValue::new(0.0).unwrap())
+        }
+        ControlKey::Expression => {
+            ControlValue::Unipolar(crate::domain::control::UnitValue::new(1.0).unwrap())
+        }
+        _ => unreachable!(
+            "only additive and multiplicative runtime lanes have reset identities here"
+        ),
+    }
 }
 
 fn span_contains_time(span: TransportSpan, time: Time) -> bool {
@@ -1720,6 +2350,14 @@ fn multiply_gain_values(
     right: ControlValue,
 ) -> Result<ControlValue, ControlModelError> {
     match (left, right) {
+        (ControlValue::Signal(signal), value) | (value, ControlValue::Signal(signal)) => {
+            let multiplier = non_negative_scalar(&value, key)?;
+            Ok(ControlValue::Signal(
+                signal
+                    .with_bias(signal.bias() * multiplier)
+                    .with_depth(signal.depth() * multiplier),
+            ))
+        }
         (
             ControlValue::Ramp { from, to },
             ControlValue::Ramp {
@@ -1759,6 +2397,12 @@ fn add_control_values(
         ControlKey::Pitch => Ok(ControlValue::Scalar(
             finite_scalar(&left, key)? + finite_scalar(&right, key)?,
         )),
+        ControlKey::Transpose => Ok(ControlValue::Semitones(
+            semitone_control(&left)?.combine(semitone_control(&right)?)?,
+        )),
+        ControlKey::Pan => Ok(ControlValue::Pan(
+            pan_control(&left)?.add(pan_control(&right)?)?,
+        )),
         ControlKey::PitchBend => Ok(ControlValue::Bipolar(
             SignedUnitValue::new(
                 (signed_unit_scalar(&left, key)? + signed_unit_scalar(&right, key)?)
@@ -1769,6 +2413,35 @@ fn add_control_values(
         _ => Err(ControlModelError::InvalidControlValue {
             key: key.canonical_name(),
             found: left.kind_label(),
+        }),
+    }
+}
+
+fn semitone_control(
+    value: &ControlValue,
+) -> Result<crate::domain::control::SemitoneControl, ControlModelError> {
+    use crate::domain::control::SemitoneControl;
+    match value {
+        ControlValue::Scalar(value) => SemitoneControl::constant(*value),
+        ControlValue::Signal(signal) => SemitoneControl::signal(*signal),
+        ControlValue::Semitones(control) => Ok(control.clone()),
+        _ => Err(ControlModelError::InvalidControlValue {
+            key: "transpose",
+            found: value.kind_label(),
+        }),
+    }
+}
+
+fn pan_control(
+    value: &ControlValue,
+) -> Result<crate::domain::control::PanControl, ControlModelError> {
+    use crate::domain::control::PanControl;
+    match value {
+        ControlValue::Bipolar(value) => Ok(PanControl::new(*value)),
+        ControlValue::Pan(control) => Ok(*control),
+        _ => Err(ControlModelError::InvalidControlValue {
+            key: "pan",
+            found: value.kind_label(),
         }),
     }
 }
@@ -1831,6 +2504,9 @@ fn project_voice_repetition(
             let visible = whole.intersection(window)?;
             let mut moment =
                 Moment::new(whole, tile.intent().clone()).with_position(tile.position());
+            if let Some(value) = tile.value_identity() {
+                moment = moment.with_value_identity(value.clone());
+            }
             if let Some(id) = tile.id() {
                 moment = moment.with_id(id.value());
             }
@@ -1888,11 +2564,22 @@ fn repeat_extent(repeat: Repeat) -> Option<TransportSpan> {
     }
 }
 
-fn repeat_is_active(repeat: Repeat, period: Time, repetition: u64, window_end: Time) -> bool {
+fn first_repetition(repeat: Repeat, period: Time, window_start: Time) -> i64 {
+    let repetition = (window_start / period).floor();
+    // A cyclic source has phase before and after zero. Finite sources retain
+    // their explicit beginning at zero, including after a timeline shift.
+    if repeat == Repeat::Forever {
+        repetition
+    } else {
+        repetition.max(0)
+    }
+}
+
+fn repeat_is_active(repeat: Repeat, period: Time, repetition: i64, window_end: Time) -> bool {
     match repeat {
         Repeat::Forever => true,
         Repeat::Once => repetition == 0,
-        Repeat::Count(count) => repetition < u64::from(count),
+        Repeat::Count(count) => (0..i64::from(count)).contains(&repetition),
         Repeat::Until(until) => {
             if until <= Time::ZERO {
                 false
@@ -1904,8 +2591,8 @@ fn repeat_is_active(repeat: Repeat, period: Time, repetition: u64, window_end: T
     }
 }
 
-fn voice_offset(repetition: u64, period: Time) -> Time {
-    period * Time::whole_number(repetition as i64)
+fn voice_offset(repetition: i64, period: Time) -> Time {
+    period * Time::whole_number(repetition)
 }
 
 fn clip_to_repeat_limit(whole: TransportSpan, repeat: Repeat) -> Option<TransportSpan> {
@@ -1993,6 +2680,9 @@ fn remap_position(
 ) -> ProjectedMoment {
     let mut moment = Moment::new(projected.whole(), projected.intent().clone())
         .with_position(map(projected.position()));
+    if let Some(value) = projected.as_moment().value_identity() {
+        moment = moment.with_value_identity(value.clone());
+    }
     if let Some(id) = projected.id() {
         moment = moment.with_id(id);
     }
@@ -2008,6 +2698,9 @@ fn remap_projected(
 ) -> ProjectedMoment {
     let mut moment =
         Moment::new(whole, projected.intent().clone()).with_position(projected.position());
+    if let Some(value) = projected.as_moment().value_identity() {
+        moment = moment.with_value_identity(value.clone());
+    }
     if let Some(id) = projected.id() {
         moment = moment.with_id(id);
     }
@@ -2029,11 +2722,19 @@ fn map_span_into_slot(
     slot_start: Time,
     slot_width: Time,
 ) -> TransportSpan {
-    TransportSpan::new(
-        slot_start + (span.start() - cycle_start) * slot_width,
-        slot_start + (span.end() - cycle_start) * slot_width,
-    )
-    .unwrap()
+    // Map whole-span endpoints by their own cycles. A slow event can span
+    // multiple slots; its lifecycle identity must not change with the queried
+    // cycle. Exact end boundaries belong to the preceding slot.
+    let offset = slot_start - cycle_start;
+    let map = |time: Time, is_end: bool| {
+        let mut cycle = time.floor();
+        if is_end && time == Time::whole_number(cycle) {
+            cycle -= 1;
+        }
+        let origin = Time::whole_number(cycle);
+        origin + offset + (time - origin) * slot_width
+    };
+    TransportSpan::new(map(span.start(), false), map(span.end(), true)).unwrap()
 }
 
 fn reflect_span(span: TransportSpan, cycle: TransportSpan) -> TransportSpan {
@@ -2099,7 +2800,6 @@ mod tests {
     use crate::domain::{
         control::{ControlTile, ControlTrack},
         intent::Intent,
-        projection::ProjectedMosaic,
         voice::Tile,
     };
 
@@ -2107,15 +2807,15 @@ mod tests {
         TransportSpan::new(Time::new(start.0, start.1), Time::new(end.0, end.1)).unwrap()
     }
 
-    fn sample_mosaic_score(start: (i64, i64), end: (i64, i64), sample: &str) -> Score {
-        Score::mosaic(Mosaic::new(vec![
+    fn sample_event_score(start: (i64, i64), end: (i64, i64), sample: &str) -> Score {
+        Score::events(vec![
             Moment::spanning(
                 Time::new(start.0, start.1),
                 Time::new(end.0, end.1),
                 Intent::sample(sample),
             )
             .unwrap(),
-        ]))
+        ])
     }
 
     fn sample_voice(start: (i64, i64), end: (i64, i64), sample: &str, id: u64) -> Voice {
@@ -2156,16 +2856,14 @@ mod tests {
             Score::from(sample_voice((0, 1), (1, 4), "kick", 1)),
             Score::from(sample_voice((0, 1), (1, 2), "hat", 2)),
         ]);
-        let projected = ProjectedMosaic::new(
-            evaluate_score(&score, &span((0, 1), (1, 1)))
-                .unwrap()
-                .into_iter()
-                .map(EvaluatedEvent::into_projected)
-                .collect(),
-        );
+        let projected: Vec<_> = evaluate_score(&score, &span((0, 1), (1, 1)))
+            .unwrap()
+            .into_iter()
+            .map(EvaluatedEvent::into_projected)
+            .collect();
 
         assert_eq!(projected.len(), 2);
-        assert_eq!(projected.moments()[0].intent(), &Intent::sample("kick"));
+        assert_eq!(projected[0].intent(), &Intent::sample("kick"));
     }
 
     #[test]
@@ -2175,14 +2873,12 @@ mod tests {
             ControlScore::from(gain_ramp_track((0, 1), (1, 2), 1.0, 0.0)),
         );
         let evaluated = evaluate_score(&score, &span((0, 1), (1, 1))).unwrap();
-        let projected = ProjectedMosaic::new(
-            evaluated
-                .iter()
-                .filter(|event| matches!(event.kind(), EvaluatedEventKind::StartVoice { .. }))
-                .cloned()
-                .map(EvaluatedEvent::into_projected)
-                .collect(),
-        );
+        let projected: Vec<_> = evaluated
+            .iter()
+            .filter(|event| matches!(event.kind(), EvaluatedEventKind::StartVoice { .. }))
+            .cloned()
+            .map(EvaluatedEvent::into_projected)
+            .collect();
 
         assert_eq!(evaluated.len(), 2);
         assert_eq!(projected.len(), 1);
@@ -2289,26 +2985,6 @@ mod tests {
     }
 
     #[test]
-    fn projected_mosaic_from_score_stays_thin() {
-        let projected = ProjectedMosaic::new(
-            evaluate_score(
-                &Score::with_controls(
-                    Score::from(sample_voice((0, 1), (1, 1), "pad", 7)),
-                    ControlScore::from(gain_ramp_track((0, 1), (1, 1), 1.0, 0.0)),
-                ),
-                &span((0, 1), (1, 1)),
-            )
-            .unwrap()
-            .into_iter()
-            .map(EvaluatedEvent::into_projected)
-            .collect(),
-        );
-
-        let mosaic = projected.as_mosaic();
-        assert_eq!(mosaic.len(), projected.len());
-    }
-
-    #[test]
     fn overlapping_override_controls_return_typed_error() {
         let track = ControlTrack::new(
             Time::ONE,
@@ -2369,17 +3045,15 @@ mod tests {
             Score::from(sample_voice((0, 1), (1, 1), "pad", 7)),
             ControlScore::from(track),
         );
-        let projected = ProjectedMosaic::new(
-            evaluate_score(&score, &span((0, 1), (1, 1)))
-                .unwrap()
-                .into_iter()
-                .map(EvaluatedEvent::into_projected)
-                .collect(),
-        );
+        let projected: Vec<_> = evaluate_score(&score, &span((0, 1), (1, 1)))
+            .unwrap()
+            .into_iter()
+            .map(EvaluatedEvent::into_projected)
+            .collect();
 
         assert_eq!(projected.len(), 3);
         assert!(matches!(
-            projected.moments()[1].controls().get(&ControlKey::Gain),
+            projected[1].controls().get(&ControlKey::Gain),
             Some(ControlValue::Scalar(value)) if (*value - 0.35).abs() < f64::EPSILON
         ));
     }
@@ -2433,18 +3107,145 @@ mod tests {
             Score::from(sample_voice((0, 1), (1, 1), "pad", 7)),
             ControlScore::from(gain_ramp_track((0, 1), (1, 1), 1.0, 0.0)),
         ));
-        let projected = ProjectedMosaic::new(
-            evaluate_score(&score, &span((0, 1), (1, 1)))
-                .unwrap()
-                .into_iter()
-                .map(EvaluatedEvent::into_projected)
-                .collect(),
-        );
+        let projected: Vec<_> = evaluate_score(&score, &span((0, 1), (1, 1)))
+            .unwrap()
+            .into_iter()
+            .map(EvaluatedEvent::into_projected)
+            .collect();
 
         assert!(matches!(
-            projected.moments()[0].controls().get(&ControlKey::Gain),
+            projected[0].controls().get(&ControlKey::Gain),
             Some(ControlValue::Ramp { from, to }) if *from <= *to
         ));
+    }
+
+    #[test]
+    fn weighted_slots_repeat_fast_child_inside_its_allotted_duration() {
+        let score = Score::weighted_cycle_slots(vec![
+            WeightedScore::new(
+                Score::time_scale(
+                    Score::from(sample_voice((0, 1), (1, 1), "c", 31)),
+                    Time::whole_number(3),
+                ),
+                Time::whole_number(2),
+            ),
+            WeightedScore::new(
+                Score::from(sample_voice((0, 1), (1, 1), "d", 32)),
+                Time::ONE,
+            ),
+        ]);
+        for cycle in 0..8 {
+            let events = evaluate_score(&score, &span((cycle, 1), (cycle + 1, 1))).unwrap();
+            assert_eq!(events.len(), 4);
+            for (index, event) in events[..3].iter().enumerate() {
+                assert_eq!(event.projected().intent(), &Intent::sample("c"));
+                assert_eq!(
+                    event.projected().whole().start(),
+                    Time::whole_number(cycle) + Time::new(index as i64 * 2, 9)
+                );
+                assert_eq!(
+                    event.projected().whole().end() - event.projected().whole().start(),
+                    Time::new(2, 9)
+                );
+            }
+            assert_eq!(
+                events[3].projected().whole().start(),
+                Time::whole_number(cycle) + Time::new(2, 3)
+            );
+        }
+    }
+
+    #[test]
+    fn weighted_slots_keep_nested_alternation_and_control_phase_on_seek() {
+        let choices = Score::cycle_route(vec![
+            Score::from(sample_voice((0, 1), (1, 1), "c", 41)),
+            Score::from(sample_voice((0, 1), (1, 1), "d", 42)),
+        ]);
+        let score = Score::weighted_cycle_slots(vec![
+            WeightedScore::new(choices, Time::whole_number(2)),
+            WeightedScore::new(
+                Score::from(sample_voice((0, 1), (1, 1), "g", 43)),
+                Time::ONE,
+            ),
+        ]);
+        let all = evaluate_score(&score, &span((0, 1), (8, 1))).unwrap();
+        assert_eq!(all.len(), 16);
+        for cycle in 0..8 {
+            let events = evaluate_score(&score, &span((cycle, 1), (cycle + 1, 1))).unwrap();
+            assert_eq!(
+                events[0].projected().intent(),
+                &Intent::sample(if cycle % 2 == 0 { "c" } else { "d" })
+            );
+            assert_eq!(
+                events[0].projected().whole().end(),
+                Time::whole_number(cycle) + Time::new(2, 3)
+            );
+            assert_eq!(
+                events[1].projected().whole().start(),
+                Time::whole_number(cycle) + Time::new(2, 3)
+            );
+        }
+        let controls = ControlScore::weighted_cycle_slots(vec![
+            WeightedControlScore::new(
+                ControlScore::from(gain_ramp_track((0, 1), (1, 1), 0.2, 0.2)),
+                Time::whole_number(2),
+            ),
+            WeightedControlScore::new(
+                ControlScore::from(gain_ramp_track((0, 1), (1, 1), 0.8, 0.8)),
+                Time::ONE,
+            ),
+        ]);
+        let at_seven = evaluate_control_score(&controls, &span((7, 1), (8, 1))).unwrap();
+        assert_eq!(at_seven.len(), 2);
+        assert_eq!(at_seven[0].whole.end(), Time::new(23, 3));
+        assert_eq!(at_seven[1].whole.start(), Time::new(23, 3));
+    }
+
+    #[test]
+    fn slow_note_whole_and_voice_identity_survive_a_weighted_slot_seek() {
+        let score = Score::weighted_cycle_slots(vec![
+            WeightedScore::new(
+                Score::time_scale(
+                    Score::from(sample_voice((0, 1), (1, 1), "c", 61)),
+                    Time::new(1, 2),
+                ),
+                Time::ONE,
+            ),
+            WeightedScore::new(
+                Score::from(sample_voice((0, 1), (1, 1), "d", 62)),
+                Time::ONE,
+            ),
+        ]);
+        let first = evaluate_score(&score, &span((0, 1), (1, 1))).unwrap();
+        let second = evaluate_score(&score, &span((1, 1), (2, 1))).unwrap();
+        assert_eq!(first[0].projected().whole(), span((0, 1), (3, 2)));
+        assert_eq!(first[0].projected().whole(), second[0].projected().whole());
+        assert_eq!(first[0].kind(), second[0].kind());
+        assert_eq!(first[0].projected().visible(), span((0, 1), (1, 2)));
+        assert_eq!(second[0].projected().visible(), span((1, 1), (3, 2)));
+    }
+
+    #[test]
+    fn single_weighted_slot_keeps_slow_note_as_one_lifecycle() {
+        let score = Score::weighted_cycle_slots(vec![WeightedScore::new(
+            Score::time_scale(
+                Score::from(sample_voice((0, 1), (1, 1), "c", 51)),
+                Time::new(1, 2),
+            ),
+            Time::ONE,
+        )]);
+        let events = evaluate_score(&score, &span((0, 1), (8, 1))).unwrap();
+        assert_eq!(events.len(), 4);
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(
+                event.projected().whole().start(),
+                Time::whole_number(index as i64 * 2)
+            );
+            assert_eq!(
+                event.projected().whole().end(),
+                Time::whole_number(index as i64 * 2 + 2)
+            );
+        }
     }
 
     #[test]
@@ -2507,21 +3308,31 @@ mod tests {
 
     #[test]
     fn degrade_group_key_ignores_visible_span() {
-        let source = Score::degrade(
-            Score::shift(
-                Score::from(sample_voice((0, 1), (1, 1), "long", 99)),
-                Time::new(1, 2),
-            ),
-            DegradePolicy::new(Time::new(1, 2), 123),
+        let shifted = Score::shift(
+            Score::from(sample_voice((0, 1), (1, 1), "long", 99)),
+            Time::new(1, 2),
         );
-
-        let broad = evaluate_score(&source, &span((0, 1), (2, 1))).unwrap();
-        let clipped = evaluate_score(&source, &span((1, 1), (2, 1))).unwrap();
-
-        assert_eq!(broad.is_empty(), clipped.is_empty());
-        if !broad.is_empty() {
-            assert_eq!(lifecycle_key(&broad[0]), lifecycle_key(&clipped[0]));
+        let clipped_window = span((1, 1), (2, 1));
+        let mut compared = 0;
+        for seed in 0..64 {
+            let source = Score::degrade(shifted.clone(), DegradePolicy::new(Time::new(1, 2), seed));
+            let broad = evaluate_score(&source, &span((0, 1), (2, 1))).unwrap();
+            let clipped = evaluate_score(&source, &clipped_window).unwrap();
+            // A shifted cyclic source also has an occurrence before phase
+            // zero. Compare only lifecycles visible in both query windows.
+            let expected: Vec<_> = broad
+                .iter()
+                .filter(|event| event.projected().whole().intersects(&clipped_window))
+                .map(lifecycle_key)
+                .collect();
+            compared += expected.len();
+            assert_eq!(
+                expected,
+                clipped.iter().map(lifecycle_key).collect::<Vec<_>>(),
+                "seed={seed}",
+            );
         }
+        assert!(compared > 0, "exercise surviving clipped lifecycles");
     }
 
     #[test]
@@ -2776,8 +3587,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let controls =
-            evaluate_control_score(&ControlScore::mask_clip(source, mask), &span((0, 1), (1, 1)));
+        let controls = evaluate_control_score(
+            &ControlScore::mask_clip(source, mask),
+            &span((0, 1), (1, 1)),
+        )
+        .unwrap();
         assert_eq!(controls.len(), 1);
         assert_eq!(controls[0].whole, span((0, 1), (1, 1)));
         assert_eq!(controls[0].visible, span((1, 4), (3, 4)));
@@ -2822,7 +3636,8 @@ mod tests {
                 PriorityMergePolicy::new(ConflictPolicy::WholeSpanOverlap),
             ),
             &span((0, 1), (1, 1)),
-        );
+        )
+        .unwrap();
         assert_eq!(controls.len(), 1);
         assert!(matches!(
             controls[0].value,
@@ -2870,9 +3685,9 @@ mod tests {
             123,
         );
 
-        let whole = evaluate_control_score(&score, &span((0, 1), (8, 1)));
-        let left = evaluate_control_score(&score, &span((0, 1), (4, 1)));
-        let right = evaluate_control_score(&score, &span((4, 1), (8, 1)));
+        let whole = evaluate_control_score(&score, &span((0, 1), (8, 1))).unwrap();
+        let left = evaluate_control_score(&score, &span((0, 1), (4, 1))).unwrap();
+        let right = evaluate_control_score(&score, &span((4, 1), (8, 1))).unwrap();
 
         let key = |control: &EvaluatedControl| {
             let value = match control.value {
@@ -2881,7 +3696,10 @@ mod tests {
             };
             (control.whole.start(), value)
         };
-        let whole_keys = whole.iter().map(key).collect::<std::collections::BTreeSet<_>>();
+        let whole_keys = whole
+            .iter()
+            .map(key)
+            .collect::<std::collections::BTreeSet<_>>();
         let split_keys = left
             .iter()
             .chain(right.iter())
@@ -3069,8 +3887,8 @@ mod tests {
     #[test]
     fn concat_plays_equal_one_cycle_children_in_sequence() {
         let score = Score::concat(vec![
-            sample_mosaic_score((0, 1), (1, 1), "a"),
-            sample_mosaic_score((0, 1), (1, 1), "b"),
+            sample_event_score((0, 1), (1, 1), "a"),
+            sample_event_score((0, 1), (1, 1), "b"),
         ]);
         assert!(matches!(score.kind(), ScoreKind::Concat(_)));
         assert_eq!(sample_ids_in_window(&score, (0, 1), (1, 1)), vec!["a"]);
@@ -3079,26 +3897,32 @@ mod tests {
 
     #[test]
     fn concat_unequal_duration_children_use_cumulative_offsets() {
-        let slow_a = Score::time_scale(sample_mosaic_score((0, 1), (1, 1), "a"), Time::new(3, 1));
-        let score = Score::concat(vec![slow_a, sample_mosaic_score((0, 1), (1, 1), "b")]);
+        let slow_a = Score::time_scale(sample_event_score((0, 1), (1, 1), "a"), Time::new(1, 3));
+        let score = Score::concat(vec![slow_a, sample_event_score((0, 1), (1, 1), "b")]);
         assert_eq!(sample_ids_in_window(&score, (0, 1), (3, 1)), vec!["a"]);
+        assert_eq!(sample_ids_in_window(&score, (1, 1), (2, 1)), vec!["a"]);
         assert_eq!(sample_ids_in_window(&score, (3, 1), (4, 1)), vec!["b"]);
-        assert!(sample_ids_in_window(&score, (1, 1), (2, 1)).is_empty());
+        let fast_a = Score::time_scale(sample_event_score((0, 1), (1, 1), "a"), Time::new(3, 1));
+        let score = Score::concat(vec![fast_a, sample_event_score((0, 1), (1, 1), "b")]);
+        let events = evaluate_score(&score, &span((0, 1), (4, 3))).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].projected().whole(), span((0, 1), (1, 3)));
+        assert_eq!(events[1].projected().whole(), span((1, 3), (4, 3)));
     }
 
     #[test]
     fn nested_concat_offsets_by_segment_duration() {
         let four_a = Score::concat(vec![
-            sample_mosaic_score((0, 1), (1, 1), "a"),
-            sample_mosaic_score((0, 1), (1, 1), "a"),
-            sample_mosaic_score((0, 1), (1, 1), "a"),
-            sample_mosaic_score((0, 1), (1, 1), "a"),
+            sample_event_score((0, 1), (1, 1), "a"),
+            sample_event_score((0, 1), (1, 1), "a"),
+            sample_event_score((0, 1), (1, 1), "a"),
+            sample_event_score((0, 1), (1, 1), "a"),
         ]);
         let score = Score::concat(vec![
             four_a,
             Score::concat(vec![
-                sample_mosaic_score((0, 1), (1, 1), "b"),
-                sample_mosaic_score((0, 1), (1, 1), "b"),
+                sample_event_score((0, 1), (1, 1), "b"),
+                sample_event_score((0, 1), (1, 1), "b"),
             ]),
         ]);
         assert_eq!(sample_ids_in_window(&score, (0, 1), (4, 1)), vec!["a"; 4]);
@@ -3109,10 +3933,26 @@ mod tests {
     #[test]
     fn concat_normalizes_non_origin_child_before_sequencing() {
         let score = Score::concat(vec![
-            sample_mosaic_score((2, 1), (3, 1), "a"),
-            sample_mosaic_score((0, 1), (1, 1), "b"),
+            sample_event_score((2, 1), (3, 1), "a"),
+            sample_event_score((0, 1), (1, 1), "b"),
         ]);
         assert_eq!(sample_ids_in_window(&score, (0, 1), (1, 1)), vec!["a"]);
         assert_eq!(sample_ids_in_window(&score, (1, 1), (2, 1)), vec!["b"]);
+    }
+
+    #[test]
+    fn concat_after_merge_preserves_the_full_span_of_offset_children() {
+        let score = Score::concat(vec![
+            Score::merge(vec![
+                sample_event_score((2, 1), (5, 2), "a"),
+                sample_event_score((5, 2), (3, 1), "b"),
+            ]),
+            sample_event_score((0, 1), (1, 1), "c"),
+        ]);
+        let events = evaluate_score(&score, &span((0, 1), (2, 1))).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].projected().whole(), span((0, 1), (1, 2)));
+        assert_eq!(events[1].projected().whole(), span((1, 2), (1, 1)));
+        assert_eq!(events[2].projected().whole(), span((1, 1), (2, 1)));
     }
 }

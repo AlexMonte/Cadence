@@ -85,8 +85,9 @@ fn board_compiles_to_ir() {
         board.finish()
     };
     let ir = TesseraCompiler::new()
-        .compile_authored_ir(&program)
-        .expect("authored spatial program should compile");
+        .compile_authored(&program)
+        .expect("authored spatial program should compile")
+        .ir;
     assert_eq!(ir.outputs.len(), 1);
 }
 
@@ -120,8 +121,9 @@ fn flow_cursor_horizontal_chain() {
         board.finish()
     };
     let ir = TesseraCompiler::new()
-        .compile_authored_ir(&program)
-        .expect("cursor chain should compile");
+        .compile_authored(&program)
+        .expect("cursor chain should compile")
+        .ir;
     assert_eq!(ir.outputs.len(), 1);
 }
 
@@ -135,8 +137,9 @@ fn sequence_stack_fluent_atoms() {
         board.finish()
     };
     let ir = TesseraCompiler::new()
-        .compile_authored_ir(&program)
-        .expect("sequence stack program should compile");
+        .compile_authored(&program)
+        .expect("sequence stack program should compile")
+        .ir;
     assert_eq!(ir.outputs.len(), 1);
 }
 
@@ -202,8 +205,9 @@ fn tile_handle_bind_and_set_sequence() {
     place(board.at(1, 0).output());
     let program = board.finish();
     let ir = TesseraCompiler::new()
-        .compile_authored_ir(&program)
-        .expect("edited sequence should compile");
+        .compile_authored(&program)
+        .expect("edited sequence should compile")
+        .ir;
     assert_eq!(ir.outputs.len(), 1);
 }
 
@@ -276,6 +280,7 @@ fn board_remove_cleans_nested_containers() {
     program.containers.insert(
         ContainerId::new("child"),
         Container {
+            source_nodes: Default::default(),
             kind: ContainerKind::Sequence,
             axis: ContainerAxis::Time,
             stack: Vec::new(),

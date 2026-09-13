@@ -1,6 +1,8 @@
 pub mod lowering;
 pub mod runtime;
 pub mod scene_sync;
+pub mod selected_tile;
+pub mod sound;
 pub mod ui_projection;
 
 pub use ui_projection::{

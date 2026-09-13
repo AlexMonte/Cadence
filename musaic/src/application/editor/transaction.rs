@@ -1,28 +1,23 @@
-use std::collections::BTreeMap;
+pub mod drop;
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use tessera::{
-    bevy::TesseraBoard,
-    prelude::{BoardError, NodeId, SpatialSide},
+use tessera::prelude::{
+    AuthoredTesseraProgram, NodeId, NodeSpatialBindings, RootRelation, SpatialSide,
 };
 
 use crate::application::command::EditorInverse;
-use crate::application::pipeline::runtime::ProjectedEventId;
-use crate::domain::board::{BoardSlot, BoardSurfaceId, BoardSurfaceKind};
-use crate::domain::document::{
-    AuthoredEdge, DocumentNode, DocumentNodeKind, DocumentQueries, MusaicDocument,
-    PlacementAddress, RemovedBoardBinding, StackIndex, TileSpawnKind, authorize_connection,
-    bind_tiles_on_board, capture_subtree_patch, connection_exists, cycle_port_state,
-    empty_container_stack, export_container_stack_excluding, export_container_stack_with_insert,
-    map_container_kind_for_document, opposite_spatial_side, root_board_tile_footprint,
-    spatial_side_between, stack_nodes_on_surface, sync_document_tessera_from_board,
-    sync_root_slot_to_document, unbind_output_side_on_board,
-};
-use crate::domain::transform::transform_kind_from_prototype;
-
 use crate::application::editor::selection::{SelectionMode, SelectionState};
 use crate::application::editor::workspace::{
     ActiveSurfaceChangeReason, ActiveSurfaceChanged, EditorAttention, FocusTarget, WorkspaceMode,
+};
+use crate::application::pipeline::runtime::ProjectedEventId;
+use crate::domain::board::{BoardSlot, BoardSurfaceId, BoardSurfaceKind};
+use crate::domain::document::{
+    AuthoredEdge, DocumentNodeKind, DocumentQueries, MusaicDocument, PlacementAddress, StackIndex,
+    TileSpawnKind, bind_authorized_edge, capture_subtree_patch, connection_exists,
+    export_document_program, unbind_connection,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,7 +38,6 @@ pub struct EditorTransactionResult {
     pub invalidation: Invalidation,
     pub active_surface_change: Option<ActiveSurfaceChanged>,
     pub diagnostics: Vec<EditorTransactionDiagnostic>,
-    /// Inverse to undo this transaction when accepted.
     pub undo: Option<EditorInverse>,
 }
 
@@ -95,8 +89,6 @@ pub struct Invalidation {
     pub scene: bool,
     pub runtime: bool,
     pub save: bool,
-    /// Document graph changed in a way that requires re-export into TesseraBoard before compile.
-    pub needs_board_reexport: bool,
 }
 
 impl Invalidation {
@@ -112,7 +104,6 @@ impl Invalidation {
             scene: true,
             runtime: true,
             save: true,
-            needs_board_reexport: false,
         }
     }
 
@@ -123,30 +114,12 @@ impl Invalidation {
         }
     }
 
-    /// Full document graph replacement (load, restore patch) — re-export board before compile.
     pub fn document_replaced() -> Self {
-        Self {
-            document: true,
-            compile: true,
-            lower: true,
-            scene: true,
-            runtime: true,
-            save: true,
-            needs_board_reexport: true,
-        }
+        Self::document_changed()
     }
 
-    /// Board wiring changed; re-export connections onto Tessera before compile.
     pub fn connections_changed() -> Self {
-        Self {
-            compile: true,
-            lower: true,
-            scene: true,
-            runtime: true,
-            save: true,
-            needs_board_reexport: true,
-            ..Self::default()
-        }
+        Self::document_changed()
     }
 }
 
@@ -173,37 +146,146 @@ pub struct TimelineSource {
     pub node: NodeId,
 }
 
-pub fn map_board_error(error: BoardError) -> String {
-    match error {
-        BoardError::SlotOccupied => "That cell is already occupied.".into(),
-        BoardError::UnknownTile => "That tile was removed or moved; reconnect or reselect.".into(),
-        BoardError::DuplicateId { existing_slot } => {
-            format!(
-                "That id is already used at ({}, {}).",
-                existing_slot.x, existing_slot.y
-            )
-        }
+fn commit_candidate(
+    document: &mut MusaicDocument,
+    mut candidate: MusaicDocument,
+) -> Result<(), String> {
+    candidate.validate()?;
+    candidate.bump_revision();
+    *document = candidate;
+    Ok(())
+}
+
+fn export(document: &MusaicDocument) -> Result<AuthoredTesseraProgram, String> {
+    export_document_program(document)
+        .map_err(|error| format!("The document cannot be compiled: {error:?}"))
+}
+
+pub fn set_atom_value(
+    document: &mut MusaicDocument,
+    node: &NodeId,
+    value: crate::domain::document::AtomValue,
+) -> EditorTransactionResult {
+    let mut candidate = document.clone();
+    let previous = match candidate.graph.set_atom_value(node, value.clone()) {
+        Ok(previous) => previous,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    if previous == value {
+        return EditorTransactionResult::accepted(Invalidation::none());
     }
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
+    EditorTransactionResult::accepted(Invalidation::document_changed()).with_undo(
+        EditorInverse::RestoreAtomValue {
+            node: node.clone(),
+            value: previous,
+        },
+    )
+}
+
+pub fn move_modifier_group(
+    document: &mut MusaicDocument,
+    owner: &NodeId,
+    step: i8,
+) -> EditorTransactionResult {
+    use crate::application::pipeline::scene_sync::surface_content::{
+        OwnedTileGroupRole, owned_compound_for_node,
+    };
+    if step != -1 && step != 1 {
+        return EditorTransactionResult::rejected("Move a group one position at a time.");
+    }
+    let Some(mut compound) = owned_compound_for_node(&DocumentQueries::new(document), owner) else {
+        return EditorTransactionResult::rejected("Select a modifier group to move.");
+    };
+    let current = compound.selected_group;
+    let Some(target) = current
+        .checked_add_signed(isize::from(step))
+        .filter(|index| *index < compound.groups.len())
+    else {
+        return EditorTransactionResult::rejected(
+            "That group is already at the edge of this note.",
+        );
+    };
+    let movable = |role| {
+        matches!(
+            role,
+            OwnedTileGroupRole::Octave
+                | OwnedTileGroupRole::Accidental
+                | OwnedTileGroupRole::Modifier(_)
+                | OwnedTileGroupRole::SoundModifier(_)
+                | OwnedTileGroupRole::RhythmModifier
+        )
+    };
+    if !movable(compound.groups[current].role)
+        || !movable(compound.groups[target].role)
+        || !compound.groups[current].complete
+        || !compound.groups[target].complete
+    {
+        return EditorTransactionResult::rejected(
+            "Complete modifier groups move together within their note.",
+        );
+    }
+    compound.groups.swap(current, target);
+    let order = compound
+        .groups
+        .iter()
+        .flat_map(|group| group.members.clone())
+        .collect::<Vec<_>>();
+    restore_stack_order(document, compound.surface, &order)
+}
+
+pub fn restore_stack_order(
+    document: &mut MusaicDocument,
+    surface: BoardSurfaceId,
+    order: &[NodeId],
+) -> EditorTransactionResult {
+    let mut candidate = document.clone();
+    let previous = match candidate.graph.reorder_stack_nodes(surface, order) {
+        Ok(previous) => previous,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
+    EditorTransactionResult::accepted(Invalidation::document_changed()).with_undo(
+        EditorInverse::RestoreStackOrder {
+            surface,
+            order: previous,
+        },
+    )
 }
 
 pub fn place_tile(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     attention: &mut EditorAttention,
     selection: &mut SelectionState,
     target: PlacementTarget,
     tile: TileSpawnKind,
 ) -> EditorTransactionResult {
+    if matches!(tile, TileSpawnKind::Output { .. })
+        && document
+            .graph
+            .nodes()
+            .filter(|node| matches!(node.kind, DocumentNodeKind::Output(_)))
+            .count()
+            >= usize::from(document.channels)
+    {
+        return EditorTransactionResult::rejected(
+            "The project channel limit has been reached. Remove an output or increase Channels.",
+        );
+    }
+
     let (surface, address) = match target {
+        PlacementTarget::BoardSlot { surface, slot } if surface == document.root_surface => {
+            (surface, PlacementAddress::BoardSlot(slot))
+        }
         PlacementTarget::BoardSlot { surface, slot } => {
-            if surface == document.root_surface {
-                (surface, PlacementAddress::BoardSlot(slot))
-            } else {
-                (
-                    surface,
-                    PlacementAddress::StackIndex(StackIndex(slot.x as usize)),
-                )
-            }
+            let Ok(index) = usize::try_from(slot.x) else {
+                return EditorTransactionResult::rejected("A stack position cannot be negative.");
+            };
+            (surface, PlacementAddress::StackIndex(StackIndex(index)))
         }
         PlacementTarget::StackIndex { surface, index } => {
             (surface, PlacementAddress::StackIndex(index))
@@ -220,7 +302,6 @@ pub fn place_tile(
             "Cannot place tile on a board surface that is not currently active.",
         );
     }
-
     let Some(surface_kind) = document.surfaces.kind(surface) else {
         return EditorTransactionResult::rejected("Cannot determine target board surface kind.");
     };
@@ -230,62 +311,88 @@ pub fn place_tile(
         );
     }
 
-    let auto_connect_partner = root_auto_connect_partner(document, attention, selection);
-    let node = match address {
-        PlacementAddress::BoardSlot(slot) if surface == document.root_surface => {
-            match place_root_tile_on_board(board, document, slot, tile) {
-                Ok(node) => node,
-                Err(error) => {
-                    return EditorTransactionResult::rejected(map_board_error(error));
+    if let PlacementAddress::StackIndex(index) = address {
+        if let Some(existing) = document.graph.node_at_stack_index(surface, index) {
+            if drop::is_number(&tile) && drop::note_owner(document, &existing).is_some() {
+                let mut candidate = document.clone();
+                let owner = match drop::apply_number(&mut candidate, &existing, &tile) {
+                    Ok(owner) => owner,
+                    Err(error) => return EditorTransactionResult::rejected(error),
+                };
+                if let Err(message) = commit_candidate(document, candidate) {
+                    return EditorTransactionResult::rejected(message);
                 }
-            }
-        }
-        PlacementAddress::StackIndex(index) => {
-            match place_stack_tile_on_board(board, document, surface, index, tile) {
-                Ok(node) => node,
-                Err(error) => {
-                    return EditorTransactionResult::rejected(map_board_error(error));
-                }
-            }
-        }
-        _ => {
-            return EditorTransactionResult::rejected(
-                "Only root board slots are supported for this placement.",
-            );
-        }
-    };
-
-    if matches!(address, PlacementAddress::BoardSlot(_)) && surface == document.root_surface {
-        if let Some(partner) = auto_connect_partner.filter(|partner| partner != &node) {
-            if let Ok(edge) =
-                authorize_connection(&document.tessera.authored_program, &partner, &node)
-            {
-                apply_authorized_connection(document, board, &partner, &node, edge)
-                    .expect("authorized root-board connection must bind on the live board");
-            } else if let Ok(edge) =
-                authorize_connection(&document.tessera.authored_program, &node, &partner)
-            {
-                apply_authorized_connection(document, board, &node, &partner, edge)
-                    .expect("authorized root-board connection must bind on the live board");
+                selection.select(owner.clone(), SelectionMode::Replace);
+                set_focus(attention, document, focus_for_source_node(document, &owner));
+                return EditorTransactionResult::accepted(Invalidation::document_changed());
             }
         }
     }
 
+    let previous_program = match export(document) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    let auto_connect_partner = root_auto_connect_partner(document, attention, selection);
+    let mut candidate = document.clone();
+    let node = match candidate
+        .graph
+        .insert_tile(&mut candidate.surfaces, surface, address, tile)
+    {
+        Ok(node) => node,
+        Err(error) => {
+            return EditorTransactionResult::rejected(format!(
+                "Could not place the tile: {error:?}"
+            ));
+        }
+    };
+
+    let diagnostics =
+        if matches!(address, PlacementAddress::BoardSlot(_)) && surface == candidate.root_surface {
+            let mut current_program = match export(&candidate) {
+                Ok(program) => program,
+                Err(message) => return EditorTransactionResult::rejected(message),
+            };
+            let plan = match crate::application::editor::connection::plan_contextual_connections(
+                &previous_program,
+                &current_program,
+                std::slice::from_ref(&node),
+                auto_connect_partner.as_ref(),
+            ) {
+                Ok(plan) => plan,
+                Err(message) => return EditorTransactionResult::rejected(message),
+            };
+            current_program.root_surface.bindings = plan.bindings;
+            current_program.root_surface.explicit_relations = plan.explicit_relations;
+            candidate.replace_connections_from(&current_program);
+            plan.feedback
+                .into_iter()
+                .map(|message| EditorTransactionDiagnostic {
+                    severity: DiagnosticSeverity::Info,
+                    message,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
     selection.clear();
     selection.select(node.clone(), SelectionMode::Replace);
     if let PlacementAddress::StackIndex(index) = address {
         if document
             .surfaces
             .kind(surface)
-            .is_some_and(|k| k != BoardSurfaceKind::RootBoard)
+            .is_some_and(|kind| kind != BoardSurfaceKind::RootBoard)
         {
-            let next = StackIndex(index.0 + 1);
             set_focus(
                 attention,
                 document,
                 FocusTarget::StackInsert {
                     surface,
-                    index: next,
+                    index: StackIndex(index.0 + 1),
                 },
             );
         } else {
@@ -294,188 +401,28 @@ pub fn place_tile(
     } else {
         set_focus(attention, document, focus_for_source_node(document, &node));
     }
-    EditorTransactionResult::accepted(Invalidation::document_changed())
-        .with_undo(EditorInverse::DeleteNode { node })
-}
 
-fn place_root_tile_on_board(
-    board: &mut TesseraBoard,
-    document: &mut MusaicDocument,
-    slot: BoardSlot,
-    tile: TileSpawnKind,
-) -> Result<NodeId, BoardError> {
-    let node_id = board
-        .tile_at(slot)
-        .map(|existing| existing.id)
-        .unwrap_or_else(|| document.graph.allocate_node_id());
-    let name = node_id.0.clone();
-    let footprint = root_board_tile_footprint(&tile);
-    let slot_builder = board
-        .replace_at(slot.x, slot.y)
-        .named(name)
-        .footprint(footprint);
-
-    match tile {
-        TileSpawnKind::Container { kind } => {
-            let stack = empty_container_stack();
-            match map_container_kind_for_document(kind) {
-                tessera::prelude::ContainerKind::Sequence => {
-                    let _ = slot_builder.sequence(stack)?;
-                }
-                tessera::prelude::ContainerKind::Alternate => {
-                    let _ = slot_builder.alternate(stack)?;
-                }
-                tessera::prelude::ContainerKind::Layer => {
-                    let _ = slot_builder.layer_container(stack)?;
-                }
-            }
-        }
-        TileSpawnKind::Output { .. } => {
-            let _ = slot_builder.output()?;
-        }
-        TileSpawnKind::TrickInstance { prototype } => {
-            let Some(kind) = transform_kind_from_prototype(prototype) else {
-                return Err(BoardError::UnknownTile);
-            };
-            let _ = slot_builder.transform(kind)?;
-        }
-        _ => return Err(BoardError::UnknownTile),
-    }
-
-    sync_root_slot_to_document(document, board, slot)?;
-    Ok(node_id)
-}
-
-fn place_stack_tile_on_board(
-    board: &mut TesseraBoard,
-    document: &mut MusaicDocument,
-    surface: BoardSurfaceId,
-    index: StackIndex,
-    tile: TileSpawnKind,
-) -> Result<NodeId, BoardError> {
-    let container_node = document
-        .graph
-        .container_node_for_surface(surface)
-        .ok_or(BoardError::UnknownTile)?;
-    let container = document
-        .graph
-        .node(&container_node)
-        .ok_or(BoardError::UnknownTile)?
-        .clone();
-    let mut nested = BTreeMap::new();
-    let (stack, placed_id, stack_nodes) = export_container_stack_with_insert(
-        &mut document.graph,
-        &container,
-        surface,
-        index,
-        &tile,
-        &mut nested,
-    )?;
-    let mut handle = board
-        .handle(&container_node)
-        .ok_or(BoardError::UnknownTile)?;
-    handle.set_sequence(stack)?;
-    reconcile_stack_nodes_after_projection(document, surface, &stack_nodes);
-    document.sync_tile_store_from_graph();
-    document.bump_revision();
-    Ok(placed_id)
-}
-
-fn reconcile_stack_nodes_after_projection(
-    document: &mut MusaicDocument,
-    surface: BoardSurfaceId,
-    stack_nodes: &[(StackIndex, DocumentNode)],
-) {
-    let desired_ids = stack_nodes
-        .iter()
-        .map(|(_, node)| node.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-
-    let existing = document
-        .graph
-        .nodes_on_surface(surface)
-        .into_iter()
-        .map(|(location, node)| match location.address {
-            PlacementAddress::StackIndex(_) | PlacementAddress::BoardSlot(_) => node.id.clone(),
-        })
-        .collect::<Vec<_>>();
-
-    let mut deleted = crate::domain::document::graph::DeletedSubtree::default();
-    for node_id in existing {
-        if desired_ids.contains(&node_id) {
-            continue;
-        }
-        if let Ok(subtree) = document
-            .graph
-            .delete_subtree(&node_id, &mut document.surfaces)
-        {
-            deleted.nodes.extend(subtree.nodes);
-            deleted.surfaces.extend(subtree.surfaces);
-            deleted.edges.extend(subtree.edges);
-        }
-    }
-
-    let mut inserted = Vec::new();
-    for (index, node) in stack_nodes {
-        if document
-            .graph
-            .node_at_stack_index(surface, *index)
-            .is_some()
-        {
-            continue;
-        }
-        let Some(spawn) = stack_node_to_spawn(node) else {
-            continue;
-        };
-        if document
-            .graph
-            .insert_tile_at_id(
-                &mut document.surfaces,
-                surface,
-                PlacementAddress::StackIndex(*index),
-                node.id.clone(),
-                spawn,
-            )
-            .is_ok()
-        {
-            inserted.push(node.id.clone());
-        }
-    }
-
-    document
-        .tiles
-        .apply_patch(&document.graph, &inserted, &deleted);
-    document.sync_tile_store_from_graph();
-}
-
-fn stack_node_to_spawn(node: &DocumentNode) -> Option<TileSpawnKind> {
-    match &node.kind {
-        DocumentNodeKind::Atom(atom) => Some(TileSpawnKind::Atom {
-            atom: atom.atom.clone(),
-        }),
-        DocumentNodeKind::Container(container) => Some(TileSpawnKind::Container {
-            kind: container.kind,
-        }),
-        _ => None,
-    }
+    let mut result = EditorTransactionResult::accepted(Invalidation::document_changed())
+        .with_undo(EditorInverse::DeleteNode { node });
+    result.diagnostics = diagnostics;
+    result
 }
 
 fn tile_allowed_on_surface(tile: &TileSpawnKind, surface_kind: &BoardSurfaceKind) -> bool {
     match surface_kind {
         BoardSurfaceKind::RootBoard => match tile {
-            TileSpawnKind::Atom { .. } => false,
-            TileSpawnKind::Container { .. } => true,
-            TileSpawnKind::Tile { .. } => true,
-            TileSpawnKind::Output { .. } => true,
-            TileSpawnKind::TrickInstance { .. } => true,
-        },
-        BoardSurfaceKind::ContainerStack { .. } => match tile {
-            TileSpawnKind::Atom { .. } => true,
-            TileSpawnKind::Container { .. } => true,
+            TileSpawnKind::Atom { atom } => atom.numeric_rational().is_some(),
+            TileSpawnKind::Container { .. }
+            | TileSpawnKind::Output { .. }
+            | TileSpawnKind::Sound { .. }
+            | TileSpawnKind::TrickInstance { .. }
+            | TileSpawnKind::FlowControl { .. } => true,
             TileSpawnKind::Tile { .. } => false,
-            TileSpawnKind::Output { .. } => false,
-            TileSpawnKind::TrickInstance { .. } => true,
         },
+        BoardSurfaceKind::ContainerStack { .. } => matches!(
+            tile,
+            TileSpawnKind::Atom { .. } | TileSpawnKind::Container { .. }
+        ),
     }
 }
 
@@ -514,10 +461,8 @@ pub fn enter_container(
     result
 }
 
-/// Removes a single node (inverse of place). Does not record undo metadata.
 pub fn delete_node(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     attention: &mut EditorAttention,
     selection: &mut SelectionState,
     node: &NodeId,
@@ -528,73 +473,55 @@ pub fn delete_node(
     }
     delete_nodes(
         document,
-        board,
         attention,
         selection,
-        &[node.clone()],
+        std::slice::from_ref(node),
         false,
     )
 }
 
-/// Removes an authored connection (inverse of connect).
 pub fn disconnect_tiles(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     from: &NodeId,
     to: &NodeId,
 ) -> EditorTransactionResult {
-    let program = &document.tessera.authored_program;
-    let Some(connection) =
-        crate::domain::document::connections_from_program(program, &document.port_endpoints)
-            .into_iter()
-            .find(|c| &c.from == from && &c.to == to)
-    else {
-        return EditorTransactionResult::rejected("Connection does not exist.");
+    let mut program = match export(document) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
     };
-    let side = connection.spatial_side;
-    if unbind_output_side_on_board(board, from, side).is_err() {
+    if !connection_exists(&program, from, to) {
         return EditorTransactionResult::rejected("Connection does not exist.");
     }
-    document
-        .port_endpoints
-        .set_side(from, side, crate::domain::document::PortSlotState::None);
-    document.port_endpoints.set_side(
-        to,
-        opposite_spatial_side(side),
-        crate::domain::document::PortSlotState::None,
-    );
-    sync_document_tessera_from_board(document, board);
-    document.bump_revision();
+    if unbind_connection(&mut program, from, to).is_err() {
+        return EditorTransactionResult::rejected("Connection does not exist.");
+    }
+    let mut candidate = document.clone();
+    candidate.replace_connections_from(&program);
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
     EditorTransactionResult::accepted(Invalidation::connections_changed())
 }
 
 pub fn delete_selection(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     attention: &mut EditorAttention,
     selection: &mut SelectionState,
 ) -> EditorTransactionResult {
     if selection.nodes.is_empty() {
         return EditorTransactionResult::rejected("There is no selection to delete.");
     }
-
     let selected = selection.nodes.iter().cloned().collect::<Vec<_>>();
-    delete_nodes(document, board, attention, selection, &selected, true)
+    delete_nodes(document, attention, selection, &selected, true)
 }
 
 fn delete_nodes(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     attention: &mut EditorAttention,
     selection: &mut SelectionState,
     selected: &[NodeId],
     capture_undo: bool,
 ) -> EditorTransactionResult {
-    let restore_patch = if capture_undo {
-        capture_subtree_patch(document, selected)
-    } else {
-        Default::default()
-    };
     for node in selected {
         if !document.graph.contains_node(node) {
             return EditorTransactionResult::rejected(
@@ -603,83 +530,61 @@ fn delete_nodes(
         }
     }
 
-    let active_board_before = attention.active_board();
-    let mut deleted_any = false;
-    let mut root_slots_to_sync = Vec::new();
-    let mut stack_surfaces_to_reconcile = Vec::new();
-    for node in selected.iter() {
-        let Some(location) = document.graph.location_of(&node) else {
+    let deletion_patch = capture_subtree_patch(document, selected);
+    let deleted_ids = deletion_patch
+        .nodes
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let restore_patch = capture_undo.then_some(deletion_patch);
+    let mut candidate = document.clone();
+    let mut program = match export(&candidate) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    let disconnected_pairs =
+        crate::domain::document::connection_policy::endpoint_connections(&program)
+            .into_iter()
+            .filter(|edge| deleted_ids.contains(&edge.from) || deleted_ids.contains(&edge.to))
+            .map(|edge| (edge.from, edge.to))
+            .collect::<BTreeSet<_>>();
+    for (from, to) in disconnected_pairs {
+        let _ = unbind_connection(&mut program, &from, &to);
+    }
+    candidate.replace_connections_from(&program);
+
+    for node in selected {
+        if !candidate.graph.contains_node(node) {
             continue;
+        }
+        let deleted = match candidate
+            .graph
+            .delete_subtree(node, &mut candidate.surfaces)
+        {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                return EditorTransactionResult::rejected(format!(
+                    "Could not delete the selected tile: {error:?}"
+                ));
+            }
         };
-        match location.address {
-            PlacementAddress::BoardSlot(slot) if location.surface == document.root_surface => {
-                if board.remove_at(slot).is_none() {
-                    return EditorTransactionResult::rejected(map_board_error(
-                        BoardError::UnknownTile,
-                    ));
-                }
-                root_slots_to_sync.push(slot);
-                deleted_any = true;
-            }
-            PlacementAddress::StackIndex(_) | PlacementAddress::BoardSlot(_) => {
-                let Some(container_node) =
-                    document.graph.container_node_for_surface(location.surface)
-                else {
-                    return EditorTransactionResult::rejected(map_board_error(
-                        BoardError::UnknownTile,
-                    ));
-                };
-                let container = match document.graph.node(&container_node) {
-                    Some(node) => node,
-                    None => {
-                        return EditorTransactionResult::rejected(map_board_error(
-                            BoardError::UnknownTile,
-                        ));
-                    }
-                };
-                let mut nested = BTreeMap::new();
-                let stack = export_container_stack_excluding(
-                    &document.graph,
-                    container,
-                    location.surface,
-                    &node,
-                    &mut nested,
-                );
-                let mut handle = match board.handle(&container_node) {
-                    Some(handle) => handle,
-                    None => {
-                        return EditorTransactionResult::rejected(map_board_error(
-                            BoardError::UnknownTile,
-                        ));
-                    }
-                };
-                if let Err(error) = handle.set_sequence(stack) {
-                    return EditorTransactionResult::rejected(map_board_error(error));
-                }
-                let stack_nodes = stack_nodes_on_surface(&document.graph, location.surface)
-                    .into_iter()
-                    .filter(|(_, stack_node)| stack_node.id != *node)
-                    .collect::<Vec<_>>();
-                stack_surfaces_to_reconcile.push((location.surface, stack_nodes));
-                deleted_any = true;
-            }
+        for surface in deleted.surfaces {
+            candidate.surfaces.remove_container_surface(surface);
         }
     }
-    if !deleted_any {
-        return EditorTransactionResult::rejected("No selected nodes were deleted.");
-    }
+    candidate
+        .connections
+        .bindings
+        .retain(|node, _| candidate.graph.contains_node(node));
+    candidate.connections.explicit_relations.retain(|relation| {
+        let edge = crate::domain::document::connection_policy::explicit_connection(relation);
+        candidate.graph.contains_node(&edge.from) && candidate.graph.contains_node(&edge.to)
+    });
 
-    for slot in root_slots_to_sync {
-        if let Err(error) = sync_root_slot_to_document(document, board, slot) {
-            return EditorTransactionResult::rejected(map_board_error(error));
-        }
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
     }
-    for (surface, stack_nodes) in stack_surfaces_to_reconcile {
-        reconcile_stack_nodes_after_projection(document, surface, &stack_nodes);
-    }
-
-    let remaining = |node: &NodeId| document.graph.contains_node(node);
-    document.port_endpoints.retain_nodes(remaining);
+    let active_board_before = attention.active_board();
     selection.clear();
     if !document.surfaces.contains(active_board_before) {
         let surface_change = match attention.set_active_board(
@@ -694,41 +599,27 @@ fn delete_nodes(
                 ));
             }
         };
-        let mut result = finish_delete_result(
-            Invalidation::document_changed(),
-            capture_undo,
-            restore_patch,
-        );
+        let mut result = finish_delete_result(restore_patch);
         result.active_surface_change = surface_change;
         set_focus(attention, document, FocusTarget::None);
         return result;
     }
     set_focus(attention, document, FocusTarget::None);
-    finish_delete_result(
-        Invalidation::document_changed(),
-        capture_undo,
-        restore_patch,
-    )
+    finish_delete_result(restore_patch)
 }
 
 fn finish_delete_result(
-    invalidation: Invalidation,
-    capture_undo: bool,
-    restore_patch: crate::domain::document::DocumentPatch,
+    restore_patch: Option<crate::domain::document::DocumentPatch>,
 ) -> EditorTransactionResult {
-    let result = EditorTransactionResult::accepted(invalidation);
-    if capture_undo {
-        result.with_undo(EditorInverse::RestoreSubtree {
-            patch: restore_patch,
-        })
-    } else {
-        result
+    let result = EditorTransactionResult::accepted(Invalidation::document_changed());
+    match restore_patch {
+        Some(patch) => result.with_undo(EditorInverse::RestoreSubtree { patch }),
+        None => result,
     }
 }
 
 pub fn bind_output_side(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     _attention: &EditorAttention,
     node: &NodeId,
     side: SpatialSide,
@@ -736,56 +627,87 @@ pub fn bind_output_side(
     if !document.graph.contains_node(node) {
         return EditorTransactionResult::rejected("Cannot bind port on missing tile.");
     }
-
-    let previous = document.port_endpoints.side_state(node, side);
-    let next = cycle_port_state(previous);
-    let removed_binding = if next.disconnects() {
-        unbind_output_side_on_board(board, node, side)
-            .ok()
-            .flatten()
-            .map(|to| RemovedBoardBinding {
-                from: node.clone(),
-                to,
-                side,
-            })
-    } else {
-        None
+    let previous_bindings = document.connections.bindings.clone();
+    let previous_relations = document.connections.explicit_relations.clone();
+    let current = match export(document) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
     };
-
-    document.port_endpoints.set_side(node, side, next);
-    sync_document_tessera_from_board(document, board);
-    document.bump_revision();
-
+    let program = match crate::domain::document::connection_policy::authorize_side_cycle(
+        &current, node, side,
+    ) {
+        Ok(program) => program,
+        Err(error) => return EditorTransactionResult::rejected(error.to_string()),
+    };
+    let mut candidate = document.clone();
+    candidate.replace_connections_from(&program);
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
     EditorTransactionResult::accepted(Invalidation::connections_changed()).with_undo(
-        EditorInverse::RestorePortBinding {
-            node: node.clone(),
-            side,
-            port_state: previous,
-            removed_binding,
-        },
+        connection_inverse(previous_bindings, previous_relations, document),
     )
 }
 
-pub fn restore_port_binding(
-    document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
-    node: &NodeId,
-    side: SpatialSide,
-    port_state: crate::domain::document::PortSlotState,
-    removed_binding: Option<RemovedBoardBinding>,
-) -> EditorTransactionResult {
-    document.port_endpoints.set_side(node, side, port_state);
-    if let Some(binding) = removed_binding {
-        let _ = bind_tiles_on_board(board, &binding.from, &binding.to, binding.side);
+fn connection_inverse(
+    previous_bindings: BTreeMap<NodeId, NodeSpatialBindings>,
+    previous_relations: Vec<RootRelation>,
+    document: &MusaicDocument,
+) -> EditorInverse {
+    fn changed<T: Clone + PartialEq>(
+        before: &BTreeMap<NodeId, T>,
+        after: &BTreeMap<NodeId, T>,
+    ) -> BTreeMap<NodeId, Option<T>> {
+        before
+            .keys()
+            .chain(after.keys())
+            .filter(|id| before.get(*id) != after.get(*id))
+            .map(|id| (id.clone(), before.get(id).cloned()))
+            .collect()
     }
-    sync_document_tessera_from_board(document, board);
-    document.bump_revision();
+    EditorInverse::RestoreConnections {
+        relations: (previous_relations != document.connections.explicit_relations)
+            .then_some(previous_relations),
+        bindings: changed(&previous_bindings, &document.connections.bindings),
+    }
+}
+
+pub fn restore_connections(
+    document: &mut MusaicDocument,
+    bindings: &BTreeMap<NodeId, Option<NodeSpatialBindings>>,
+    relations: &Option<Vec<RootRelation>>,
+) -> EditorTransactionResult {
+    fn restore<T: Clone>(target: &mut BTreeMap<NodeId, T>, patch: &BTreeMap<NodeId, Option<T>>) {
+        for (id, value) in patch {
+            if let Some(value) = value {
+                target.insert(id.clone(), value.clone());
+            } else {
+                target.remove(id);
+            }
+        }
+    }
+
+    let mut program = match export(document) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    restore(&mut program.root_surface.bindings, bindings);
+    if let Some(relations) = relations {
+        program
+            .root_surface
+            .explicit_relations
+            .clone_from(relations);
+    }
+    let mut candidate = document.clone();
+    candidate.replace_connections_from(&program);
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
     EditorTransactionResult::accepted(Invalidation::connections_changed())
 }
 
 pub fn cycle_connection(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     attention: &EditorAttention,
     from: &NodeId,
     to: &NodeId,
@@ -796,20 +718,42 @@ pub fn cycle_connection(
     let Some(to_location) = document.graph.location_of(to) else {
         return EditorTransactionResult::rejected("Connection target is missing placement.");
     };
-    let (PlacementAddress::BoardSlot(from_slot), PlacementAddress::BoardSlot(to_slot)) =
+    let (PlacementAddress::BoardSlot(_), PlacementAddress::BoardSlot(_)) =
         (from_location.address, to_location.address)
     else {
         return EditorTransactionResult::rejected(
             "Connections are currently supported on board surfaces only.",
         );
     };
-    let side = spatial_side_between(from_slot, to_slot);
-    bind_output_side(document, board, attention, from, side)
+    if attention.workspace_mode != WorkspaceMode::Compose
+        || from_location.surface != attention.active_board()
+        || to_location.surface != attention.active_board()
+    {
+        return EditorTransactionResult::rejected(
+            "Connections can only be edited on the active pattern board.",
+        );
+    }
+    let previous_bindings = document.connections.bindings.clone();
+    let previous_relations = document.connections.explicit_relations.clone();
+    let mut program = match export(document) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    if unbind_connection(&mut program, from, to).is_err() {
+        return EditorTransactionResult::rejected("That connection no longer exists.");
+    }
+    let mut candidate = document.clone();
+    candidate.replace_connections_from(&program);
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
+    EditorTransactionResult::accepted(Invalidation::connections_changed()).with_undo(
+        connection_inverse(previous_bindings, previous_relations, document),
+    )
 }
 
 pub fn connect_tiles(
     document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
     attention: &mut EditorAttention,
     selection: &mut SelectionState,
     from: NodeId,
@@ -823,7 +767,6 @@ pub fn connect_tiles(
     if !document.graph.contains_node(&from) || !document.graph.contains_node(&to) {
         return EditorTransactionResult::rejected("Cannot connect missing tiles.");
     }
-
     let Some(from_location) = document.graph.location_of(&from) else {
         return EditorTransactionResult::rejected("Connection source is missing placement.");
     };
@@ -840,31 +783,46 @@ pub fn connect_tiles(
             "Connections can only be authored on the active surface.",
         );
     }
-    if connection_exists(
-        &document.tessera.authored_program,
-        &document.port_endpoints,
-        &from,
-        &to,
-    ) {
-        return EditorTransactionResult::rejected("That connection already exists.".to_string());
+
+    let mut program = match export(document) {
+        Ok(program) => program,
+        Err(message) => return EditorTransactionResult::rejected(message),
+    };
+    if connection_exists(&program, &from, &to) {
+        return EditorTransactionResult::rejected("That connection already exists.");
     }
-    let edge = match authorize_connection(&document.tessera.authored_program, &from, &to) {
+    let edge = match crate::domain::document::connection_policy::authorize_manual_connection(
+        &program, &from, &to,
+    ) {
         Ok(edge) => edge,
         Err(error) => return EditorTransactionResult::rejected(error.to_string()),
     };
-    if apply_authorized_connection(document, board, &from, &to, edge).is_err() {
-        return EditorTransactionResult::rejected("Could not bind tiles on the board.");
+    let previous_bindings = document.connections.bindings.clone();
+    let previous_relations = document.connections.explicit_relations.clone();
+    if let Err(message) = apply_authorized_connection(&mut program, &from, &to, &edge) {
+        return EditorTransactionResult::rejected(message);
     }
-    document.bump_revision();
+    let mut candidate = document.clone();
+    candidate.replace_connections_from(&program);
+    if let Err(message) = commit_candidate(document, candidate) {
+        return EditorTransactionResult::rejected(message);
+    }
     selection.clear();
     selection.select(to.clone(), SelectionMode::Replace);
     set_focus(attention, document, focus_for_source_node(document, &to));
     EditorTransactionResult::accepted(Invalidation::connections_changed()).with_undo(
-        EditorInverse::DisconnectTiles {
-            from: from.clone(),
-            to: to.clone(),
-        },
+        connection_inverse(previous_bindings, previous_relations, document),
     )
+}
+
+fn apply_authorized_connection(
+    program: &mut AuthoredTesseraProgram,
+    from: &NodeId,
+    to: &NodeId,
+    edge: &AuthoredEdge,
+) -> Result<(), String> {
+    bind_authorized_edge(program, from, to, edge)
+        .map_err(|_| "Could not bind tiles in the document.".to_string())
 }
 
 fn root_auto_connect_partner(
@@ -891,22 +849,6 @@ fn root_auto_connect_partner(
         })
 }
 
-fn apply_authorized_connection(
-    document: &mut MusaicDocument,
-    board: &mut TesseraBoard,
-    from: &NodeId,
-    to: &NodeId,
-    edge: AuthoredEdge,
-) -> Result<(), BoardError> {
-    bind_tiles_on_board(board, from, to, edge.side)?;
-    document.port_endpoints.set_side(from, edge.side, edge.kind);
-    document
-        .port_endpoints
-        .set_side(to, edge.side.opposite(), edge.kind);
-    sync_document_tessera_from_board(document, board);
-    Ok(())
-}
-
 pub fn navigate_to_surface(
     document: &mut MusaicDocument,
     attention: &mut EditorAttention,
@@ -925,10 +867,8 @@ pub fn navigate_to_surface(
             ));
         }
     };
-
     attention.enter_compose();
     selection.clear();
-
     let mut result = EditorTransactionResult::accepted(Invalidation::editor_only());
     result.active_surface_change = surface_change;
     result
@@ -986,8 +926,6 @@ where
 fn set_focus(attention: &mut EditorAttention, document: &MusaicDocument, target: FocusTarget) {
     let queries = DocumentQueries::new(document);
     if let Err(error) = attention.focus(&queries, target) {
-        // Transactions only focus targets they just created or cleared;
-        // a failure means the document/attention contract broke.
         panic!("illegal focus after transaction: {error}");
     }
 }
@@ -1003,661 +941,249 @@ fn focus_for_source_node(document: &MusaicDocument, node: &NodeId) -> FocusTarge
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::command::EditorCommand;
-    use crate::application::editor::ActiveSpace;
-    use crate::application::editor::NavigationMode;
-    use crate::application::pipeline::runtime::TimelineProvenanceStore;
-    use crate::domain::board::BoardSlot;
-    use crate::domain::document::{
-        AtomValue, ContainerKind, DocumentQueries, MusaicDocument, NoteName, TileSpawnKind,
-    };
-    use tessera::bevy::TesseraBoard;
+    use crate::application::editor::{ActiveSpace, NavigationMode};
+    use crate::domain::document::{AtomValue, ContainerKind, NoteName};
 
-    fn slot(col: i32, row: i32) -> BoardSlot {
-        BoardSlot::new(col, row)
-    }
-
-    fn connection_count(document: &MusaicDocument) -> usize {
-        DocumentQueries::new(document)
-            .connections_on_surface(document.root_surface)
-            .len()
-    }
-
-    fn fresh_board() -> TesseraBoard {
-        TesseraBoard::new()
-    }
-
-    fn board_target(surface: BoardSurfaceId, slot: BoardSlot) -> PlacementTarget {
-        PlacementTarget::BoardSlot { surface, slot }
-    }
-
-    /// Applies a command through the real execution path used by the dispatcher.
-    fn apply(
+    fn place_container(
         document: &mut MusaicDocument,
-        board: &mut TesseraBoard,
         attention: &mut EditorAttention,
         selection: &mut SelectionState,
-        provenance: &TimelineProvenanceStore,
-        command: EditorCommand,
-    ) -> EditorTransactionResult {
-        crate::application::command::execute_command(
-            document, board, attention, selection, provenance, &command,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn place_container_on_root_creates_node_and_focuses_it() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
+        slot: BoardSlot,
+    ) -> NodeId {
+        let result = place_tile(
+            document,
+            attention,
+            selection,
+            PlacementTarget::BoardSlot {
+                surface: document.root_surface,
+                slot,
+            },
+            TileSpawnKind::Container {
+                kind: ContainerKind::Sequence,
             },
         );
-
-        assert!(result.is_accepted());
-        assert!(result.invalidation.document);
-        assert!(result.invalidation.compile);
-        assert_eq!(document.revision.0, 1);
-        assert_eq!(selection.nodes.len(), 1);
-        let selected = selection.nodes.iter().next().unwrap().clone();
-        assert_eq!(
-            attention.focus,
-            FocusTarget::Tile {
-                node: selected.clone()
-            }
-        );
-        assert!(document.graph.container_surface(&selected).is_some());
-        assert_eq!(
-            document
-                .tessera
-                .authored_program
-                .root_surface
-                .placements
-                .get(&selected)
-                .expect("placed container has an authored Tessera placement")
-                .footprint,
-            tessera::prelude::TileFootprint::new(2, 2)
-        );
+        assert!(result.is_accepted(), "{:?}", result.diagnostics);
+        selection.nodes.iter().next().unwrap().clone()
     }
 
     #[test]
-    fn atom_cannot_be_placed_on_root_surface() {
+    fn placement_commits_one_valid_document_revision() {
         let mut document = MusaicDocument::new_empty();
         let mut attention = EditorAttention::new(document.root_surface);
         let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let result = apply(
+        let node = place_container(
             &mut document,
-            &mut board,
             &mut attention,
             &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Atom {
-                    atom: AtomValue::NoteName(NoteName::A),
-                },
+            BoardSlot::new(0, 0),
+        );
+
+        assert_eq!(document.revision.0, 1);
+        assert!(document.validate().is_ok());
+        assert!(document.graph.container_surface(&node).is_some());
+        assert_eq!(attention.focus, FocusTarget::Tile { node });
+    }
+
+    #[test]
+    fn rejected_placement_leaves_the_document_unchanged() {
+        let mut document = MusaicDocument::new_empty();
+        let before = document.clone();
+        let mut attention = EditorAttention::new(document.root_surface);
+        let mut selection = SelectionState::default();
+        let root = document.root_surface;
+        let result = place_tile(
+            &mut document,
+            &mut attention,
+            &mut selection,
+            PlacementTarget::BoardSlot {
+                surface: root,
+                slot: BoardSlot::new(0, 0),
+            },
+            TileSpawnKind::Atom {
+                atom: AtomValue::NoteName(NoteName::A),
             },
         );
 
         assert!(!result.is_accepted());
-        assert_eq!(document.revision.0, 0);
+        assert_eq!(document, before);
         assert!(selection.nodes.is_empty());
     }
 
     #[test]
-    fn enter_container_changes_active_board_to_container_surface() {
+    fn nested_placement_is_authored_directly_in_the_document() {
         let mut document = MusaicDocument::new_empty();
         let mut attention = EditorAttention::new(document.root_surface);
         let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let place_result = apply(
+        let container = place_container(
             &mut document,
-            &mut board,
             &mut attention,
             &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Subdivision,
-                },
+            BoardSlot::new(0, 0),
+        );
+        let surface = document.graph.container_surface(&container).unwrap();
+        assert!(
+            enter_container(&mut document, &mut attention, &mut selection, &container)
+                .is_accepted()
+        );
+
+        let result = place_tile(
+            &mut document,
+            &mut attention,
+            &mut selection,
+            PlacementTarget::StackIndex {
+                surface,
+                index: StackIndex(0),
+            },
+            TileSpawnKind::Atom {
+                atom: AtomValue::NoteName(NoteName::C),
             },
         );
-        assert!(place_result.is_accepted());
-
-        let container = selection.nodes.iter().next().unwrap().clone();
-        let container_surface = document.graph.container_surface(&container).unwrap();
-        let enter_result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::EnterContainer { container },
-        );
-
-        assert!(enter_result.is_accepted());
-        assert_eq!(
-            attention.active_space,
-            ActiveSpace::Board(container_surface)
-        );
-        assert_eq!(attention.focus, FocusTarget::None);
-        assert_eq!(document.revision.0, 1);
-    }
-
-    #[test]
-    fn place_atom_inside_container_surface_is_allowed() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
-            },
-        );
-        let container = selection.nodes.iter().next().unwrap().clone();
-        let container_surface = document.graph.container_surface(&container).unwrap();
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::EnterContainer { container },
-        );
-
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(container_surface, slot(1, 0)),
-                tile: TileSpawnKind::Atom {
-                    atom: AtomValue::NoteName(NoteName::C),
-                },
-            },
-        );
-
-        assert!(result.is_accepted());
-        assert_eq!(document.revision.0, 2);
+        assert!(result.is_accepted(), "{:?}", result.diagnostics);
+        assert_eq!(document.graph.nodes_on_surface(surface).len(), 1);
         assert_eq!(
             attention.focus,
             FocusTarget::StackInsert {
-                surface: container_surface,
-                index: StackIndex(2),
+                surface,
+                index: StackIndex(1)
             }
         );
     }
 
     #[test]
-    fn place_note_then_octave_in_container_keeps_both_stack_nodes() {
+    fn connect_disconnect_and_reconnect_use_canonical_connections() {
         let mut document = MusaicDocument::new_empty();
         let mut attention = EditorAttention::new(document.root_surface);
         let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-        let mut board = fresh_board();
-        let root_surface = document.root_surface;
-
-        let _ = apply(
+        let from = place_container(
             &mut document,
-            &mut board,
             &mut attention,
             &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
+            BoardSlot::new(0, 0),
+        );
+        let root = document.root_surface;
+        let placed = place_tile(
+            &mut document,
+            &mut attention,
+            &mut selection,
+            PlacementTarget::BoardSlot {
+                surface: root,
+                slot: BoardSlot::new(5, 0),
+            },
+            TileSpawnKind::Output {
+                name: "main".into(),
             },
         );
-        let container = selection.nodes.iter().next().unwrap().clone();
-        let container_surface = document.graph.container_surface(&container).unwrap();
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::EnterContainer { container },
-        );
-
-        let note_place = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: PlacementTarget::StackIndex {
-                    surface: container_surface,
-                    index: StackIndex(0),
-                },
-                tile: TileSpawnKind::Atom {
-                    atom: AtomValue::NoteName(NoteName::A),
-                },
-            },
-        );
-        assert!(
-            note_place.is_accepted(),
-            "note place failed: {:?}",
-            note_place.diagnostics
-        );
-
-        let octave_place = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: PlacementTarget::StackIndex {
-                    surface: container_surface,
-                    index: StackIndex(1),
-                },
-                tile: TileSpawnKind::Atom {
-                    atom: AtomValue::Octave(2),
-                },
-            },
-        );
-        assert!(
-            octave_place.is_accepted(),
-            "octave place failed: {:?}",
-            octave_place.diagnostics
-        );
-
-        let stack_atoms = document
-            .graph
-            .nodes_on_surface(container_surface)
-            .into_iter()
-            .filter(|(location, _)| matches!(location.address, PlacementAddress::StackIndex(_)))
-            .count();
-        assert_eq!(stack_atoms, 2);
-    }
-
-    #[test]
-    fn delete_selection_removes_selected_node_and_clears_focus() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
-            },
-        );
-        let container = selection.nodes.iter().next().unwrap().clone();
-
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::DeleteSelection,
-        );
-
-        assert!(result.is_accepted());
-        assert!(!document.graph.contains_node(&container));
-        assert!(selection.nodes.is_empty());
-        assert_eq!(attention.focus, FocusTarget::None);
-        assert_eq!(document.revision.0, 2);
-    }
-
-    #[test]
-    fn connect_tiles_on_same_board_creates_authored_connection() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-        let root_surface = document.root_surface;
-
-        let mut board = fresh_board();
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
-            },
-        );
-        let from = selection.nodes.iter().next().unwrap().clone();
-        selection.clear();
-        set_focus(&mut attention, &document, FocusTarget::None);
-
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(2, 0)),
-                tile: TileSpawnKind::Output {
-                    name: "main".into(),
-                },
-            },
-        );
+        assert!(placed.is_accepted());
         let to = selection.nodes.iter().next().unwrap().clone();
-
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::ConnectTiles {
-                from: from.clone(),
-                to: to.clone(),
-            },
-        );
-
-        assert!(result.is_accepted());
-        assert_eq!(connection_count(&document), 1);
-        let connections = DocumentQueries::new(&document).connections_on_surface(root_surface);
-        let connection = connections.first().unwrap();
-        assert_eq!(connection.from, from);
-        assert_eq!(connection.to, to.clone());
-        assert!(selection.contains(to));
-    }
-
-    #[test]
-    fn connect_tiles_rejects_distant_root_tiles() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
-            },
-        );
-        let from = selection.nodes.iter().next().unwrap().clone();
-        selection.clear();
-        set_focus(&mut attention, &document, FocusTarget::None);
-
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(3, 0)),
-                tile: TileSpawnKind::Output {
-                    name: "main".into(),
-                },
-            },
-        );
-        let to = selection.nodes.iter().next().unwrap().clone();
-
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::ConnectTiles { from, to },
-        );
-
-        assert!(!result.is_accepted());
-        assert_eq!(connection_count(&document), 0);
-        assert_eq!(result.diagnostics[0].message, "tiles must be edge-adjacent");
-    }
-
-    #[test]
-    fn placing_adjacent_to_focused_root_tile_auto_connects() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
-            },
-        );
-        let container = selection.nodes.iter().next().unwrap().clone();
-
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(2, 0)),
-                tile: TileSpawnKind::Output {
-                    name: "main".into(),
-                },
-            },
-        );
-        let output = selection.nodes.iter().next().unwrap().clone();
-
-        assert!(result.is_accepted());
-        assert_eq!(connection_count(&document), 1);
         assert!(connection_exists(
-            &document.tessera.authored_program,
-            &document.port_endpoints,
-            &container,
-            &output,
+            &export_document_program(&document).unwrap(),
+            &from,
+            &to
+        ));
+
+        assert!(disconnect_tiles(&mut document, &from, &to).is_accepted());
+        assert!(!connection_exists(
+            &export_document_program(&document).unwrap(),
+            &from,
+            &to
+        ));
+        assert!(
+            connect_tiles(
+                &mut document,
+                &mut attention,
+                &mut selection,
+                from.clone(),
+                to.clone(),
+            )
+            .is_accepted()
+        );
+        assert!(connection_exists(
+            &export_document_program(&document).unwrap(),
+            &from,
+            &to
         ));
     }
 
     #[test]
-    fn delete_selection_prunes_connections_to_deleted_nodes() {
+    fn deletion_prunes_routes_to_removed_nodes() {
         let mut document = MusaicDocument::new_empty();
         let mut attention = EditorAttention::new(document.root_surface);
         let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-        let root_surface = document.root_surface;
-
-        let mut board = fresh_board();
-        let _ = apply(
+        let from = place_container(
             &mut document,
-            &mut board,
             &mut attention,
             &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
+            BoardSlot::new(0, 0),
+        );
+        let root = document.root_surface;
+        place_tile(
+            &mut document,
+            &mut attention,
+            &mut selection,
+            PlacementTarget::BoardSlot {
+                surface: root,
+                slot: BoardSlot::new(5, 0),
+            },
+            TileSpawnKind::Output {
+                name: "main".into(),
             },
         );
-        let from = selection.nodes.iter().next().unwrap().clone();
+        let output = selection.nodes.iter().next().unwrap().clone();
+        assert!(connection_exists(
+            &export_document_program(&document).unwrap(),
+            &from,
+            &output
+        ));
 
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(2, 0)),
-                tile: TileSpawnKind::Output {
-                    name: "main".into(),
-                },
-            },
+        assert!(delete_selection(&mut document, &mut attention, &mut selection).is_accepted());
+        assert!(!document.graph.contains_node(&output));
+        assert!(
+            document
+                .connections
+                .bindings
+                .keys()
+                .all(|node| document.graph.contains_node(node))
         );
-        let to = selection.nodes.iter().next().unwrap().clone();
+        assert!(document.validate().is_ok());
+    }
 
-        let _ = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::ConnectTiles {
-                from,
-                to: to.clone(),
-            },
-        );
-        assert_eq!(connection_count(&document), 1);
+    struct Resolver(Option<TimelineSource>);
 
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::DeleteSelection,
-        );
-
-        assert!(result.is_accepted());
-        assert_eq!(connection_count(&document), 0);
+    impl TimelineSourceResolver for Resolver {
+        fn source_for_event(&self, _event: ProjectedEventId) -> Option<TimelineSource> {
+            self.0.clone()
+        }
     }
 
     #[test]
-    fn jump_to_timeline_source_moves_to_source_surface_and_focuses_node() {
+    fn timeline_jump_changes_attention_without_changing_the_document() {
         let mut document = MusaicDocument::new_empty();
         let mut attention = EditorAttention::new(document.root_surface);
         let mut selection = SelectionState::default();
-        let mut provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let _ = apply(
+        let node = place_container(
             &mut document,
-            &mut board,
             &mut attention,
             &mut selection,
-            &provenance,
-            EditorCommand::PlaceTile {
-                target: board_target(root_surface, slot(0, 0)),
-                tile: TileSpawnKind::Container {
-                    kind: ContainerKind::Sequence,
-                },
-            },
+            BoardSlot::new(0, 0),
         );
-
-        let source_node = selection.nodes.iter().next().unwrap().clone();
-        let event = ProjectedEventId(44);
-        provenance.insert_source(event, root_surface, source_node.clone());
+        let before = document.clone();
         attention.enter_navigation(NavigationMode::Timeline);
-        set_focus(
-            &mut attention,
-            &document,
-            FocusTarget::TimelineEvent { event },
-        );
-
-        let mut board = fresh_board();
-        let result = apply(
+        let root = document.root_surface;
+        let result = jump_to_timeline_source(
             &mut document,
-            &mut board,
             &mut attention,
             &mut selection,
-            &provenance,
-            EditorCommand::JumpToTimelineSource { event },
+            &Resolver(Some(TimelineSource {
+                surface: root,
+                node: node.clone(),
+            })),
+            ProjectedEventId(7),
         );
 
         assert!(result.is_accepted());
+        assert_eq!(document, before);
         assert_eq!(attention.workspace_mode, WorkspaceMode::Compose);
-        assert_eq!(attention.active_space, ActiveSpace::Board(root_surface));
-        assert_eq!(
-            attention.focus,
-            FocusTarget::Tile {
-                node: source_node.clone()
-            }
-        );
-        assert!(selection.contains(source_node));
-    }
-
-    #[test]
-    fn jump_to_timeline_source_without_provenance_is_rejected() {
-        let mut document = MusaicDocument::new_empty();
-        let mut attention = EditorAttention::new(document.root_surface);
-        let mut selection = SelectionState::default();
-        let provenance = TimelineProvenanceStore::default();
-
-        let root_surface = document.root_surface;
-        let mut board = fresh_board();
-        let result = apply(
-            &mut document,
-            &mut board,
-            &mut attention,
-            &mut selection,
-            &provenance,
-            EditorCommand::JumpToTimelineSource {
-                event: ProjectedEventId(99),
-            },
-        );
-
-        assert!(!result.is_accepted());
-        assert_eq!(attention.active_space, ActiveSpace::Board(root_surface));
+        assert_eq!(attention.active_space, ActiveSpace::Board(root));
+        assert!(selection.contains(node));
     }
 }

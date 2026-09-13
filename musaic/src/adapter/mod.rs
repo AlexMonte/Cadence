@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod load_up;
 pub mod persistence;
+pub mod preferences;
 pub mod tile_icons;
 
 pub use audio::AudioPlugin;

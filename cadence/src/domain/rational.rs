@@ -187,9 +187,10 @@ impl ops::Div for Time {
 
 impl Ord for Time {
     fn cmp(&self, rhs: &Self) -> std::cmp::Ordering {
-        let g = gcd(self.denominator, rhs.denominator);
-        let lhs = self.numerator * (rhs.denominator / g);
-        let rhs = rhs.numerator * (self.denominator / g);
+        // Comparison must not overflow merely because two valid exact times
+        // have large coprime denominators (for example a seek into an arrangement).
+        let lhs = i128::from(self.numerator) * i128::from(rhs.denominator);
+        let rhs = i128::from(rhs.numerator) * i128::from(self.denominator);
         lhs.cmp(&rhs)
     }
 }

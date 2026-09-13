@@ -12,6 +12,7 @@ pub mod engine;
 pub mod pattern;
 /// Performer trait used to consume scheduled intents.
 pub mod performer;
+pub(crate) mod preparation;
 pub(crate) mod query;
 pub use query::{EvaluatedEvent, EvaluatedEventKind};
 /// Score-first renderer wrapper used by the scheduler.

@@ -1,5 +1,8 @@
 use tessera::prelude::{NodeId, SpatialSide};
 
+mod contextual;
+pub use contextual::{ContextualConnectionPlan, plan_contextual_connections, reconnect_after_edit};
+
 use crate::domain::board::BoardSlot;
 use crate::domain::document::{DocumentQueries, PortEndpointConfig};
 
@@ -16,17 +19,24 @@ pub struct ConnectionEndpointView {
     pub west: PortSlotState,
 }
 
-/// Builds connection endpoint view from the document port store (SSOT).
+/// Builds the visible port compass directly from canonical connection bindings.
 pub fn connection_endpoint_view(
     queries: &DocumentQueries<'_>,
     node: &NodeId,
     _from_slot: Option<BoardSlot>,
     _to_slot: Option<BoardSlot>,
 ) -> Option<ConnectionEndpointView> {
-    if queries.node(node).is_none() {
+    if !matches!(
+        queries.location_of(node)?.address,
+        crate::domain::document::PlacementAddress::BoardSlot(_)
+    ) {
+        // Pattern cells compose through order and modifier ownership. Offering
+        // root-board sockets here creates controls that cannot be connected.
         return None;
     }
-    let config = queries.document.port_endpoints.config_for(node);
+    let program = crate::domain::document::export_document_program(queries.document).ok()?;
+    let bindings = crate::domain::document::connection_policy::effective_bindings(&program, node);
+    let config = crate::domain::flow::port_config(&bindings);
     Some(endpoint_view_from_config(node, &config))
 }
 
@@ -48,10 +58,17 @@ pub fn connection_wire_kind(
     from: &NodeId,
     spatial_side: SpatialSide,
 ) -> PortSlotState {
-    let state = queries
-        .document
-        .port_endpoints
-        .side_state(from, spatial_side);
+    let state = crate::domain::document::export_document_program(queries.document)
+        .ok()
+        .map(|program| {
+            let bindings =
+                crate::domain::document::connection_policy::effective_bindings(&program, from);
+            crate::domain::document::port_state_for_side(
+                &crate::domain::flow::port_config(&bindings),
+                spatial_side,
+            )
+        })
+        .unwrap_or_default();
     match state {
         PortSlotState::Input => PortSlotState::Input,
         _ => PortSlotState::Output,

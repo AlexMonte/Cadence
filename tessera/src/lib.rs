@@ -16,41 +16,21 @@ mod application;
 pub mod domain;
 pub mod infrastructure;
 
-#[cfg(feature = "bevy")]
-pub mod bevy;
-
-#[cfg(feature = "bevy")]
-pub mod bevy_prelude {
-    pub use crate::bevy::*;
-}
-
 pub mod prelude {
     pub use crate::domain::*;
     pub use crate::infrastructure::*;
 }
 
-#[cfg(feature = "graph")]
-pub mod graph_prelude {
-    pub use crate::domain::{
-        InputEndpoint, InputPort, OutputEndpoint, OutputPort, RootRelation, StreamSource,
-        StreamTarget, TesseraProgram,
-    };
-    #[cfg(feature = "builders")]
-    pub use crate::infrastructure::TesseraProgramBuilder;
-    pub use crate::infrastructure::TesseraProgramExt;
-}
-
-pub use infrastructure::{
-    CompileOptions, CompileReport, PreviewReport, TesseraCompiler, ValidationReport,
-};
+pub use infrastructure::{CompileReport, PreviewReport, TesseraCompiler, ValidationReport};
 
 #[cfg(test)]
 mod tests {
     use crate::prelude::{
-        AtomOperatorToken, AtomTile, Container, ContainerAxis, ContainerId, ContainerKind,
-        ContainerSurfaceTile, EventValue, InputEndpoint, InputPort, NodeId, NoteAtom, OutputNode,
-        PortGroupId, PortMemberId, Rational, RootRelation, RootSurfaceNodeKind, ScalarAtom,
-        StreamSource, StreamTarget, TesseraCompiler, TesseraProgram, TransformKind, TransformNode,
+        AtomOperatorToken, AtomTile, AuthoredTesseraProgram, Container, ContainerAxis, ContainerId,
+        ContainerKind, ContainerSurfaceTile, EventValue, InputEndpoint, InputPort, NodeId,
+        NoteAtom, OutputNode, PortGroupId, PortMemberId, Rational, RootRelation, RootSurface,
+        RootSurfaceNodeKind, ScalarAtom, StreamSource, StreamTarget, TesseraCompiler,
+        TransformKind, TransformNode,
     };
     use std::collections::BTreeMap;
 
@@ -59,8 +39,9 @@ mod tests {
         let mut root_nodes = BTreeMap::new();
         let mut containers = BTreeMap::new();
         containers.insert(
-            ContainerId::new("phrase"),
+            ContainerId::new("pattern"),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![
@@ -73,6 +54,7 @@ mod tests {
         containers.insert(
             ContainerId::new("rate"),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
@@ -91,7 +73,7 @@ mod tests {
         root_nodes.insert(
             NodeId::new("a"),
             RootSurfaceNodeKind::Container {
-                container: ContainerId::new("phrase"),
+                container: ContainerId::new("pattern"),
             },
         );
         root_nodes.insert(
@@ -101,39 +83,53 @@ mod tests {
             },
         );
 
-        let program = TesseraProgram {
-            root_nodes,
-            containers,
-            relations: vec![
-                RootRelation::FlowsTo {
-                    from: StreamSource::node(NodeId::new("a")),
-                    to: StreamTarget::TransformInput {
-                        node: NodeId::new("slow"),
-                        endpoint: InputEndpoint::Socket(InputPort::new("main")),
-                    },
-                },
-                RootRelation::FlowsTo {
-                    from: StreamSource::node(NodeId::new("rate")),
-                    to: StreamTarget::TransformInput {
-                        node: NodeId::new("slow"),
-                        endpoint: InputEndpoint::Socket(InputPort::new("factor")),
-                    },
-                },
-                RootRelation::FlowsTo {
-                    from: StreamSource::node(NodeId::new("slow")),
-                    to: StreamTarget::OutputInput {
-                        node: NodeId::new("out"),
-                        endpoint: InputEndpoint::GroupMember {
-                            group: PortGroupId::new("inputs"),
-                            member: PortMemberId::new("main"),
+        let placements = root_nodes
+            .keys()
+            .enumerate()
+            .map(|(index, node)| {
+                (
+                    node.clone(),
+                    crate::domain::RootPlacement::unit(index as i32, 0),
+                )
+            })
+            .collect();
+        let program = AuthoredTesseraProgram {
+            root_surface: RootSurface {
+                nodes: root_nodes,
+                placements,
+                explicit_relations: vec![
+                    RootRelation::FlowsTo {
+                        from: StreamSource::node(NodeId::new("a")),
+                        to: StreamTarget::TransformInput {
+                            node: NodeId::new("slow"),
+                            endpoint: InputEndpoint::Socket(InputPort::new("main")),
                         },
                     },
-                },
-            ],
+                    RootRelation::FlowsTo {
+                        from: StreamSource::node(NodeId::new("rate")),
+                        to: StreamTarget::TransformInput {
+                            node: NodeId::new("slow"),
+                            endpoint: InputEndpoint::Socket(InputPort::new("factor")),
+                        },
+                    },
+                    RootRelation::FlowsTo {
+                        from: StreamSource::node(NodeId::new("slow")),
+                        to: StreamTarget::OutputInput {
+                            node: NodeId::new("out"),
+                            endpoint: InputEndpoint::GroupMember {
+                                group: PortGroupId::new("inputs"),
+                                member: PortMemberId::new("main"),
+                            },
+                        },
+                    },
+                ],
+                bindings: Default::default(),
+            },
+            containers,
         };
 
         let report = TesseraCompiler::new()
-            .compile(&program)
+            .compile_authored(&program)
             .expect("program should compile");
         assert_eq!(report.ir.outputs.len(), 1);
         assert_eq!(report.ir.outputs[0].id, NodeId::new("out"));

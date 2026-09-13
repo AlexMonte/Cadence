@@ -5,7 +5,7 @@
 pub mod launch;
 mod plugin;
 mod ui;
-mod unsaved_dialog;
+pub(crate) mod unsaved_dialog;
 
 pub use plugin::MainMenuPlugin;
 pub use ui::MainMenuUiPlugin;

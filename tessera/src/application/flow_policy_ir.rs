@@ -1,14 +1,9 @@
-use std::collections::BTreeMap;
-
-use crate::application::CompileContext;
 use crate::domain::{
-    FlowControlKind, FlowControlNode, FlowControlPolicy, InputEndpoint, OutputEndpoint, OutputPort,
-    PatternNodeIr, PatternStream, PortGroupId, PortMemberId,
+    DeduplicatePolicyIr, FlowControlKind, FlowControlNode, FlowControlPolicy, FlowInputIr,
+    InputEndpoint, OutputEndpoint, OutputPort, PatternNodeIr, PatternStream, PortGroupId,
+    PortMemberId, PriorityMergePolicyIr,
 };
-
-use super::flow_policy::{
-    NodeInputs, apply_choice_policy, apply_switch_policy, first_socket_input,
-};
+use std::collections::BTreeMap;
 
 pub type NodeInputsIr = BTreeMap<InputEndpoint, Vec<PatternNodeIr>>;
 pub type NodeOutputsIr = BTreeMap<OutputEndpoint, PatternNodeIr>;
@@ -16,224 +11,120 @@ pub type NodeOutputsIr = BTreeMap<OutputEndpoint, PatternNodeIr>;
 pub fn apply_flow_control_policy_ir(
     control: &FlowControlNode,
     inputs: NodeInputsIr,
-    cycle_index: usize,
+    _cycle_index: usize,
 ) -> NodeOutputsIr {
-    let flat_inputs = inputs
+    let out = OutputEndpoint::Socket(OutputPort::new("out"));
+    let native = match control.kind {
+        FlowControlKind::Layer => Some(PatternNodeIr::merge(group_inputs(
+            &inputs, "streams", control,
+        ))),
+        FlowControlKind::Merge => {
+            let children = group_inputs(&inputs, "streams", control);
+            Some(match control.policy {
+                FlowControlPolicy::MergeAppend => PatternNodeIr::concat(children),
+                FlowControlPolicy::MergePriority => PatternNodeIr::priority_merge(
+                    children,
+                    PriorityMergePolicyIr::whole_span_overlap(),
+                ),
+                FlowControlPolicy::MergeDeduplicate => PatternNodeIr::deduplicate(
+                    PatternNodeIr::merge(children),
+                    DeduplicatePolicyIr::whole_span_and_value(),
+                ),
+                _ => PatternNodeIr::merge(children),
+            })
+        }
+        FlowControlKind::Mask if matches!(control.policy, FlowControlPolicy::MaskClip) => {
+            let first = |name: &str| {
+                inputs
+                    .get(&InputEndpoint::Socket(crate::domain::InputPort::new(name)))
+                    .and_then(|nodes| nodes.first())
+                    .cloned()
+                    .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default()))
+            };
+            let mask = first("mask").map_event_leaves(&mut |stream, _| {
+                PatternNodeIr::scalar_stream(crate::domain::ScalarStream::new(
+                    stream
+                        .events
+                        .iter()
+                        .filter_map(|event| match event.value {
+                            crate::domain::EventValue::Scalar { value } => {
+                                Some(crate::domain::ScalarEvent::new(event.span, value))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                ))
+            });
+            Some(PatternNodeIr::mask_clip(first("main"), mask))
+        }
+        _ => None,
+    };
+    if let Some(node) = native {
+        return BTreeMap::from([(out, node)]);
+    }
+    let inputs = inputs
+        .into_iter()
+        .map(|(endpoint, nodes)| FlowInputIr { endpoint, nodes })
+        .collect::<Vec<_>>();
+    let outputs = control
+        .signature
+        .output_sockets
         .iter()
-        .map(|(endpoint, nodes)| {
+        .map(|socket| OutputEndpoint::Socket(socket.port.clone()))
+        .chain(control.members.outputs.iter().flat_map(|(group, members)| {
+            members.iter().map(|member| OutputEndpoint::GroupMember {
+                group: group.clone(),
+                member: member.clone(),
+            })
+        }))
+        .collect::<Vec<_>>();
+    outputs
+        .into_iter()
+        .map(|output| {
             (
-                endpoint.clone(),
-                nodes.iter().map(|node| node.flatten()).collect::<Vec<_>>(),
+                output.clone(),
+                PatternNodeIr::FlowProjection {
+                    control: control.clone(),
+                    inputs: inputs.clone(),
+                    output,
+                },
             )
         })
-        .collect::<NodeInputs>();
-
-    match control.kind {
-        FlowControlKind::Mask => {
-            let main = first_ir_input(
-                &inputs,
-                InputEndpoint::Socket(crate::domain::InputPort::new("main")),
-            )
-            .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default()));
-            let mask = first_ir_input(
-                &inputs,
-                InputEndpoint::Socket(crate::domain::InputPort::new("mask")),
-            )
-            .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default()));
-            let node = if matches!(control.policy, FlowControlPolicy::MaskClip) {
-                PatternNodeIr::mask_clip(main, mask)
-            } else {
-                PatternNodeIr::event_stream(super::flow_policy::apply_mask_policy(
-                    control,
-                    main.flatten(),
-                    mask.flatten(),
-                ))
-            };
-            return BTreeMap::from_iter([(OutputEndpoint::Socket(OutputPort::new("out")), node)]);
-        }
-        FlowControlKind::Split => {
-            let main = first_ir_input(
-                &inputs,
-                InputEndpoint::Socket(crate::domain::InputPort::new("main")),
-            )
-            .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default()));
-            let mut outputs = BTreeMap::new();
-            for member in control
-                .members
-                .outputs
-                .get(&PortGroupId::new("branches"))
-                .into_iter()
-                .flatten()
-            {
-                let stream =
-                    super::flow_policy::apply_split_policy(control, main.flatten(), member);
-                outputs.insert(
-                    OutputEndpoint::GroupMember {
-                        group: PortGroupId::new("branches"),
-                        member: member.clone(),
-                    },
-                    PatternNodeIr::cycle_slots(vec![PatternNodeIr::event_stream(stream)]),
-                );
-            }
-            outputs
-        }
-        FlowControlKind::Route => {
-            let main = first_ir_input(
-                &inputs,
-                InputEndpoint::Socket(crate::domain::InputPort::new("main")),
-            )
-            .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default()));
-            let control_stream =
-                first_socket_input(&flat_inputs, "control").map(|_| main.flatten());
-            let mut outputs = BTreeMap::new();
-            for member in control
-                .members
-                .outputs
-                .get(&PortGroupId::new("routes"))
-                .into_iter()
-                .flatten()
-            {
-                let stream = super::flow_policy::apply_route_policy(
-                    control,
-                    main.flatten(),
-                    control_stream.clone(),
-                    member,
-                );
-                outputs.insert(
-                    OutputEndpoint::GroupMember {
-                        group: PortGroupId::new("routes"),
-                        member: member.clone(),
-                    },
-                    PatternNodeIr::event_stream(stream),
-                );
-            }
-            return outputs;
-        }
-        FlowControlKind::Switch => {
-            let candidates = collect_group_ir_inputs_in_member_order(
-                &inputs,
-                &PortGroupId::new("candidates"),
-                control.members.inputs.get(&PortGroupId::new("candidates")),
-            );
-            if matches!(control.policy, FlowControlPolicy::SwitchCycleIndex) {
-                let index = cycle_index % candidates.len().max(1);
-                return BTreeMap::from_iter([(
-                    OutputEndpoint::Socket(OutputPort::new("out")),
-                    candidates
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default())),
-                )]);
-            }
-            let policy_ctx = CompileContext {
-                cycle_index,
-                ..CompileContext::default()
-            };
-            let stream = apply_switch_policy(
-                control,
-                candidates.iter().map(|node| node.flatten()).collect(),
-                first_socket_input(&flat_inputs, "control"),
-                &policy_ctx,
-            );
-            BTreeMap::from_iter([(
-                OutputEndpoint::Socket(OutputPort::new("out")),
-                PatternNodeIr::event_stream(stream),
-            )])
-        }
-        FlowControlKind::Choice => {
-            let options = collect_group_ir_inputs_in_member_order(
-                &inputs,
-                &PortGroupId::new("options"),
-                control.members.inputs.get(&PortGroupId::new("options")),
-            );
-            if matches!(control.policy, FlowControlPolicy::ChoiceCycle) {
-                let index = cycle_index % options.len().max(1);
-                return BTreeMap::from_iter([(
-                    OutputEndpoint::Socket(OutputPort::new("out")),
-                    options
-                        .get(index)
-                        .cloned()
-                        .unwrap_or_else(|| PatternNodeIr::event_stream(PatternStream::default())),
-                )]);
-            }
-            let policy_ctx = CompileContext {
-                cycle_index,
-                ..CompileContext::default()
-            };
-            let stream = apply_choice_policy(
-                control,
-                options.iter().map(|node| node.flatten()).collect(),
-                first_socket_input(&flat_inputs, "control"),
-                &policy_ctx,
-            );
-            BTreeMap::from_iter([(
-                OutputEndpoint::Socket(OutputPort::new("out")),
-                PatternNodeIr::event_stream(stream),
-            )])
-        }
-        FlowControlKind::Merge => {
-            let children = collect_group_ir_inputs(&inputs, &PortGroupId::new("streams"));
-            let node = match control.policy {
-                FlowControlPolicy::MergeAppend => PatternNodeIr::concat(children),
-                _ => PatternNodeIr::merge(children),
-            };
-            BTreeMap::from_iter([(OutputEndpoint::Socket(OutputPort::new("out")), node)])
-        }
-        FlowControlKind::Layer => BTreeMap::from_iter([(
-            OutputEndpoint::Socket(OutputPort::new("out")),
-            PatternNodeIr::merge(collect_group_ir_inputs(
-                &inputs,
-                &PortGroupId::new("streams"),
-            )),
-        )]),
-        FlowControlKind::Mix => BTreeMap::from_iter([(
-            OutputEndpoint::Socket(OutputPort::new("out")),
-            PatternNodeIr::event_stream(super::flow_policy::apply_mix_policy(
-                control,
-                collect_group_ir_inputs(&inputs, &PortGroupId::new("streams"))
-                    .into_iter()
-                    .map(|node| node.flatten())
-                    .collect(),
-                first_socket_input(&flat_inputs, "amount"),
-            )),
-        )]),
-    }
+        .collect()
 }
-
-fn first_ir_input(inputs: &NodeInputsIr, endpoint: InputEndpoint) -> Option<PatternNodeIr> {
-    inputs
-        .get(&endpoint)
-        .and_then(|nodes| nodes.first().cloned())
-}
-
-fn collect_group_ir_inputs(inputs: &NodeInputsIr, group: &PortGroupId) -> Vec<PatternNodeIr> {
-    let mut collected = Vec::new();
-    for (endpoint, nodes) in inputs {
-        if matches!(endpoint, InputEndpoint::GroupMember { group: endpoint_group, .. } if endpoint_group == group)
-        {
-            collected.extend(nodes.iter().cloned());
-        }
-    }
-    collected
-}
-
-fn collect_group_ir_inputs_in_member_order(
+fn group_inputs(
     inputs: &NodeInputsIr,
-    group: &PortGroupId,
-    members: Option<&Vec<PortMemberId>>,
+    group: &str,
+    control: &FlowControlNode,
 ) -> Vec<PatternNodeIr> {
-    let Some(members) = members else {
-        return collect_group_ir_inputs(inputs, group);
-    };
+    let group = PortGroupId::new(group);
+    let members = control
+        .members
+        .inputs
+        .get(&group)
+        .cloned()
+        .unwrap_or_else(|| {
+            inputs
+                .keys()
+                .filter_map(|endpoint| match endpoint {
+                    InputEndpoint::GroupMember { group: g, member } if g == &group => {
+                        Some(member.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<PortMemberId>>()
+        });
     members
-        .iter()
-        .filter_map(|member| {
+        .into_iter()
+        .flat_map(|member| {
             inputs
                 .get(&InputEndpoint::GroupMember {
                     group: group.clone(),
-                    member: member.clone(),
+                    member,
                 })
-                .and_then(|nodes| nodes.first().cloned())
+                .into_iter()
+                .flatten()
+                .cloned()
         })
         .collect()
 }

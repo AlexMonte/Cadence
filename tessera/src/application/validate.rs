@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
 
-use crate::application::normalize_program;
 use crate::domain::{
     Diagnostic, DiagnosticCategory, DiagnosticKind, DiagnosticLocation, InputEndpoint,
     NormalizedProgram, RootRelation, RootSurfaceNodeKind, StreamTarget, TesseraProgram,
 };
 
+use super::normalize::normalize_program;
 use super::stream_shape::{normalized_node_output_shape, stream_shape_compatible};
 use super::validate_root_graph::validate_root_graph;
 
-pub fn validate_program_shape(program: &TesseraProgram) -> Result<(), Vec<Diagnostic>> {
+pub fn validate_and_normalize_program(
+    program: &TesseraProgram,
+) -> Result<NormalizedProgram, Vec<Diagnostic>> {
     let diagnostics = validate_root_graph(program);
     if !diagnostics.is_empty() {
         return Err(diagnostics);
@@ -18,15 +20,10 @@ pub fn validate_program_shape(program: &TesseraProgram) -> Result<(), Vec<Diagno
     let normalized = normalize_program(program)?;
     let normalized_diagnostics = validate_normalized_program(&normalized);
     if normalized_diagnostics.is_empty() {
-        Ok(())
+        Ok(normalized)
     } else {
         Err(normalized_diagnostics)
     }
-}
-
-#[allow(dead_code)]
-pub fn validate_program(program: &TesseraProgram) -> Result<(), Vec<Diagnostic>> {
-    validate_program_shape(program)
 }
 
 fn validate_normalized_program(program: &NormalizedProgram) -> Vec<Diagnostic> {

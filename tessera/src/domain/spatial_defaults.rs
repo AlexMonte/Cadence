@@ -6,7 +6,9 @@ use crate::domain::{
 
 pub fn default_spatial_bindings(node: &RootSurfaceNodeKind) -> NodeSpatialBindings {
     let mut bindings = match node {
-        RootSurfaceNodeKind::Container { .. } => container_bindings(),
+        RootSurfaceNodeKind::Container { .. } | RootSurfaceNodeKind::Scalar(_) => {
+            container_bindings()
+        }
         RootSurfaceNodeKind::Transform(transform) => transform_bindings(transform.kind),
         RootSurfaceNodeKind::Output(_) => output_bindings(),
         RootSurfaceNodeKind::FlowControl(flow) => flow_control_bindings(flow.kind),
@@ -57,14 +59,42 @@ fn transform_bindings(kind: TransformKind) -> NodeSpatialBindings {
         }
         TransformKind::Gain
         | TransformKind::Attack
+        | TransformKind::Decay
+        | TransformKind::Release
+        | TransformKind::Pan
+        | TransformKind::PlaybackRate
+        | TransformKind::PlaybackStart
+        | TransformKind::PlaybackEnd
+        | TransformKind::Reverse
+        | TransformKind::Fit
+        | TransformKind::Loop
+        | TransformKind::Velocity
+        | TransformKind::ClipLength
+        | TransformKind::PostGain
+        | TransformKind::PitchBend
+        | TransformKind::Expression
+        | TransformKind::Delay
+        | TransformKind::Reverb
+        | TransformKind::Compressor
+        | TransformKind::HighPassCutoff
+        | TransformKind::HighPassResonance
         | TransformKind::Transpose
-        | TransformKind::Degrade => {
+        | TransformKind::Degrade
+        | TransformKind::Gate
+        | TransformKind::Legato
+        | TransformKind::Sustain
+        | TransformKind::LowPassCutoff
+        | TransformKind::LowPassResonance
+        | TransformKind::SampleVariant => {
             bindings.inputs.insert(
                 InputEndpoint::Socket(InputPort::new("amount")),
                 SpatialSide::North,
             );
         }
-        TransformKind::Rev => {}
+        TransformKind::Instrument
+        | TransformKind::Trick
+        | TransformKind::Rev
+        | TransformKind::Wire => {}
     }
     bindings
 }

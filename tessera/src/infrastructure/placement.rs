@@ -10,10 +10,10 @@ use crate::domain::{
 use crate::domain::Container;
 
 pub(crate) fn remove_placed_node(program: &mut AuthoredTesseraProgram, node_id: &NodeId) {
-    if let Some(node) = program.root_surface.nodes.remove(node_id) {
-        if let RootSurfaceNodeKind::Container { container } = node {
-            remove_container_tree(program, &container);
-        }
+    if let Some(RootSurfaceNodeKind::Container { container }) =
+        program.root_surface.nodes.remove(node_id)
+    {
+        remove_container_tree(program, &container);
     }
     program.root_surface.placements.remove(node_id);
     program.root_surface.bindings.remove(node_id);
@@ -105,6 +105,7 @@ mod tests {
         program.containers.insert(
             ContainerId::new("child"),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: crate::domain::ContainerAxis::Time,
                 stack: Vec::new(),
@@ -113,6 +114,7 @@ mod tests {
         program.containers.insert(
             ContainerId::new("parent"),
             Container {
+                source_nodes: Default::default(),
                 kind: ContainerKind::Sequence,
                 axis: crate::domain::ContainerAxis::Time,
                 stack: vec![ContainerSurfaceTile::NestedContainer(ContainerId::new(

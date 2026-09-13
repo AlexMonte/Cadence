@@ -1,10 +1,10 @@
-//! Continuous signal sources evaluated as pure functions of cycle time.
+//! Signal sources evaluated as pure functions of musical time.
 //!
 //! A [`Signal`] is a small, serializable-friendly descriptor for a continuous
-//! modulation source (sine/saw/tri/square plus seeded value/perlin noise). It
-//! is evaluated by the pure, deterministic [`Signal::eval`] over exact cycle
-//! time, so the same descriptor always produces the same value at the same
-//! point on the timeline. Signals carry only `f64` and `u64` parameters so the
+//! modulation source, including periodic shapes and seeded noise. Use
+//! [`Signal::eval_at`] for exact fractional note onsets and [`Signal::eval`]
+//! for continuous rendering. The same clock and descriptor always produce
+//! the same value. Signals carry exact clock ratios, amplitudes and a seed so the
 //! `Score`/`ControlScore` trees that embed them keep their
 //! `Clone + PartialEq + Debug + Send + Sync` invariants.
 
@@ -19,6 +19,8 @@ use crate::domain::rational::Rational;
 /// and never depend on external state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Waveform {
+    /// Non-repeating linear ramp, clamped to [0, 1] in phase space.
+    Ramp,
     /// Sine wave in the range `[-1.0, 1.0]`.
     Sine,
     /// Rising sawtooth wave in the range `[-1.0, 1.0)`.
@@ -34,6 +36,12 @@ pub enum Waveform {
     },
     /// Sample-and-hold seeded white noise in the range `[-1.0, 1.0]`.
     Rand {
+        /// Deterministic seed.
+        seed: u64,
+    },
+    /// Independent seeded noise at every distinct musical time. Note controls
+    /// use [`Signal::eval_at`] to hash the normalized exact fractional onset.
+    Random {
         /// Deterministic seed.
         seed: u64,
     },
@@ -71,6 +79,17 @@ impl Signal {
         }
     }
 
+    /// Creates a non-repeating ramp over an absolute musical interval.
+    #[must_use]
+    pub fn linear_ramp(start: Rational, end: Rational, from: f64, to: f64) -> Self {
+        assert!(end > start, "ramp interval must be positive");
+        Self::new(Waveform::Ramp)
+            .with_rate(Rational::ONE / (end - start))
+            .with_phase((Rational::ZERO - start) / (end - start))
+            .with_depth(to - from)
+            .with_bias(from)
+    }
+
     /// Creates a sine signal.
     #[must_use]
     pub fn sine() -> Self {
@@ -105,6 +124,13 @@ impl Signal {
     #[must_use]
     pub fn rand(seed: u64) -> Self {
         Self::new(Waveform::Rand { seed })
+    }
+
+    /// Creates independent seeded noise for every distinct fractional onset.
+    /// Unlike [`Self::rand`], this does not hold one value for an entire step.
+    #[must_use]
+    pub fn random(seed: u64) -> Self {
+        Self::new(Waveform::Random { seed })
     }
 
     /// Sets the oscillation rate in cycles.
@@ -176,10 +202,104 @@ impl Signal {
         let total_phase = self.rate.value() * cycle_time + self.phase.value();
         self.bias + self.depth * shape(self.waveform, total_phase)
     }
+
+    /// Evaluates an onset using its exact musical clock. Random noise hashes
+    /// the reduced numerator and denominator after rate and phase are applied,
+    /// so equivalent fractions, seeks and query boundaries choose one value.
+    /// If the exact total exceeds checked 128-bit arithmetic, a deterministic
+    /// hash of the normalized input ratios and time replaces that calculation.
+    /// Continuous rendering uses [`Self::eval`] with its floating-point clock.
+    #[must_use]
+    pub fn eval_at(&self, cycle_time: Rational) -> f64 {
+        if let Waveform::Random { seed } = self.waveform {
+            let value = match exact_phase(self.rate, cycle_time, self.phase) {
+                Some((numerator, denominator)) => hash_exact_phase(seed, numerator, denominator),
+                // Extremely large rational combinations can exceed even the
+                // wide temporary representation. Preserve determinism without
+                // panicking, wrapping, or approximating all late notes to the
+                // same floating-point timestamp.
+                None => hash_words(
+                    seed ^ 0x5241_4E44_4641_4C4C,
+                    &[
+                        self.rate.numerator() as u64,
+                        self.rate.denominator() as u64,
+                        cycle_time.numerator() as u64,
+                        cycle_time.denominator() as u64,
+                        self.phase.numerator() as u64,
+                        self.phase.denominator() as u64,
+                    ],
+                ),
+            };
+            let unit = (value >> 11) as f64 / ((1u64 << 53) as f64);
+            self.bias + self.depth * (unit * 2.0 - 1.0)
+        } else {
+            self.eval(cycle_time.value())
+        }
+    }
+}
+
+// Keep the widened, checked calculation local to random onset sampling. Global
+// musical-time arithmetic and the continuous floating-point path are unchanged.
+fn exact_phase(rate: Rational, time: Rational, phase: Rational) -> Option<(i128, i128)> {
+    let (a, b) = (i128::from(rate.numerator()), i128::from(rate.denominator()));
+    let (c, d) = (i128::from(time.numerator()), i128::from(time.denominator()));
+    let ad = wide_gcd(a.unsigned_abs(), d as u128) as i128;
+    let cb = wide_gcd(c.unsigned_abs(), b as u128) as i128;
+    let numerator = (a / ad).checked_mul(c / cb)?;
+    let denominator = (b / cb).checked_mul(d / ad)?;
+    let (numerator, denominator) = reduce_wide(numerator, denominator);
+    let phase_denominator = i128::from(phase.denominator());
+    let common = wide_gcd(denominator as u128, phase_denominator as u128) as i128;
+    let left_scale = phase_denominator / common;
+    let right_scale = denominator / common;
+    let left = numerator.checked_mul(left_scale)?;
+    let right = i128::from(phase.numerator()).checked_mul(right_scale)?;
+    Some(reduce_wide(
+        left.checked_add(right)?,
+        denominator.checked_mul(left_scale)?,
+    ))
+}
+
+fn reduce_wide(numerator: i128, denominator: i128) -> (i128, i128) {
+    let common = wide_gcd(numerator.unsigned_abs(), denominator as u128) as i128;
+    (numerator / common, denominator / common)
+}
+
+fn wide_gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+fn hash_exact_phase(seed: u64, numerator: i128, denominator: i128) -> u64 {
+    if let (Ok(numerator), Ok(denominator)) = (i64::try_from(numerator), i64::try_from(denominator))
+    {
+        // Preserve the original hash for ordinary musical timestamps.
+        let key = splitmix64(seed ^ splitmix64(numerator as u64));
+        splitmix64(key ^ denominator as u64)
+    } else {
+        hash_words(
+            seed ^ 0x5241_4E44_5749_4445,
+            &[
+                numerator as u64,
+                (numerator >> 64) as u64,
+                denominator as u64,
+                (denominator >> 64) as u64,
+            ],
+        )
+    }
+}
+
+fn hash_words(seed: u64, words: &[u64]) -> u64 {
+    words
+        .iter()
+        .fold(splitmix64(seed), |key, word| splitmix64(key ^ word))
 }
 
 fn shape(waveform: Waveform, phase: f64) -> f64 {
     match waveform {
+        Waveform::Ramp => phase.clamp(0.0, 1.0),
         Waveform::Sine => (TAU * phase).sin(),
         Waveform::Saw => {
             let wrapped = phase.rem_euclid(1.0);
@@ -199,6 +319,7 @@ fn shape(waveform: Waveform, phase: f64) -> f64 {
         }
         Waveform::Perlin { seed } => perlin_noise(seed, phase),
         Waveform::Rand { seed } => rand_noise(seed, phase),
+        Waveform::Random { seed } => hash_signed(seed, phase.to_bits() as i64),
     }
 }
 
@@ -300,5 +421,43 @@ mod tests {
         let signal = Signal::rand(3);
         assert_eq!(signal.eval(2.1), signal.eval(2.9));
         assert_ne!(signal.eval(2.1), signal.eval(3.1));
+    }
+
+    #[test]
+    fn exact_random_phase_uses_wide_checked_math_and_a_stable_overflow_fallback() {
+        let huge = Rational::whole_number(i64::MAX);
+        let random = Signal::random(73)
+            .with_rate(huge)
+            .with_bias(0.85)
+            .with_depth(0.15);
+        let (numerator, denominator) = exact_phase(huge, huge, Rational::ZERO).unwrap();
+        assert_eq!(numerator, i128::from(i64::MAX) * i128::from(i64::MAX));
+        assert_eq!(denominator, 1);
+        let wide_value = random.eval_at(huge);
+        assert!((0.7..=1.0).contains(&wide_value));
+        assert_eq!(wide_value, random.eval_at(huge));
+        assert_ne!(
+            wide_value,
+            random.eval_at(Rational::whole_number(i64::MAX - 1))
+        );
+
+        // The exact common numerator needs about 189 bits. No unchecked Time
+        // multiplication/addition is attempted, and nearby late onsets differ.
+        let phase = Rational::new(1, i64::MAX);
+        assert!(exact_phase(huge, huge, phase).is_none());
+        let fallback = random.with_phase(phase);
+        let value = fallback.eval_at(huge);
+        assert!((0.7..=1.0).contains(&value));
+        assert_eq!(value, fallback.eval_at(huge));
+        assert_ne!(
+            value,
+            fallback.eval_at(Rational::whole_number(i64::MAX - 1))
+        );
+        assert!(
+            Signal::random(73)
+                .with_rate(Rational::whole_number(i64::MIN))
+                .eval_at(Rational::whole_number(i64::MAX))
+                .is_finite()
+        );
     }
 }

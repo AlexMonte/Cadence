@@ -25,5 +25,9 @@ pub fn push_recent_project(path: impl AsRef<Path>) {
 }
 
 fn recent_file_path() -> Option<PathBuf> {
+    // Native acceptance journeys isolate their files from the user's recent list.
+    if let Some(path) = std::env::var_os("MUSAIC_RECENT_PROJECTS_PATH") {
+        return Some(PathBuf::from(path));
+    }
     directories::ProjectDirs::from("", "", "musaic").map(|dirs| dirs.data_dir().join(RECENT_FILE))
 }

@@ -45,10 +45,12 @@ pub struct Board3dTile {
 }
 
 #[derive(Component)]
-pub(super) struct BoardDragPreview;
+pub(super) struct BoardDragPreview {
+    pub(super) tile: crate::domain::document::TileSpawnKind,
+}
 
 #[derive(Component)]
-pub(super) struct BoardConnectionPreview;
+pub(super) struct BoardConnectionPreview(pub usize);
 
 #[derive(Component)]
 pub(super) struct BoardSlotHighlight;
@@ -76,19 +78,21 @@ pub(super) struct TileVisualKey {
     selected: bool,
     focused: bool,
     footprint: Option<(u32, u32)>,
-    surface_display: Option<String>,
+    surface_content: crate::application::pipeline::scene_sync::TileSurfaceContent,
+    ports: Option<crate::application::editor::ConnectionEndpointView>,
     icon: Option<crate::adapter::tile_icons::TileIconId>,
 }
 
 impl TileVisualKey {
-    pub(super) fn from_node(node: &VisibleBoardNode) -> Self {
+    pub(super) fn from_node(node: &VisibleBoardNode, display_address: PlacementAddress) -> Self {
         Self {
-            address: node.address,
+            address: display_address,
             kind: node.kind,
             selected: node.selected,
             focused: node.focused,
             footprint: node.tessera_footprint.map(|f| (f.width, f.height)),
-            surface_display: node.surface_content.display(),
+            surface_content: node.surface_content.clone(),
+            ports: node.ports.clone(),
             icon: node.icon,
         }
     }
@@ -96,8 +100,8 @@ impl TileVisualKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ConnectionVisualKey {
+    pub(super) side: tessera::prelude::SpatialSide,
     pub(super) from_slot: BoardSlot,
     pub(super) to_slot: BoardSlot,
     pub(super) kind: crate::domain::document::PortSlotState,
 }
-

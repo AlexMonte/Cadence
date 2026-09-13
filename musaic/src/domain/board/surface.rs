@@ -13,6 +13,7 @@ pub use tessera::prelude::BoardSlot;
 pub struct BoardSurfaceId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BoardSurfaceKind {
     RootBoard,
     ContainerStack { container: ContainerId },
@@ -35,12 +36,14 @@ impl BoardSurfaceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoardSurface {
     pub id: BoardSurfaceId,
     pub kind: BoardSurfaceKind,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoardSurfaces {
     surfaces: BTreeMap<BoardSurfaceId, BoardSurface>,
     root: Option<BoardSurfaceId>,
@@ -72,6 +75,20 @@ impl BoardSurfaces {
 
     pub fn contains(&self, id: BoardSurfaceId) -> bool {
         self.surfaces.contains_key(&id)
+    }
+
+    pub fn root(&self) -> Option<BoardSurfaceId> {
+        self.root
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&BoardSurfaceId, &BoardSurface)> {
+        self.surfaces.iter()
+    }
+
+    pub fn remove_container_surface(&mut self, id: BoardSurfaceId) {
+        if self.root != Some(id) {
+            self.surfaces.remove(&id);
+        }
     }
 
     pub fn kind(&self, id: BoardSurfaceId) -> Option<BoardSurfaceKind> {

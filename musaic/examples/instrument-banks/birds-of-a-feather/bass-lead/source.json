@@ -1,0 +1,13 @@
+[
+  {
+    "zone": 0,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0870_Aspirin_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 45.0,
+    "loop_frames": [
+      15,
+      416
+    ],
+    "ahdsr": true
+  }
+]

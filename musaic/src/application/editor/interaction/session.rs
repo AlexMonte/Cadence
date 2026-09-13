@@ -19,7 +19,9 @@ use crate::application::pipeline::scene_sync::VisibleBoardState;
 use crate::domain::board::geometry::slot_at_world_position;
 
 use super::cursor::BoardPlacementPointer;
-use super::cursor::{DrawerTilePressQueue, DrawerTilePressed};
+use super::cursor::{
+    BoardTilePressQueue, BoardTilePressed, DrawerTilePressQueue, DrawerTilePressed,
+};
 use super::cursor_logic::CursorInteractionPhase;
 use super::cursor_logic::should_block_board_pick;
 
@@ -33,6 +35,7 @@ pub struct PlacementHover {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacementSession {
     pub tile: TileSpawnKind,
+    pub source: Option<NodeId>,
     pub hover: Option<PlacementHover>,
     pub last_hover: Option<PlacementHover>,
 }
@@ -83,6 +86,7 @@ pub struct EditorSession {
     pub mode: EditorMode,
     /// Pre-mode latch while a drawer tile is pressed (not an authoring mode).
     pending_drawer_press: Option<DrawerTilePressed>,
+    pending_board_press: Option<BoardTilePressed>,
     /// Address of the most recently committed drawer placement (camera settle).
     pub last_placement_address: Option<PlacementAddress>,
 }
@@ -172,6 +176,7 @@ impl EditorSession {
                 self.pending_drawer_press = None;
                 self.mode = EditorMode::Placing(PlacementSession {
                     tile,
+                    source: None,
                     hover: None,
                     last_hover: None,
                 });
@@ -187,6 +192,7 @@ impl EditorSession {
     /// Any mode → Idle. Clears pending press. Always succeeds.
     pub fn cancel(&mut self) -> Result<(), SessionTransitionError> {
         self.pending_drawer_press = None;
+        self.pending_board_press = None;
         self.mode = EditorMode::Idle;
         Ok(())
     }
@@ -261,6 +267,7 @@ pub fn register_editor_session(app: &mut App) {
                 process_drawer_press_queue,
                 tick_editor_session_drawer_flow,
                 sync_placement_hover_from_pointer,
+                commit_placement_on_release,
             )
                 .chain()
                 .before(StateSet::Transition)
@@ -270,9 +277,13 @@ pub fn register_editor_session(app: &mut App) {
 
 fn process_drawer_press_queue(
     mut queue: ResMut<DrawerTilePressQueue>,
+    mut board_queue: ResMut<BoardTilePressQueue>,
     mut session: ResMut<EditorSession>,
     mut changed: MessageWriter<EditorSessionChanged>,
 ) {
+    if let Some(press) = board_queue.pending.take() {
+        session.pending_board_press = Some(press);
+    }
     if let Some(press) = queue.pending.take() {
         session.pending_drawer_press = Some(press);
         changed.write(EditorSessionChanged);
@@ -282,13 +293,48 @@ fn process_drawer_press_queue(
 fn tick_editor_session_drawer_flow(
     mut session: ResMut<EditorSession>,
     mouse: Option<Res<ButtonInput<MouseButton>>>,
+    keyboard: Option<Res<ButtonInput<KeyCode>>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    project: Res<crate::application::session::MusaicProject>,
     mut commands: MessageWriter<EditorCommandBus>,
     mut changed: MessageWriter<EditorSessionChanged>,
 ) {
     let Some(mouse) = mouse else {
         return;
     };
+    // A cancel and mouse release can arrive together. Clear the gesture before
+    // release generates a placement command; a later queued cancel is too late.
+    if keyboard.is_some_and(|keys| keys.just_pressed(KeyCode::Escape)) {
+        let _ = session.cancel();
+        changed.write(EditorSessionChanged);
+        return;
+    }
+    if windows.single().is_ok_and(|window| !window.focused) {
+        let _ = session.cancel();
+        return;
+    }
+    if let Some(pending) = session.pending_board_press.clone() {
+        let moved = windows
+            .single()
+            .ok()
+            .and_then(Window::cursor_position)
+            .is_some_and(|cursor| {
+                cursor.distance(pending.start_screen) >= DRAWER_DRAG_THRESHOLD_PX
+            });
+        if moved && matches!(session.mode, EditorMode::Idle) {
+            session.pending_board_press = None;
+            if let Some(node) = project.document.graph.node(&pending.node) {
+                if let Ok(tile) = crate::application::command::editing::spawn_kind(&node.kind) {
+                    if session.begin_placing(tile).is_ok() {
+                        session.placement_mut().unwrap().source = Some(pending.node);
+                        changed.write(EditorSessionChanged);
+                    }
+                }
+            }
+        } else if mouse.just_released(MouseButton::Left) {
+            session.pending_board_press = None;
+        }
+    }
     if let Some(pending) = session.pending_drawer_press.as_ref() {
         if let Ok(window) = windows.single() {
             if let Some(cursor) = window.cursor_position() {
@@ -308,11 +354,19 @@ fn tick_editor_session_drawer_flow(
             let tile = session.take_pending_drawer_press().unwrap().tile;
             commands.write(EditorCommandBus(EditorCommand::ArmPlacementTool { tile }));
             changed.write(EditorSessionChanged);
-            return;
         }
     }
+}
 
-    if session.is_placing_from_drawer() && mouse.just_released(MouseButton::Left) {
+fn commit_placement_on_release(
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
+    mut session: ResMut<EditorSession>,
+    mut commands: MessageWriter<EditorCommandBus>,
+    mut changed: MessageWriter<EditorSessionChanged>,
+) {
+    if session.is_placing_from_drawer()
+        && mouse.is_some_and(|mouse| mouse.just_released(MouseButton::Left))
+    {
         commit_drawer_placement(&mut session, &mut commands);
         changed.write(EditorSessionChanged);
     }
@@ -326,13 +380,21 @@ fn commit_drawer_placement(
         return;
     };
     let tile = placement.tile.clone();
-    let target = placement.hover.or(placement.last_hover).map(|hover| {
+    let target = placement.hover.map(|hover| {
         session.last_placement_address = Some(hover.address);
         placement_hover_to_target(hover)
     });
 
     if let Some(target) = target {
-        commands.write(EditorCommandBus(EditorCommand::PlaceTile { target, tile }));
+        let command = if let Some(node) = placement.source {
+            EditorCommand::EditTiles(crate::application::command::editing::TileEdit::Move {
+                node,
+                target,
+            })
+        } else {
+            EditorCommand::PlaceTile { target, tile }
+        };
+        commands.write(EditorCommandBus(command));
     }
 }
 
@@ -360,6 +422,7 @@ fn placement_hover_to_target(hover: PlacementHover) -> PlacementTarget {
 fn sync_placement_hover_from_pointer(
     pointer: Res<BoardPlacementPointer>,
     visible: Option<Res<VisibleBoardState>>,
+    project: Res<crate::application::session::MusaicProject>,
     mut session: ResMut<EditorSession>,
 ) {
     let Some(placement) = session.placement_mut() else {
@@ -393,6 +456,33 @@ fn sync_placement_hover_from_pointer(
             surface,
             address: PlacementAddress::StackIndex(index),
         }),
+        Some(PickHit::Tile { node })
+        | Some(PickHit::AtomCompound {
+            primary_node: node, ..
+        }) => {
+            let own_source = placement.source.as_ref() == Some(&node);
+            let numeric_note = super::super::transaction::drop::is_number(&placement.tile)
+                && super::super::transaction::drop::note_owner(&project.document, &node).is_some();
+            let stack_reorder = placement
+                .source
+                .as_ref()
+                .and_then(|id| project.document.graph.location_of(id))
+                .is_some_and(|loc| {
+                    loc.surface == surface && matches!(loc.address, PlacementAddress::StackIndex(_))
+                });
+            if own_source || numeric_note || stack_reorder {
+                project
+                    .document
+                    .graph
+                    .location_of(&node)
+                    .map(|loc| PlacementHover {
+                        surface: loc.surface,
+                        address: loc.address,
+                    })
+            } else {
+                None
+            }
+        }
         _ => None,
     };
     placement.hover = hover;
@@ -412,11 +502,13 @@ mod tests {
 
     #[test]
     fn pending_drawer_press_does_not_block_board_picks() {
-        let mut session = EditorSession::default();
-        session.pending_drawer_press = Some(DrawerTilePressed {
-            tile: output("main"),
-            start_screen: Vec2::ZERO,
-        });
+        let session = EditorSession {
+            pending_drawer_press: Some(DrawerTilePressed {
+                tile: output("main"),
+                start_screen: Vec2::ZERO,
+            }),
+            ..Default::default()
+        };
         assert!(!session.blocks_board_picks());
     }
 

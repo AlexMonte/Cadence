@@ -10,10 +10,13 @@ pub struct AtomView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AtomKind {
     NoteName(NoteName),
+    DrumHit(crate::domain::document::DrumHit),
     Octave(i8),
     Accidental(Accidental),
     Operator(OperatorKind),
     Number(i32),
+    Ratio(tessera::prelude::Rational),
+    Modifier(tessera::prelude::AtomModifier),
     Rest,
 }
 
@@ -37,6 +40,8 @@ pub enum Accidental {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OperatorKind {
+    Choice,
+    Parallel,
     Power,
     At,
     Multiply,
@@ -137,9 +142,11 @@ fn compound_operator_argument(
     let mut next = start_index + 1;
 
     if let Some(atom) = atoms.get(next) {
-        if let AtomKind::Number(value) = atom.kind {
+        if !matches!(operator, OperatorKind::Choice | OperatorKind::Parallel)
+            && matches!(atom.kind, AtomKind::Number(_) | AtomKind::Ratio(_))
+        {
             members.push(atom.node.clone());
-            display.push_str(&value.to_string());
+            display.push_str(&atom_display(&atom.kind));
             next += 1;
         }
     }
@@ -177,6 +184,8 @@ fn accidental_display(accidental: Accidental) -> &'static str {
 fn operator_display(operator: OperatorKind) -> &'static str {
     match operator {
         OperatorKind::Power => "^",
+        OperatorKind::Choice => "|",
+        OperatorKind::Parallel => ",",
         OperatorKind::At => "@",
         OperatorKind::Multiply => "*",
         OperatorKind::Divide => "/",
@@ -186,11 +195,173 @@ fn operator_display(operator: OperatorKind) -> &'static str {
 fn atom_display(kind: &AtomKind) -> String {
     match kind {
         AtomKind::NoteName(note) => note_display(*note).to_string(),
+        AtomKind::DrumHit(hit) => hit.code().to_string(),
         AtomKind::Octave(octave) => octave.to_string(),
         AtomKind::Accidental(accidental) => accidental_display(*accidental).to_string(),
         AtomKind::Operator(operator) => operator_display(*operator).to_string(),
         AtomKind::Number(value) => value.to_string(),
+        AtomKind::Ratio(value) => format!("{}/{}", value.numerator, value.denominator),
+        AtomKind::Modifier(modifier) => modifier_display(modifier),
         AtomKind::Rest => "rest".to_string(),
+    }
+}
+
+/// Compact glyphs used by both the board and its nested previews. The full
+/// parameter name and unit remain available in the inspector.
+pub(crate) fn modifier_display(modifier: &tessera::prelude::AtomModifier) -> String {
+    use tessera::prelude::AtomModifier as M;
+    match modifier {
+        M::Modulation { parameter, .. } => format!(
+            "~{}",
+            match parameter {
+                tessera::prelude::ParameterKey::Gain => "G",
+                tessera::prelude::ParameterKey::Velocity => "V",
+                tessera::prelude::ParameterKey::PlaybackRate => "R",
+                tessera::prelude::ParameterKey::LowPassCutoff => "Hz",
+                tessera::prelude::ParameterKey::Transpose => "Tr",
+                _ => "?",
+            }
+        ),
+        M::Gain(value) => format!(
+            "G{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Attack(value) => format!(
+            "A{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Decay(value) => format!(
+            "D{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Release(value) => format!(
+            "R{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Transpose(value) => format!(
+            "Tr{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Pan(value) => format!(
+            "Pan{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::HighPassCutoff(value) => format!(
+            "HP{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::HighPassResonance(value) => format!(
+            "HQ{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Velocity(value) => format!(
+            "Vel{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::ClipLength(value) => format!(
+            "Cl{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::PostGain(value) => format!(
+            "PG{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::PitchBend(value) => format!(
+            "PB{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Expression(value) => format!(
+            "Ex{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Delay(_) => "Dly".into(),
+        M::Reverb(_) => "Revb".into(),
+        M::Compressor(_) => "Cmp".into(),
+        M::Gate(value) => format!("Gate{}", u8::from(*value)),
+        M::Legato(value) => format!(
+            "L{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Sustain(value) => format!(
+            "S{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::LowPassCutoff(value) => format!(
+            "Hz{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::LowPassResonance(value) => format!(
+            "Q{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::SampleBank(value) => format!("B:{value}"),
+        M::SampleVariant(value) => format!("V{value}"),
+        M::PlaybackRate(value) => format!(
+            "Rate{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::PlaybackStart(value) => format!(
+            "In{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::PlaybackEnd(value) => format!(
+            "Out{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Reverse(value) => format!("Rev{}", u8::from(*value)),
+        M::Fit(value) => format!("Fit{}", u8::from(*value)),
+        M::Loop(value) => format!("Loop{}", u8::from(*value)),
+        M::Slice { index, count } => format!("Sl{}/{}", index + 1, count),
+        M::Rev => "Rev".into(),
+        M::Late(value) => format!(
+            "Late {}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Fast(value) => format!(
+            "×{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Slow(value) => format!(
+            "/{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Elongate(value) => format!(
+            "@{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Replicate(value) => format!("^{value}"),
+        M::Degrade(Some(value)) => format!(
+            "%{}",
+            parameter_display(&tessera::prelude::FieldValue::rational(*value))
+        ),
+        M::Degrade(None) => "%".into(),
+        M::Euclid { pulses, steps } => format!("E{pulses}:{steps}"),
+        M::Scale(scale) => format!("{} {}", scale.root_label(), scale.mode.short_label()),
+        M::EuclidPattern(pattern) => format!("E{}cy", pattern.period().unwrap_or(0)),
+        M::EuclidRot {
+            pulses,
+            steps,
+            rotation,
+        } => format!("E{pulses}:{steps}:{rotation}"),
+    }
+}
+
+pub(crate) fn parameter_display(value: &tessera::prelude::FieldValue) -> String {
+    use tessera::prelude::FieldValue as V;
+    match value {
+        V::Modulation { value } => format!(
+            "{}–{}",
+            parameter_display(&V::rational(value.minimum)),
+            parameter_display(&V::rational(value.maximum))
+        ),
+        V::Rational { value } if value.denominator == 1 => value.numerator.to_string(),
+        V::Rational { value } => format!("{}/{}", value.numerator, value.denominator),
+        V::Bool { value } => u8::from(*value).to_string(),
+        V::Symbol { value } => value.clone(),
+        V::Delay { value } => format!("{} s", parameter_display(&V::rational(value.time))),
+        V::Reverb { value } => format!("{} s", parameter_display(&V::rational(value.decay))),
+        V::Compressor { value } => format!("{}:1", parameter_display(&V::rational(value.ratio))),
+        V::Slice { index, count } => format!("{}/{}", index + 1, count),
     }
 }
 

@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::*;
 
 use super::events::{PlaybackStatusChanged, ScoreReplaced};
-use super::resources::{ActiveScores, CadenceDiagnostics, PlaybackHandle, PlaybackSync};
+use super::resources::{ActiveScores, CadenceDiagnostics, PlaybackSync};
 use crate::infrastructure::playback::{PlaybackRuntime, PlaybackState};
 
 /// Advances playback scheduling when transport is playing.
@@ -38,12 +38,12 @@ pub fn replace_scores_system(
         return;
     }
 
-    match PlaybackHandle::replace_merged_scores(&mut runtime, scores.scores.clone()) {
+    match runtime.replace_prepared_score(scores.score().clone()) {
         Ok(()) => {
             sync.last_applied_revision = scores.revision;
             diagnostics.last_tick_error = None;
             replaced_events.write(ScoreReplaced {
-                output_count: scores.scores.len(),
+                output_count: scores.output_count,
             });
         }
         Err(error) => {

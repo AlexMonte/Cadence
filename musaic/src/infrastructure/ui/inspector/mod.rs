@@ -2,6 +2,7 @@
 //! projected from [`EditorUiProjection`] paint DTOs.
 
 pub mod panels;
+pub(super) mod view_memory;
 
 use bevy::{prelude::*, ui::widget::Text as UiText};
 use bevy_feathers::theme::ThemedText;
@@ -11,14 +12,12 @@ use crate::{
     application::board_view_settings::{AtomDisplayMode, AtomDisplayScope, BoardViewSettings},
     application::command::{EditorCommand, EditorCommandBus},
     application::editor::{InspectorLayout, InspectorPanelKind},
-    application::pipeline::runtime::RuntimePreviewSnapshot,
     application::pipeline::ui_projection::{
         EditorUiProjection, InspectorPaint, InspectorPanelPaint,
     },
 };
 
 use crate::adapter::load_up::UiSpriteAssets;
-use crate::infrastructure::ui::controls::UiTilePaletteCamera;
 use crate::infrastructure::ui::theme::{
     INSPECTOR_SLIDE_DISTANCE_FALLBACK, InspectorPanelHost, InspectorSlideLayer,
     InspectorTransitionQueue, MusaicUiTheme, SlideDirection, UiInspectorBody, UiInspectorHeader,
@@ -26,9 +25,8 @@ use crate::infrastructure::ui::theme::{
 };
 use crate::infrastructure::ui::widgets::{PanelBackdrop, musaic_button, spawn_shell_panel};
 
-const RIGHT_PANEL_PERCENT: f32 = 35.0;
-const INSPECTOR_MIN_WIDTH: f32 = 300.0;
-const PANEL_PADDING: f32 = 14.0;
+const INSPECTOR_WIDTH: f32 = 330.0;
+const PANEL_PADDING: f32 = 20.0;
 
 #[derive(Component)]
 struct UiShellInspector;
@@ -38,8 +36,6 @@ pub(crate) fn spawn_inspector_column(
     theme: &MusaicUiTheme,
     layout: &InspectorLayout,
     paint: &InspectorPaint,
-    preview_snapshot: &RuntimePreviewSnapshot,
-    palette_camera: Option<Entity>,
     host: &mut InspectorPanelHost,
     sprites: Option<&UiSpriteAssets>,
     images: &Assets<Image>,
@@ -49,22 +45,28 @@ pub(crate) fn spawn_inspector_column(
         parent,
         (
             UiShellInspector,
+            super::keyboard_regions::KeyboardRegion(super::keyboard_regions::RegionKind::Inspector),
+            bevy::input_focus::tab_navigation::TabIndex(-1),
             Node {
-                width: percent(RIGHT_PANEL_PERCENT),
+                width: px(INSPECTOR_WIDTH),
                 height: percent(100),
                 flex_shrink: 0.0,
-                min_width: px(INSPECTOR_MIN_WIDTH),
-                padding: UiRect::all(px(PANEL_PADDING + 4.0)),
+                min_width: px(INSPECTOR_WIDTH),
+                max_width: px(INSPECTOR_WIDTH),
+                border: UiRect::left(px(1)),
+                padding: UiRect::all(px(PANEL_PADDING)),
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
-                row_gap: px(8),
+                row_gap: px(14),
                 ..default()
             },
             BackgroundColor(theme.chrome.panel_bg),
+            BorderColor::all(theme.chrome.border),
         ),
+        theme,
         images,
         sprites,
-        PanelBackdrop::Panel,
+        PanelBackdrop::None,
         |panel| {
             let header_id = panel
                 .spawn((
@@ -96,7 +98,8 @@ pub(crate) fn spawn_inspector_column(
                 ))
                 .with_children(|viewport| {
                     let body_id = viewport
-                        .spawn(inspector_body_bundle())
+                        .spawn(inspector_body_bundle(layout))
+                        .observe(on_inspector_scroll)
                         .with_children(|body| {
                             spawn_inspector_body(
                                 body,
@@ -104,10 +107,8 @@ pub(crate) fn spawn_inspector_column(
                                 images,
                                 layout,
                                 paint,
-                                preview_snapshot,
                                 view_settings,
                                 sprites,
-                                palette_camera,
                             );
                         })
                         .id();
@@ -119,9 +120,10 @@ pub(crate) fn spawn_inspector_column(
     );
 }
 
-fn inspector_body_bundle() -> impl Bundle {
+fn inspector_body_bundle(layout: &InspectorLayout) -> impl Bundle {
     (
         UiInspectorBody,
+        view_memory::panel(layout),
         Node {
             width: percent(100),
             height: percent(100),
@@ -133,15 +135,78 @@ fn inspector_body_bundle() -> impl Bundle {
             right: px(0),
             top: px(0),
             bottom: px(0),
-            overflow: Overflow::clip(),
+            overflow: Overflow::scroll_y(),
             ..default()
         },
         UiTransform::IDENTITY,
+        ScrollPosition::default(),
     )
 }
 
 fn spawn_inspector_header(panel: &mut ChildSpawnerCommands<'_>, paint: &InspectorPaint) {
-    panel.spawn((UiText::new(paint.header_title.clone()), ThemedText));
+    let selected = paint.panels.last().and_then(|paint| match paint {
+        InspectorPanelPaint::TileInspect { selected, .. } => Some(selected),
+        _ => None,
+    });
+    panel
+        .spawn(Node {
+            width: percent(100),
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            let title = if selected.is_some() {
+                "Selected tile"
+            } else {
+                &paint.header_title
+            };
+            panels::tile_inspect::inspector_label(row, title, 12.0, true);
+            if let Some(selected) = selected {
+                panels::tile_inspect::inspector_label(row, &selected.coordinate, 12.0, true);
+            }
+            if paint
+                .panels
+                .iter()
+                .any(|panel| matches!(panel, InspectorPanelPaint::Drawer { .. }))
+            {
+                row.spawn(musaic_button(
+                    Node {
+                        min_height: px(28),
+                        padding: UiRect::horizontal(px(6)),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    super::shell::menu::InspectorButtonAction(EditorCommand::SetDrawerOpen {
+                        open: false,
+                    }),
+                    "Close library",
+                ))
+                .insert(TextFont {
+                    font_size: 12.0,
+                    ..default()
+                })
+                .observe(super::shell::menu::on_inspector_button_activated);
+            }
+        });
+}
+
+fn on_inspector_scroll(
+    mut event: On<Pointer<Scroll>>,
+    mut bodies: Query<(&ComputedNode, &mut ScrollPosition), With<UiInspectorBody>>,
+) {
+    let Ok((computed, mut position)) = bodies.get_mut(event.entity) else {
+        return;
+    };
+    let scale = match event.unit {
+        bevy::input::mouse::MouseScrollUnit::Line => 28.0,
+        bevy::input::mouse::MouseScrollUnit::Pixel => 1.0,
+    };
+    let maximum = ((computed.content_size().y - computed.size().y)
+        * computed.inverse_scale_factor())
+    .max(0.0);
+    position.y = (position.y - event.y * scale).clamp(0.0, maximum);
+    event.propagate(false);
 }
 
 /// Spawn the inspector body as a stack of panels (top of stack rendered first).
@@ -155,10 +220,8 @@ pub(crate) fn spawn_inspector_body(
     images: &Assets<Image>,
     layout: &InspectorLayout,
     paint: &InspectorPaint,
-    preview_snapshot: &RuntimePreviewSnapshot,
     view_settings: BoardViewSettings,
     ui_sprites: Option<&UiSpriteAssets>,
-    palette_camera: Option<Entity>,
 ) {
     if layout.is_empty() {
         panel.spawn((UiText::new("Focus a slot or tile to inspect."), ThemedText));
@@ -184,21 +247,23 @@ pub(crate) fn spawn_inspector_body(
         let panel_node = Node {
             width: percent(100),
             flex_grow: if grows { 1.0 } else { 0.0 },
-            flex_shrink: 0.0,
+            flex_basis: if grows { px(0) } else { Val::Auto },
+            flex_shrink: if grows { 1.0 } else { 0.0 },
             min_height: px(0.0),
             display: Display::Flex,
             flex_direction: FlexDirection::Column,
             row_gap: px(6.0),
-            padding: UiRect::all(px(8.0)),
+            padding: UiRect::ZERO,
             position_type: PositionType::Relative,
             ..default()
         };
         spawn_shell_panel(
             panel,
-            (panel_node, BackgroundColor(theme.chrome.panel_inset)),
+            (panel_node, BackgroundColor(theme.chrome.panel_bg)),
+            theme,
             images,
             ui_sprites,
-            PanelBackdrop::Section,
+            PanelBackdrop::None,
             |content| {
                 // Panels below the top carry their own caption (the shell
                 // header names only the topmost panel).
@@ -212,15 +277,7 @@ pub(crate) fn spawn_inspector_body(
                         ThemedText,
                     ));
                 }
-                spawn_inspector_panel(
-                    content,
-                    images,
-                    kind,
-                    panel_paint,
-                    preview_snapshot,
-                    ui_sprites,
-                    palette_camera,
-                );
+                spawn_inspector_panel(content, images, kind, panel_paint, ui_sprites);
             },
         );
     }
@@ -242,9 +299,7 @@ fn spawn_inspector_panel(
     images: &Assets<Image>,
     kind: &InspectorPanelKind,
     paint: &InspectorPanelPaint,
-    preview_snapshot: &RuntimePreviewSnapshot,
     ui_sprites: Option<&UiSpriteAssets>,
-    palette_camera: Option<Entity>,
 ) {
     match (kind, paint) {
         (
@@ -259,7 +314,6 @@ fn spawn_inspector_panel(
                 panel,
                 target_label.as_deref(),
                 armed_label.as_deref(),
-                palette_camera,
             );
         }
         (
@@ -275,35 +329,70 @@ fn spawn_inspector_panel(
         (
             InspectorPanelKind::TileInspectPanel { node },
             InspectorPanelPaint::TileInspect {
-                description, ports, ..
+                title,
+                code,
+                description,
+                selected,
+                ports,
+                editable_atom,
+                compound,
+                sound,
+                ..
             },
         ) => {
             panels::tile_inspect::spawn_tile_inspect_panel(
                 panel,
                 node,
-                description,
+                (title, description),
+                code,
+                selected,
+                editable_atom.as_ref(),
+                compound.as_ref(),
+            );
+            if let Some(sound) = sound {
+                panels::sound::spawn_sound_panel(panel, node, sound);
+            }
+            panels::tile_inspect::spawn_connections(
+                panel,
+                node,
+                selected,
                 ports.as_ref(),
                 images,
                 ui_sprites,
             );
+            if code.suggested_name.is_some()
+                && code.output_name.is_none()
+                && code.definition.is_none()
+                && code.linked_sources.is_empty()
+            {
+                view_memory::section(panel, node, view_memory::SectionKind::Reuse, |body| {
+                    panels::tricks::spawn(body, node, code)
+                });
+            } else {
+                panels::tricks::spawn(panel, node, code);
+            }
         }
         (
             InspectorPanelKind::ProjectOverviewPanel { surface },
-            InspectorPanelPaint::ProjectOverview { .. },
+            InspectorPanelPaint::ProjectOverview { channels, .. },
         ) => {
-            panels::project_overview::spawn_project_overview_panel(panel, *surface);
+            panels::project_overview::spawn_project_overview_panel(panel, *surface, *channels);
         }
         (
-            InspectorPanelKind::SelectionSummaryPanel { count, primary },
-            InspectorPanelPaint::SelectionSummary { .. },
+            InspectorPanelKind::SelectionSummaryPanel { count, .. },
+            InspectorPanelPaint::SelectionSummary { primary_label, .. },
         ) => {
-            panels::selection::spawn_selection_summary_panel(panel, *count, primary.as_ref());
+            panels::selection::spawn_selection_summary_panel(
+                panel,
+                *count,
+                primary_label.as_deref(),
+            );
         }
         (
             InspectorPanelKind::TimelineEventPanel { event },
-            InspectorPanelPaint::TimelineEvent { .. },
+            InspectorPanelPaint::TimelineEvent { label, .. },
         ) => {
-            panels::timeline_event::spawn_timeline_event_panel(panel, *event, preview_snapshot);
+            panels::timeline_event::spawn_timeline_event_panel(panel, *event, label);
         }
         _ => {
             panic!("inspector layout/paint variant mismatch — projection writer must stay 1:1");
@@ -316,11 +405,8 @@ pub(crate) fn process_inspector_transitions(
     mut host: ResMut<InspectorPanelHost>,
     theme: Res<MusaicUiTheme>,
     projection: Res<EditorUiProjection>,
-    preview_snapshot: Res<RuntimePreviewSnapshot>,
-    view_settings: Res<BoardViewSettings>,
     ui_sprites: Option<Res<UiSpriteAssets>>,
     images: Res<Assets<Image>>,
-    palette_camera: Query<'_, '_, Entity, With<UiTilePaletteCamera>>,
     viewport_nodes: Query<&ComputedNode, With<UiInspectorViewport>>,
     slides: Query<(Entity, &InspectorSlideLayer)>,
     mut commands: Commands,
@@ -359,12 +445,11 @@ pub(crate) fn process_inspector_transitions(
         }
     }
 
-    let palette_camera = palette_camera.iter().next();
-
     let mut incoming = Entity::PLACEHOLDER;
     commands.entity(viewport).with_children(|viewport| {
         incoming = viewport
-            .spawn(inspector_body_bundle())
+            .spawn(inspector_body_bundle(&pending.layout))
+            .observe(on_inspector_scroll)
             .with_children(|body| {
                 spawn_inspector_body(
                     body,
@@ -372,10 +457,8 @@ pub(crate) fn process_inspector_transitions(
                     &images,
                     &pending.layout,
                     &projection.inspector_paint,
-                    &preview_snapshot,
-                    *view_settings,
+                    projection.view_settings,
                     ui_sprites.as_deref(),
-                    palette_camera,
                 );
             })
             .id();

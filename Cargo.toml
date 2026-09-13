@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["cadence", "musaic", "tessera"]
+exclude = ["vendor/load_up"]
 
 [workspace.package]
 edition = "2024"
@@ -12,8 +13,8 @@ rust-version = "1.85"
 # Internal crates: depend on these from members via `{ workspace = true }`.
 cadence = { path = "cadence" }
 tessera = { path = "tessera" }
-# `load_up` lives outside this workspace; the path is resolved from the workspace root.
-load_up = { path = "../load_up/crates/load_up" }
+# Pin the compatible asset-loader source so a sibling checkout cannot change our Bevy version.
+load_up = { path = "vendor/load_up/crates/load_up" }
 
 # Shared third-party dependencies, unified across all member crates.
 serde = { version = "1.0.219", features = ["derive"] }

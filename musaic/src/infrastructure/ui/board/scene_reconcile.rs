@@ -10,38 +10,26 @@ use bevy::{
 };
 use tessera::prelude::NodeId;
 
-use crate::adapter::load_up::UiSpriteAssets;
+use crate::application::editor::EditorAttention;
 use crate::application::editor::interaction::BoardPickTargetKind;
 use crate::application::pipeline::scene_sync::{
     VisibleBoardConnection, VisibleBoardNode, VisibleBoardState, VisibleNodeKind,
 };
-use crate::application::session::MusaicProject;
-use crate::domain::board::{BoardSurfaceId, STACK_DEPTH, SurfaceLayoutKind};
-use crate::domain::document::{PlacementAddress, StackIndex};
-use crate::infrastructure::ui::board_geometry::{
-    placement_center_for_address, stack_flat_tile_center,
+use crate::domain::board::{BoardSurfaceId, SurfaceLayoutKind};
+use crate::domain::document::{PlacementAddress, PortSlotState, StackIndex};
+use crate::infrastructure::ui::board_geometry::placement_center_for_address;
+use crate::infrastructure::ui::musaic_tile::TILE_HEIGHT;
+use crate::infrastructure::ui::render_layers::{
+    BOARD_VIEW, SCENE_NODE_VISIBILITY, SCENE_ROOT_VISIBILITY,
 };
-use crate::infrastructure::ui::musaic_tile::{
-    TILE_HEIGHT, board_footprint_for_kind, stack_footprint_for_kind, tile_visual_for_visible,
-};
-use crate::infrastructure::ui::port_glyphs::spawn_board_port_compass;
-use crate::infrastructure::ui::render_layers::{BOARD_VIEW, SCENE_NODE_VISIBILITY, SCENE_ROOT_VISIBILITY};
-use crate::infrastructure::ui::tile_icons::{
-    ICON_FOOTPRINT, ICON_THICKNESS, ICON_Y_LIFT, TileIconAssets, spawn_tile_icon,
-};
-use crate::infrastructure::ui::tile_mesh::TileMeshAssets;
-use crate::infrastructure::ui::tile_visual::{
-    BoardTileMode, BoardTileSpec, BoardTileVisualSource, resolve_board_tile,
-};
-use crate::infrastructure::ui::transform_tile::{
-    TransformTileAssets, TransformTileBase, TransformTileIcon, frames, tile_sheet_for_atom,
-};
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+use crate::infrastructure::ui::tile_surface::compact_port_mesh;
 
 use super::components::*;
 use super::grid::spawn_board_grid_anchor;
 use super::helpers::*;
 use super::materials::{Board3dMaterials, Board3dRenderCache};
-use super::picking::{on_board_base_clicked, on_tile_clicked};
+use super::picking::{on_board_base_clicked, on_tile_clicked, on_tile_pressed};
 
 pub(super) fn teardown_board_3d_scene(
     mut commands: Commands,
@@ -68,7 +56,7 @@ pub(super) fn setup_board_3d_scene(
     mut images: ResMut<'_, Assets<Image>>,
     mut meshes: ResMut<'_, Assets<Mesh>>,
     materials: Res<'_, Board3dMaterials>,
-    project: Res<'_, MusaicProject>,
+    attention: Res<'_, EditorAttention>,
 ) {
     let mut image = Image::new_uninit(
         default(),
@@ -84,7 +72,7 @@ pub(super) fn setup_board_3d_scene(
         &mut commands,
         &mut meshes,
         &materials,
-        project.document.root_surface,
+        attention.active_board(),
     );
 
     // Initial pose mirrors the rig's default; from here on the rig's
@@ -93,6 +81,7 @@ pub(super) fn setup_board_3d_scene(
     commands.spawn((
         Board3dCamera,
         Camera3d::default(),
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
         MeshPickingCamera,
         BOARD_VIEW,
         SCENE_ROOT_VISIBILITY,
@@ -132,29 +121,18 @@ pub(super) fn sync_board_3d_scene(
     visible: Res<VisibleBoardState>,
     mut cache: ResMut<Board3dRenderCache>,
     materials: Res<Board3dMaterials>,
-    transform_tiles: Res<TransformTileAssets>,
-    tile_icons: Res<TileIconAssets>,
-    tile_meshes: Option<Res<TileMeshAssets>>,
-    atom_tiles: Option<Res<crate::adapter::load_up::AtomTileAssets>>,
-    ui_sprites: Option<Res<UiSpriteAssets>>,
-    images: Res<Assets<Image>>,
+    theme: Res<MusaicUiTheme>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut standard_materials: ResMut<Assets<StandardMaterial>>,
     roots: Query<Entity, With<Board3dRoot>>,
 ) {
     let Some(surface) = visible.active_surface else {
         return;
     };
 
-    let ortho_ready = transform_tiles.ready;
-    let icons_ready = tile_icons.ready;
-    let tile_meshes_ready = tile_meshes.as_ref().is_some_and(|assets| assets.ready);
-
+    let stack_columns = stack_display_columns(&visible);
     let structure_changed = cache.active_surface != Some(surface)
         || cache.layout != visible.layout
-        || cache.ortho_tiles_ready != ortho_ready
-        || cache.tile_icons_ready != icons_ready
-        || cache.tile_meshes_ready != tile_meshes_ready
+        || cache.stack_columns != stack_columns
         || cache.root.is_none()
         || !cache
             .root
@@ -167,9 +145,7 @@ pub(super) fn sync_board_3d_scene(
         *cache = Board3dRenderCache {
             active_surface: Some(surface),
             layout: visible.layout,
-            ortho_tiles_ready: ortho_ready,
-            tile_icons_ready: icons_ready,
-            tile_meshes_ready,
+            stack_columns,
             ..Default::default()
         };
         let root = commands
@@ -183,7 +159,14 @@ pub(super) fn sync_board_3d_scene(
             .id();
         cache.root = Some(root);
         commands.entity(root).with_children(|parent| {
-            spawn_surface_base(parent, surface, visible.layout, &mut meshes, &materials);
+            spawn_surface_base(
+                parent,
+                surface,
+                visible.layout,
+                stack_columns,
+                &mut meshes,
+                &materials,
+            );
         });
         root
     } else {
@@ -197,14 +180,8 @@ pub(super) fn sync_board_3d_scene(
         &visible,
         &mut cache,
         &mut meshes,
-        &mut standard_materials,
         &materials,
-        &transform_tiles,
-        &tile_icons,
-        tile_meshes.as_deref(),
-        atom_tiles.as_deref(),
-        ui_sprites.as_deref(),
-        &images,
+        &theme,
     );
     reconcile_board_connections(
         &mut commands,
@@ -233,19 +210,19 @@ fn reconcile_board_tiles(
     visible: &VisibleBoardState,
     cache: &mut Board3dRenderCache,
     meshes: &mut Assets<Mesh>,
-    standard_materials: &mut Assets<StandardMaterial>,
     materials: &Board3dMaterials,
-    transform_tiles: &TransformTileAssets,
-    tile_icons: &TileIconAssets,
-    tile_meshes: Option<&TileMeshAssets>,
-    atom_tiles: Option<&crate::adapter::load_up::AtomTileAssets>,
-    ui_sprites: Option<&UiSpriteAssets>,
-    images: &Assets<Image>,
+    theme: &MusaicUiTheme,
 ) {
     let desired: BTreeMap<NodeId, TileVisualKey> = visible
         .nodes
         .iter()
-        .map(|n| (n.node.clone(), TileVisualKey::from_node(n)))
+        .filter(|node| visible_tile_face(node))
+        .map(|n| {
+            (
+                n.node.clone(),
+                TileVisualKey::from_node(n, visible.display_address(n.address)),
+            )
+        })
         .collect();
 
     let stale: Vec<NodeId> = cache
@@ -260,8 +237,8 @@ fn reconcile_board_tiles(
         }
     }
 
-    for node in &visible.nodes {
-        let key = TileVisualKey::from_node(node);
+    for node in visible.nodes.iter().filter(|node| visible_tile_face(node)) {
+        let key = TileVisualKey::from_node(node, visible.display_address(node.address));
         let needs_spawn = match cache.tiles.get(&node.node) {
             Some((entity, old_key)) if old_key == &key => {
                 let _ = entity;
@@ -282,15 +259,10 @@ fn reconcile_board_tiles(
                 parent,
                 surface,
                 node,
+                visible.display_address(node.address),
                 meshes,
-                standard_materials,
                 materials,
-                transform_tiles,
-                tile_icons,
-                tile_meshes,
-                atom_tiles,
-                ui_sprites,
-                images,
+                theme,
             );
         });
         if let Some(entity) = spawned {
@@ -322,6 +294,7 @@ fn reconcile_board_connections(
             (
                 (c.from.clone(), c.to.clone()),
                 ConnectionVisualKey {
+                    side: c.side,
                     from_slot: c.from_slot,
                     to_slot: c.to_slot,
                     kind: c.kind,
@@ -345,6 +318,7 @@ fn reconcile_board_connections(
     for connection in &visible.connections {
         let key = (connection.from.clone(), connection.to.clone());
         let visual = ConnectionVisualKey {
+            side: connection.side,
             from_slot: connection.from_slot,
             to_slot: connection.to_slot,
             kind: connection.kind,
@@ -362,7 +336,7 @@ fn reconcile_board_connections(
         }
         let mut spawned = None;
         commands.entity(root).with_children(|parent| {
-            spawned = spawn_one_connection(parent, surface, connection, meshes, materials);
+            spawned = spawn_one_connection(parent, surface, connection, visible, meshes, materials);
         });
         if let Some(entity) = spawned {
             cache.connections.insert(key, (entity, visual));
@@ -402,13 +376,21 @@ fn reconcile_stack_markers(
         }
     }
     for index in &visible.stack_inserts {
-        if cache.stack_inserts.contains_key(index) {
+        if let Some(entity) = cache.stack_inserts.get(index) {
+            commands.entity(*entity).insert(Transform::from_translation(
+                stack_insert_marker_center(visible.stack_display.display_index(*index)),
+            ));
             continue;
         }
         let mut spawned = None;
         commands.entity(root).with_children(|parent| {
             spawned = Some(spawn_one_stack_insert(
-                parent, surface, *index, meshes, materials,
+                parent,
+                surface,
+                *index,
+                visible.stack_display.display_index(*index),
+                meshes,
+                materials,
             ));
         });
         if let Some(entity) = spawned {
@@ -429,12 +411,20 @@ fn reconcile_stack_markers(
         }
     }
     for index in &visible.stack_locked_slots {
-        if cache.stack_locked.contains_key(index) {
+        if let Some(entity) = cache.stack_locked.get(index) {
+            commands.entity(*entity).insert(Transform::from_translation(
+                stack_insert_marker_center(visible.stack_display.display_index(*index)),
+            ));
             continue;
         }
         let mut spawned = None;
         commands.entity(root).with_children(|parent| {
-            spawned = Some(spawn_one_stack_locked(parent, *index, meshes, materials));
+            spawned = Some(spawn_one_stack_locked(
+                parent,
+                visible.stack_display.display_index(*index),
+                meshes,
+                materials,
+            ));
         });
         if let Some(entity) = spawned {
             cache.stack_locked.insert(*index, entity);
@@ -446,20 +436,38 @@ fn spawn_one_connection(
     parent: &mut ChildSpawnerCommands<'_>,
     surface: BoardSurfaceId,
     connection: &VisibleBoardConnection,
+    visible: &VisibleBoardState,
     meshes: &mut Assets<Mesh>,
     materials: &Board3dMaterials,
 ) -> Option<Entity> {
-    let start = slot_position(connection.from_slot, CONNECTION_LIFT);
-    let end = slot_position(connection.to_slot, CONNECTION_LIFT);
-    let delta = end - start;
-    let length = delta.length();
-    if length <= f32::EPSILON {
+    let geometry = |node_id: &NodeId, slot| {
+        let node = visible.nodes.iter().find(|node| &node.node == node_id);
+        let footprint = node
+            .map(tessera_footprint_for_node)
+            .unwrap_or(tessera::prelude::TileFootprint::unit());
+        let center = crate::infrastructure::ui::board_geometry::tessera_slot_center(
+            slot,
+            footprint,
+            CONNECTION_LIFT,
+        );
+        let size = crate::infrastructure::ui::tile_surface::face_size(
+            node.map(|n| n.kind).unwrap_or(VisibleNodeKind::Tile),
+        ) * Vec2::new(footprint.width as f32, footprint.height as f32);
+        (center, size * 0.5)
+    };
+    let (from, from_half) = geometry(&connection.from, connection.from_slot);
+    let (to, to_half) = geometry(&connection.to, connection.to_slot);
+    let points = crate::infrastructure::ui::board_geometry::connection_path(
+        from,
+        from_half,
+        to,
+        to_half,
+        connection.side,
+    );
+    let total: f32 = points.windows(2).map(|p| p[0].distance(p[1])).sum();
+    if total <= f32::EPSILON {
         return None;
     }
-
-    let mid = start.lerp(end, 0.5);
-    let yaw = delta.z.atan2(delta.x);
-    use crate::domain::document::PortSlotState;
     let material = if connection.kind == PortSlotState::Input {
         materials.connection_scalar.clone()
     } else {
@@ -469,23 +477,63 @@ fn spawn_one_connection(
         parent
             .spawn((
                 ConnectionLineEntity,
-                BoardPickTarget {
-                    surface_id: surface,
-                    kind: BoardPickTargetKind::Connection {
-                        from: connection.from.clone(),
-                        to: connection.to.clone(),
-                    },
-                },
-                Mesh3d(meshes.add(Cuboid::new(length, CONNECTION_HEIGHT, CONNECTION_THICKNESS))),
-                MeshMaterial3d(material),
+                Transform::default(),
                 SCENE_NODE_VISIBILITY,
-                Transform {
-                    translation: mid,
-                    rotation: Quat::from_rotation_y(-yaw),
-                    ..default()
-                },
             ))
-            .observe(on_tile_clicked)
+            .with_children(|wire| {
+                let mut offset = 0.0;
+                for (index, pair) in points.windows(2).enumerate() {
+                    let delta = pair[1] - pair[0];
+                    let length = delta.length();
+                    if length <= f32::EPSILON {
+                        continue;
+                    }
+                    wire.spawn((
+                        super::playback_activity::ConnectionPlaybackPath {
+                            from: connection.from.clone(),
+                            to: connection.to.clone(),
+                            length,
+                            offset,
+                            total,
+                        },
+                        BoardPickTarget {
+                            surface_id: surface,
+                            kind: BoardPickTargetKind::Connection {
+                                from: connection.from.clone(),
+                                to: connection.to.clone(),
+                            },
+                        },
+                        Mesh3d(meshes.add(Cuboid::new(
+                            length,
+                            CONNECTION_HEIGHT,
+                            CONNECTION_THICKNESS,
+                        ))),
+                        MeshMaterial3d(material.clone()),
+                        SCENE_NODE_VISIBILITY,
+                        Transform {
+                            translation: pair[0].lerp(pair[1], 0.5),
+                            rotation: Quat::from_rotation_y(-delta.z.atan2(delta.x)),
+                            ..default()
+                        },
+                    ))
+                    .observe(on_tile_clicked)
+                    .with_children(|segment| {
+                        if index == points.len() - 2 {
+                            segment.spawn((
+                                Mesh3d(meshes.add(
+                                    crate::infrastructure::ui::tile_surface::connection_arrow_mesh(
+                                    ),
+                                )),
+                                MeshMaterial3d(material.clone()),
+                                SCENE_NODE_VISIBILITY,
+                                Transform::from_xyz(length * 0.5, 0.0, 0.0),
+                                Pickable::IGNORE,
+                            ));
+                        }
+                    });
+                    offset += length;
+                }
+            })
             .id(),
     )
 }
@@ -516,6 +564,7 @@ fn spawn_one_stack_insert(
     parent: &mut ChildSpawnerCommands<'_>,
     surface: BoardSurfaceId,
     index: StackIndex,
+    display_index: StackIndex,
     meshes: &mut Assets<Mesh>,
     materials: &Board3dMaterials,
 ) -> Entity {
@@ -533,146 +582,95 @@ fn spawn_one_stack_insert(
             ))),
             MeshMaterial3d(materials.focused.clone()),
             SCENE_NODE_VISIBILITY,
-            Transform::from_translation(stack_insert_marker_center(index)),
+            Transform::from_translation(stack_insert_marker_center(display_index)),
         ))
         .observe(on_tile_clicked)
         .id()
+}
+
+fn stack_display_columns(visible: &VisibleBoardState) -> usize {
+    if visible.layout != SurfaceLayoutKind::Stack {
+        return 0;
+    }
+    crate::infrastructure::ui::camera_rig::stack_canvas_rows(visible)
+        * crate::domain::board::geometry::STACK_COLUMNS
 }
 
 fn spawn_surface_base(
     parent: &mut ChildSpawnerCommands<'_>,
     surface: BoardSurfaceId,
     layout: SurfaceLayoutKind,
+    cells: usize,
     meshes: &mut Assets<Mesh>,
     materials: &Board3dMaterials,
 ) {
-    match layout {
-        // Root boards use the persistent BoardGridAnchor backdrop instead of a
-        // per-rebuild slab; container interiors stay a finite stack track.
-        SurfaceLayoutKind::Board => {}
-        SurfaceLayoutKind::Stack => spawn_stack_base(parent, surface, meshes, materials),
+    if layout != SurfaceLayoutKind::Stack {
+        return;
     }
-}
-
-fn spawn_stack_base(
-    parent: &mut ChildSpawnerCommands<'_>,
-    surface: BoardSurfaceId,
-    meshes: &mut Assets<Mesh>,
-    materials: &Board3dMaterials,
-) {
-    let width = stack_width();
-
+    use crate::domain::board::geometry::{SLOT_SIZE, STACK_COLUMNS, stack_left_edge};
+    let columns = STACK_COLUMNS;
+    let rows = cells / columns;
+    let width = columns as f32 * SLOT_SIZE;
+    let depth = rows as f32 * SLOT_SIZE;
+    let center_z = (rows as f32 - 1.0) * SLOT_SIZE * 0.5;
     parent
         .spawn((
             BoardDragSurface { surface },
-            Mesh3d(meshes.add(Cuboid::new(width, BOARD_THICKNESS, STACK_DEPTH))),
+            Mesh3d(meshes.add(Cuboid::new(width, BOARD_THICKNESS, depth))),
             MeshMaterial3d(materials.board.clone()),
             SCENE_NODE_VISIBILITY,
-            Transform::from_xyz(0.0, -BOARD_THICKNESS * 0.5, 0.0),
+            Transform::from_xyz(0.0, -BOARD_THICKNESS * 0.5, center_z),
             Pickable::default(),
         ))
         .observe(on_board_base_clicked);
-}
-
-fn spawn_atom_center_icon(
-    parent: &mut ChildSpawnerCommands<'_>,
-    tile_icons: &TileIconAssets,
-    materials: &mut Assets<StandardMaterial>,
-    texture: Handle<Image>,
-) {
-    if !tile_icons.ready {
-        return;
+    let column_line = meshes.add(Cuboid::new(0.015, 0.008, depth));
+    for column in 0..=columns {
+        parent.spawn((
+            Mesh3d(column_line.clone()),
+            MeshMaterial3d(materials.grid_line.clone()),
+            SCENE_NODE_VISIBILITY,
+            Transform::from_xyz(
+                stack_left_edge() + column as f32 * SLOT_SIZE,
+                0.007,
+                center_z,
+            ),
+            Pickable::IGNORE,
+        ));
     }
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        base_color_texture: Some(texture),
-        unlit: true,
-        alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
-        ..default()
-    });
-    parent.spawn((
-        TransformTileIcon,
-        Mesh3d(tile_icons.quad.clone()),
-        MeshMaterial3d(material),
-        SCENE_NODE_VISIBILITY,
-        Transform::from_translation(Vec3::new(
-            0.0,
-            ICON_Y_LIFT + crate::infrastructure::ui::musaic_tile::TILE_WORLD_HEIGHT * 0.5,
-            0.0,
-        ))
-        .with_scale(Vec3::new(ICON_FOOTPRINT, ICON_THICKNESS, ICON_FOOTPRINT)),
-    ));
+    let row_line = meshes.add(Cuboid::new(width, 0.008, 0.015));
+    for row in 0..=rows {
+        parent.spawn((
+            Mesh3d(row_line.clone()),
+            MeshMaterial3d(materials.grid_line.clone()),
+            SCENE_NODE_VISIBILITY,
+            Transform::from_xyz(0.0, 0.007, (row as f32 - 0.5) * SLOT_SIZE),
+            Pickable::IGNORE,
+        ));
+    }
 }
 
 fn spawn_one_tile(
     parent: &mut ChildSpawnerCommands<'_>,
     surface: BoardSurfaceId,
     node: &VisibleBoardNode,
+    display_address: PlacementAddress,
     meshes: &mut Assets<Mesh>,
-    standard_materials: &mut Assets<StandardMaterial>,
     materials: &Board3dMaterials,
-    transform_tiles: &TransformTileAssets,
-    tile_icons: &TileIconAssets,
-    tile_meshes: Option<&TileMeshAssets>,
-    atom_tiles: Option<&crate::adapter::load_up::AtomTileAssets>,
-    ui_sprites: Option<&UiSpriteAssets>,
-    images: &Assets<Image>,
+    theme: &MusaicUiTheme,
 ) -> Option<Entity> {
-    match node.address {
-        PlacementAddress::StackIndex(index) => spawn_one_stack_tile(
-            parent,
-            surface,
-            node,
-            index,
-            meshes,
-            standard_materials,
-            materials,
-            transform_tiles,
-            tile_icons,
-            tile_meshes,
-            atom_tiles,
-        ),
-        PlacementAddress::BoardSlot(_) => spawn_one_board_tile(
-            parent,
-            surface,
-            node,
-            meshes,
-            standard_materials,
-            materials,
-            transform_tiles,
-            tile_icons,
-            tile_meshes,
-            atom_tiles,
-            ui_sprites,
-            images,
-        ),
+    // Empty surface content on an atom denotes a layer already summarized by
+    // its compound anchor. Its authored identity remains in scene_sync.
+    if node.kind == VisibleNodeKind::Atom
+        && matches!(
+            node.surface_content,
+            crate::application::pipeline::scene_sync::TileSurfaceContent::Empty
+        )
+    {
+        return None;
     }
-}
-
-fn spawn_one_board_tile(
-    parent: &mut ChildSpawnerCommands<'_>,
-    surface: BoardSurfaceId,
-    node: &VisibleBoardNode,
-    meshes: &mut Assets<Mesh>,
-    standard_materials: &mut Assets<StandardMaterial>,
-    materials: &Board3dMaterials,
-    transform_tiles: &TransformTileAssets,
-    tile_icons: &TileIconAssets,
-    tile_meshes: Option<&TileMeshAssets>,
-    atom_tiles: Option<&crate::adapter::load_up::AtomTileAssets>,
-    ui_sprites: Option<&UiSpriteAssets>,
-    images: &Assets<Image>,
-) -> Option<Entity> {
-    let footprint = board_footprint_for_kind(node.kind);
-    let tessera_footprint = tessera_footprint_for_node(node);
-    let world = placement_center_for_address(
-        node.address,
-        tessera_footprint,
-        node.kind,
-        footprint,
-        SLOT_HEIGHT,
-    );
+    let footprint = tessera_footprint_for_node(node);
+    let world =
+        placement_center_for_address(display_address, footprint, node.kind, 0.92, SLOT_HEIGHT);
     let pick_target = BoardPickTarget {
         surface_id: surface,
         kind: match node.address {
@@ -684,208 +682,127 @@ fn spawn_one_board_tile(
             },
         },
     };
-
-    let ortho = board_tile_ortho_spec(node, footprint);
-    let fallback = tile_material(node.kind, node.selected, node.focused, materials);
-    let spec = BoardTileSpec {
-        kind: node.kind,
-        tessera_footprint,
-        on_root_board: true,
-        plane_anchor: Vec3::new(world.x, SLOT_HEIGHT, world.z),
-        visual_footprint: footprint,
-        ortho,
-    };
-    let visual = resolve_board_tile(
-        tile_meshes,
-        Some(transform_tiles),
+    let label = node
+        .surface_content
+        .display()
+        .unwrap_or_else(|| match node.kind {
+            VisibleNodeKind::Output => "Output".into(),
+            _ => "Tile".into(),
+        });
+    let (mesh, details) = super::detail::face(
         meshes,
-        standard_materials,
-        Some(&fallback),
-        &spec,
-        BoardTileMode::Placed,
-    )?;
-    let ortho_icon = match visual.source {
-        BoardTileVisualSource::Ortho => spec.ortho.as_ref().and_then(|o| o.icon),
-        _ => None,
-    };
-
-    let mut entity = parent.spawn((
-        BoardDragSurface { surface },
-        Board3dTile {
-            surface,
-            node: node.node.clone(),
-            address: node.address,
-        },
-        pick_target,
-        Mesh3d(visual.mesh),
-        MeshMaterial3d(visual.material),
-        SCENE_NODE_VISIBILITY,
-        visual.transform,
-        Pickable::default(),
-    ));
-    if visual.source == BoardTileVisualSource::Ortho {
-        entity.insert(TransformTileBase);
-    }
+        node.kind,
+        &node.surface_content,
+        Vec2::new(footprint.width as f32, footprint.height as f32),
+        node.selected,
+        node.focused,
+        theme,
+    );
     Some(
-        entity
-            .observe(on_tile_clicked)
-            .with_children(|tile| {
-                if let Some(icon) = ortho_icon {
-                    tile.spawn(TransformTileIcon);
-                    spawn_tile_icon(tile, tile_icons, icon, ());
-                } else if let (Some(atom_assets), Some(atom)) = (atom_tiles, node.atom.as_ref()) {
-                    if let Some(texture) = atom_assets.image_for_atom(atom).cloned() {
-                        spawn_atom_center_icon(tile, tile_icons, standard_materials, texture);
-                    }
-                }
-                if let (Some(sprites), Some(view)) = (ui_sprites, node.ports.as_ref()) {
-                    spawn_board_port_compass(
-                        tile,
-                        surface,
-                        &node.node,
-                        footprint,
-                        view,
-                        images,
-                        sprites,
-                        meshes,
-                        standard_materials,
-                    );
-                }
-            })
-            .id(),
-    )
-}
-
-fn spawn_one_stack_tile(
-    parent: &mut ChildSpawnerCommands<'_>,
-    surface: BoardSurfaceId,
-    node: &VisibleBoardNode,
-    index: StackIndex,
-    meshes: &mut Assets<Mesh>,
-    standard_materials: &mut Assets<StandardMaterial>,
-    materials: &Board3dMaterials,
-    transform_tiles: &TransformTileAssets,
-    tile_icons: &TileIconAssets,
-    tile_meshes: Option<&TileMeshAssets>,
-    atom_tiles: Option<&crate::adapter::load_up::AtomTileAssets>,
-) -> Option<Entity> {
-    let footprint = stack_footprint_for_kind(node.kind);
-    let tessera_footprint = tessera_footprint_for_node(node);
-    let center = stack_flat_tile_center(index, node.kind, SLOT_HEIGHT);
-    let pick_target = BoardPickTarget {
-        surface_id: surface,
-        kind: BoardPickTargetKind::StackTile {
-            tile_id: node.node.clone(),
-        },
-    };
-
-    let ortho = board_tile_ortho_spec(node, footprint);
-    let fallback = tile_material(node.kind, node.selected, node.focused, materials);
-    let spec = BoardTileSpec {
-        kind: node.kind,
-        tessera_footprint,
-        on_root_board: false,
-        plane_anchor: Vec3::new(center.x, SLOT_HEIGHT, center.z),
-        visual_footprint: footprint,
-        ortho,
-    };
-    let visual = resolve_board_tile(
-        tile_meshes,
-        Some(transform_tiles),
-        meshes,
-        standard_materials,
-        Some(&fallback),
-        &spec,
-        BoardTileMode::Placed,
-    )?;
-    let ortho_icon = match visual.source {
-        BoardTileVisualSource::Ortho => spec.ortho.as_ref().and_then(|o| o.icon),
-        _ => None,
-    };
-
-    let mut entity = parent.spawn((
-        BoardDragSurface { surface },
-        Board3dTile {
-            surface,
-            node: node.node.clone(),
-            address: node.address,
-        },
-        pick_target,
-        Mesh3d(visual.mesh),
-        MeshMaterial3d(visual.material),
-        SCENE_NODE_VISIBILITY,
-        visual.transform,
-        Pickable::default(),
-    ));
-    if visual.source == BoardTileVisualSource::Ortho {
-        entity.insert(TransformTileBase);
-    }
-    Some(
-        entity
-            .observe(on_tile_clicked)
-            .with_children(|tile| {
-                if let Some(icon) = ortho_icon {
-                    tile.spawn(TransformTileIcon);
-                    spawn_tile_icon(tile, tile_icons, icon, ());
-                } else if let (Some(atom_assets), Some(atom)) = (atom_tiles, node.atom.as_ref()) {
-                    if let Some(texture) = atom_assets.image_for_atom(atom).cloned() {
-                        spawn_atom_center_icon(tile, tile_icons, standard_materials, texture);
-                    }
-                }
-            })
-            .id(),
-    )
-}
-
-fn board_tile_ortho_spec(
-    node: &VisibleBoardNode,
-    footprint: f32,
-) -> Option<crate::infrastructure::ui::musaic_tile::TileVisualSpec> {
-    let atom_sheet = node
-        .atom
-        .as_ref()
-        .filter(|_| node.kind == VisibleNodeKind::Atom)
-        .map(tile_sheet_for_atom);
-
-    let mut spec = atom_sheet
-        .map(|sheet| {
-            let highlighted = node.selected || node.focused;
-            crate::infrastructure::ui::musaic_tile::TileVisualSpec {
-                sheet,
-                frame: if highlighted {
-                    frames::HIGHLIGHT
-                } else {
-                    frames::FRAMED
+        parent
+            .spawn((
+                Name::new(label),
+                BoardDragSurface { surface },
+                Board3dTile {
+                    surface,
+                    node: node.node.clone(),
+                    address: node.address,
                 },
-                footprint,
-                icon: None,
-            }
-        })
-        .or_else(|| tile_visual_for_visible(node.kind, node.selected, node.focused, node.icon))?;
-    spec.footprint = footprint;
-    Some(spec)
+                pick_target,
+                mesh,
+                details,
+                MeshMaterial3d(materials.surface.clone()),
+                SCENE_NODE_VISIBILITY,
+                Transform::from_xyz(world.x, SLOT_HEIGHT + 0.012, world.z),
+                Pickable::default(),
+            ))
+            .observe(on_tile_clicked)
+            .observe(on_tile_pressed)
+            .with_children(|tile| {
+                if let Some(view) = &node.ports {
+                    use tessera::prelude::SpatialSide;
+                    let half = Vec2::new(footprint.width as f32, footprint.height as f32) * 0.5;
+                    let sides = [
+                        (
+                            SpatialSide::North,
+                            Vec3::new(0.0, 0.105, -half.y),
+                            0.0,
+                            view.north,
+                        ),
+                        (
+                            SpatialSide::East,
+                            Vec3::new(half.x, 0.105, 0.0),
+                            -std::f32::consts::FRAC_PI_2,
+                            view.east,
+                        ),
+                        (
+                            SpatialSide::South,
+                            Vec3::new(0.0, 0.105, half.y),
+                            std::f32::consts::PI,
+                            view.south,
+                        ),
+                        (
+                            SpatialSide::West,
+                            Vec3::new(-half.x, 0.105, 0.0),
+                            std::f32::consts::FRAC_PI_2,
+                            view.west,
+                        ),
+                    ];
+                    for (side, mut offset, mut yaw, state) in sides {
+                        if state == PortSlotState::None && !node.selected && !node.focused {
+                            continue;
+                        }
+                        let port_mesh = if node.kind == VisibleNodeKind::Container
+                            && side == SpatialSide::East
+                        {
+                            offset.x -= 0.19;
+                            offset.y = 0.15;
+                            yaw = 0.0;
+                            crate::infrastructure::ui::tile_surface::compact_container_port_mesh(
+                                state,
+                                &node.surface_content,
+                                theme,
+                            )
+                        } else {
+                            compact_port_mesh(state, theme)
+                        };
+                        let full = meshes.add(port_mesh);
+                        let coarse = if node.kind == VisibleNodeKind::Container
+                            && side == SpatialSide::East
+                        {
+                            meshes.add(crate::infrastructure::ui::tile_surface::simplified_container_port_mesh(state, theme))
+                        } else {
+                            full.clone()
+                        };
+                        tile.spawn((
+                            super::detail::DetailMeshes::port(full.clone(), coarse),
+                            Name::new(format!("{side:?} {} port", state.label())),
+                            BoardPickTarget {
+                                surface_id: surface,
+                                kind: BoardPickTargetKind::PortSide {
+                                    tile_id: node.node.clone(),
+                                    side,
+                                },
+                            },
+                            Mesh3d(full),
+                            MeshMaterial3d(materials.surface.clone()),
+                            SCENE_NODE_VISIBILITY,
+                            Transform::from_translation(offset)
+                                .with_rotation(Quat::from_rotation_y(yaw)),
+                            Pickable::default(),
+                        ))
+                        .observe(crate::infrastructure::ui::port_glyphs::on_port_side_clicked);
+                    }
+                }
+            })
+            .id(),
+    )
 }
 
-fn tile_material(
-    kind: VisibleNodeKind,
-    selected: bool,
-    focused: bool,
-    materials: &Board3dMaterials,
-) -> Handle<StandardMaterial> {
-    if focused {
-        return materials.focused.clone();
-    }
-
-    if selected {
-        return materials.selected.clone();
-    }
-
-    match kind {
-        VisibleNodeKind::Container => materials.container.clone(),
-        VisibleNodeKind::Atom => materials.atom.clone(),
-        VisibleNodeKind::Output => materials.output.clone(),
-        VisibleNodeKind::TrickInstance => materials.trick.clone(),
-        VisibleNodeKind::Tile => materials.generic.clone(),
-    }
+fn visible_tile_face(node: &VisibleBoardNode) -> bool {
+    node.kind != VisibleNodeKind::Atom
+        || !matches!(
+            node.surface_content,
+            crate::application::pipeline::scene_sync::TileSurfaceContent::Empty
+        )
 }
-

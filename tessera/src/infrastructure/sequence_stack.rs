@@ -1,6 +1,6 @@
-use crate::domain::{AtomOperatorToken, ContainerSurfaceTile};
+use crate::domain::{AtomModifier, ContainerSurfaceTile, Rational, SignedAccidental};
 
-use super::stack::{note, op, rest, scalar};
+use super::stack::{accidental, modifier, note, octave, rest, scalar};
 
 #[derive(Debug, Clone, Default)]
 pub struct SequenceStack {
@@ -29,26 +29,43 @@ impl SequenceStack {
         self
     }
 
+    pub fn octave(mut self, value: i64) -> Self {
+        self.items.push(octave(value));
+        self
+    }
+
+    pub fn accidental(mut self, value: SignedAccidental) -> Self {
+        self.items.push(accidental(value));
+        self
+    }
+
+    pub fn modifier(mut self, value: AtomModifier) -> Self {
+        self.items.push(modifier(value));
+        self
+    }
+
     pub fn rest(mut self) -> Self {
         self.items.push(rest());
         self
     }
 
     pub fn elongate(mut self, value: i64) -> Self {
-        self.items.push(op(AtomOperatorToken::Elongate));
-        self.items.push(scalar(value));
+        self.items
+            .push(modifier(AtomModifier::Elongate(Rational::from_integer(
+                value,
+            ))));
         self
     }
 
     pub fn fast(mut self, value: i64) -> Self {
-        self.items.push(op(AtomOperatorToken::Fast));
-        self.items.push(scalar(value));
+        self.items
+            .push(modifier(AtomModifier::Fast(Rational::from_integer(value))));
         self
     }
 
     pub fn slow(mut self, value: i64) -> Self {
-        self.items.push(op(AtomOperatorToken::Slow));
-        self.items.push(scalar(value));
+        self.items
+            .push(modifier(AtomModifier::Slow(Rational::from_integer(value))));
         self
     }
 

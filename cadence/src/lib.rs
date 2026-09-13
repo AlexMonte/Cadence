@@ -30,13 +30,12 @@ pub mod bevy;
 /// Convenient imports for the most commonly used domain and host types.
 pub mod prelude {
     pub use crate::application::{EvaluatedEvent, EvaluatedEventKind};
-    #[cfg(feature = "bevy")]
-    pub use crate::bevy::PlaybackHandle;
     pub use crate::domain::prelude::*;
     pub use crate::infrastructure::{
         CadenceCompiler, PatternExt, PlaybackError, PlaybackRuntime, PlaybackSettings,
-        PlaybackState, PlaybackStatus, PreviewReport, RendererCore, ScoreExt, concat, cycle, fast,
-        merge, reflect, sample, shift, slow, stack, synth, tile, voice, with_controls, with_signal,
+        PlaybackState, PlaybackStatus, PreparedScore, PreviewReport, RendererCore, ScoreExt,
+        concat, cycle, fast, merge, reflect, sample, shift, slow, stack, synth, tile, voice,
+        with_controls, with_signal,
     };
 }
 
@@ -48,5 +47,5 @@ pub mod bevy_prelude {
 
 pub use infrastructure::{
     CadenceCompiler, PlaybackError, PlaybackRuntime, PlaybackSettings, PlaybackState,
-    PlaybackStatus, PreviewReport, RendererCore,
+    PlaybackStatus, PreparedScore, PreviewReport, RendererCore,
 };

@@ -1,21 +1,17 @@
 use crate::domain::{Diagnostic, NormalizedProgram, PatternIr, PatternStream};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct CompileReport {
     pub normalized: NormalizedProgram,
-    #[cfg_attr(feature = "bevy", reflect(ignore))]
     pub ir: PatternIr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PreviewReport {
     pub stream: PatternStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct ValidationReport {
     pub valid: bool,
     pub diagnostics: Vec<Diagnostic>,

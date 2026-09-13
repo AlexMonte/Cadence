@@ -26,9 +26,52 @@ impl CommandHistory {
         self.redo.clear();
     }
 
+    /// Keep the original inverse while a single pointer gesture updates its final value.
+    pub fn continue_atom_edit(&mut self, entry: HistoryEntry) {
+        if let Some(previous) = self.undo.last_mut() {
+            if matches!((&previous.forward, &entry.forward),
+                (crate::application::command::EditorCommand::SetAtomValue { node: a, .. },
+                 crate::application::command::EditorCommand::SetAtomValue { node: b, .. }) if a == b)
+            {
+                previous.forward = entry.forward;
+                self.redo.clear();
+                return;
+            }
+        }
+        self.record_mutation(entry);
+    }
+
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+    }
+
+    pub fn continue_sound_edit(&mut self, entry: HistoryEntry) {
+        if let Some(previous) = self.undo.last_mut() {
+            if matches!((&previous.forward, &entry.forward),
+                (crate::application::command::EditorCommand::SetSound { sound: a, .. },
+                 crate::application::command::EditorCommand::SetSound { sound: b, .. }) if a == b)
+            {
+                previous.forward = entry.forward;
+                self.redo.clear();
+                return;
+            }
+        }
+        self.record_mutation(entry);
+    }
+
+    pub fn continue_sample_options_edit(&mut self, entry: HistoryEntry) {
+        if let Some(previous) = self.undo.last_mut() {
+            if matches!((&previous.forward, &entry.forward),
+                (crate::application::command::EditorCommand::SetSampleOptions { sample: a, .. },
+                 crate::application::command::EditorCommand::SetSampleOptions { sample: b, .. }) if a == b)
+            {
+                previous.forward = entry.forward;
+                self.redo.clear();
+                return;
+            }
+        }
+        self.record_mutation(entry);
     }
 
     pub fn can_undo(&self) -> bool {

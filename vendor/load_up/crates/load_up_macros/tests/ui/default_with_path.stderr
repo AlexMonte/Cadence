@@ -1,0 +1,5 @@
+error: #[dependency(default)] cannot be combined with path, init, role, or failure policy directives
+ --> tests/ui/default_with_path.rs:6:5
+  |
+6 |     #[dependency(default, path = "a.png")]
+  |     ^

@@ -2,10 +2,8 @@
 
 use crate::{
     application::{EvaluatedEvent, EvaluatedEventKind, renderer_core::RendererCore},
-    domain::{
-        control::ControlModelError, mosaic::Mosaic, projection::ProjectedMosaic, score::Score,
-        span::TransportSpan,
-    },
+    domain::{control::ControlModelError, span::TransportSpan},
+    infrastructure::PreparedScore,
 };
 
 /// Rich projection output for one transport window.
@@ -13,25 +11,21 @@ use crate::{
 pub struct PreviewReport {
     /// Transport window that was projected.
     pub window: TransportSpan,
-    /// Start-voice moments only (backward-compatible preview surface).
-    pub projected: ProjectedMosaic,
-    /// Full evaluation list, including [`EvaluatedEventKind::UpdateVoiceControls`].
-    pub evaluated: Vec<EvaluatedEvent>,
+    /// Complete ordered event list, including control updates.
+    pub events: Vec<EvaluatedEvent>,
 }
 
 impl PreviewReport {
     /// Returns evaluated events that start a new voice instance.
-    #[must_use]
     pub fn starts(&self) -> impl Iterator<Item = &EvaluatedEvent> {
-        self.evaluated
+        self.events
             .iter()
             .filter(|event| matches!(event.kind(), EvaluatedEventKind::StartVoice { .. }))
     }
 
     /// Returns evaluated events that update an existing voice instance.
-    #[must_use]
     pub fn control_updates(&self) -> impl Iterator<Item = &EvaluatedEvent> {
-        self.evaluated
+        self.events
             .iter()
             .filter(|event| matches!(event.kind(), EvaluatedEventKind::UpdateVoiceControls { .. }))
     }
@@ -48,45 +42,18 @@ impl CadenceCompiler {
         Self
     }
 
-    /// Projects `score` over `window` without scheduling side effects.
+    /// Projects a prepared score over `window` without scheduling side effects.
     pub fn preview(
         &self,
-        score: &Score,
+        score: &PreparedScore,
         window: &TransportSpan,
     ) -> Result<PreviewReport, ControlModelError> {
-        let renderer = RendererCore::new(score.clone());
-        let evaluated = renderer.evaluate_window_full(window)?;
-        let projected = ProjectedMosaic::new(
-            evaluated
-                .iter()
-                .filter(|event| matches!(event.kind(), EvaluatedEventKind::StartVoice { .. }))
-                .cloned()
-                .map(EvaluatedEvent::into_projected)
-                .collect(),
-        );
+        let renderer = RendererCore::new(score.score().clone());
+        let events = renderer.evaluate_window(window)?;
         Ok(PreviewReport {
             window: *window,
-            projected,
-            evaluated,
+            events,
         })
-    }
-
-    /// Returns the rich projected output for `window`.
-    pub fn projected_output(
-        &self,
-        score: &Score,
-        window: &TransportSpan,
-    ) -> Result<ProjectedMosaic, ControlModelError> {
-        RendererCore::new(score.clone()).projected_output(window)
-    }
-
-    /// Returns a thin projected mosaic for compatibility code paths.
-    pub fn projected_mosaic(
-        &self,
-        score: &Score,
-        window: &TransportSpan,
-    ) -> Result<Mosaic, ControlModelError> {
-        RendererCore::new(score.clone()).projected_mosaic(window)
     }
 }
 
@@ -99,7 +66,7 @@ mod tests {
             control::{ControlKey, ControlTile, ControlTrack, ControlValue, SignedUnitValue},
             intent::Intent,
             prelude::Time,
-            score::ControlScore,
+            score::{ControlScore, Score},
             span::Span,
             voice::{Tile, Voice},
         },
@@ -114,8 +81,9 @@ mod tests {
             sample("kick"),
         )]));
         let window = Span::new(Time::ZERO, Time::ONE).unwrap();
-        let report = CadenceCompiler::new().preview(&score, &window).unwrap();
-        assert_eq!(report.projected.len(), 1);
+        let prepared = PreparedScore::new(score).unwrap();
+        let report = CadenceCompiler::new().preview(&prepared, &window).unwrap();
+        assert_eq!(report.starts().count(), 1);
     }
 
     #[test]
@@ -147,17 +115,18 @@ mod tests {
         .unwrap();
         let score = Score::with_controls(Score::from(voice), ControlScore::from(controls));
         let window = Span::new(Time::ZERO, Time::ONE).unwrap();
-        let report = CadenceCompiler::new().preview(&score, &window).unwrap();
+        let prepared = PreparedScore::new(score).unwrap();
+        let report = CadenceCompiler::new().preview(&prepared, &window).unwrap();
 
-        assert_eq!(report.evaluated.len(), 2);
+        assert_eq!(report.events.len(), 2);
         assert_eq!(report.starts().count(), 1);
         assert_eq!(report.control_updates().count(), 1);
         assert!(matches!(
-            report.evaluated[0].kind(),
+            report.events[0].kind(),
             EvaluatedEventKind::StartVoice { .. }
         ));
         assert!(matches!(
-            report.evaluated[1].kind(),
+            report.events[1].kind(),
             EvaluatedEventKind::UpdateVoiceControls { .. }
         ));
     }

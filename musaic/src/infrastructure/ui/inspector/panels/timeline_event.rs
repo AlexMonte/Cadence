@@ -4,7 +4,7 @@ use bevy::{prelude::*, ui::widget::Text as UiText};
 use bevy_feathers::theme::ThemedText;
 
 use crate::application::command::EditorCommand;
-use crate::application::pipeline::runtime::{ProjectedEventId, RuntimePreviewSnapshot};
+use crate::application::pipeline::runtime::ProjectedEventId;
 
 use crate::infrastructure::ui::widgets::musaic_button;
 use crate::infrastructure::ui::{InspectorButtonAction, on_inspector_button_activated};
@@ -12,11 +12,11 @@ use crate::infrastructure::ui::{InspectorButtonAction, on_inspector_button_activ
 pub(crate) fn spawn_timeline_event_panel(
     panel: &mut ChildSpawnerCommands<'_>,
     event: ProjectedEventId,
-    preview_snapshot: &RuntimePreviewSnapshot,
+    label: &str,
 ) {
     panel.spawn((UiText::new(format!("Event {}", event.0)), ThemedText));
-    if let Some(record) = preview_snapshot.event(event) {
-        panel.spawn((UiText::new(record.label.clone()), ThemedText));
+    if !label.is_empty() {
+        panel.spawn((UiText::new(label.to_string()), ThemedText));
     }
     panel
         .spawn(musaic_button(

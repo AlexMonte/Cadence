@@ -1,0 +1,36 @@
+{
+  "variants": [
+    {
+      "path": "Picked bass - zone 001.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 45.54,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 7175,
+          "end_frame": 7563
+        }
+      },
+      "pitch_zone": {
+        "low": 37.0,
+        "high": 44.0
+      }
+    },
+    {
+      "path": "Picked bass - zone 000.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 45.54,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 7175,
+          "end_frame": 7563
+        }
+      },
+      "pitch_zone": {
+        "low": 0.0,
+        "high": 36.0
+      }
+    }
+  ]
+}

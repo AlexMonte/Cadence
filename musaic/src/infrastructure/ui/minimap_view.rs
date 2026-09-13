@@ -4,22 +4,24 @@ use bevy::{picking::prelude::*, prelude::*};
 use bevy_ui_widgets::Activate;
 
 use crate::{
-    application::command::{EditorCommand, EditorCommandBus},
-    application::editor::command_from_pick_checked,
+    application::command::EditorCommand,
+    application::editor::PickHit,
+    application::editor::interaction::{BoardPickEvent, BoardPickHit, BoardPickTargetKind},
     application::pipeline::scene_sync::{
         RenderBoardFocus, VisibleAtomCompound, VisibleBoardNode, VisibleBoardState, VisibleNodeKind,
     },
     application::pipeline::ui_projection::MinimapPaint,
     domain::board::{BoardSlot, VIEWPORT_COLUMNS, VIEWPORT_ROWS},
-    domain::document::{DocumentQueries, PlacementAddress},
+    domain::document::PlacementAddress,
 };
 
 use crate::adapter::load_up::UiSpriteAssets;
-use crate::infrastructure::ui::theme::{ArtistPalette, MusaicUiTheme, atom_value_color};
+use crate::infrastructure::ui::theme::{MusaicUiTheme, SemanticColors};
 use crate::infrastructure::ui::ui_sprites;
 use crate::infrastructure::ui::widgets::{MusaicClickable, musaic_button};
 
 use super::InspectorButtonAction;
+use super::camera_rig::CameraRequest;
 
 const FLOW_LINE_STEPS: usize = 12;
 
@@ -44,12 +46,12 @@ impl MinimapWindow {
     pub fn from_visible(visible: &VisibleBoardState) -> Self {
         let mut slots: Vec<BoardSlot> = Vec::new();
         for node in &visible.nodes {
-            if let PlacementAddress::BoardSlot(slot) = node.address {
-                slots.push(slot);
+            if !hidden_atom(node) {
+                slots.push(display_slot(visible, node.address));
             }
         }
         for compound in &visible.atom_compounds {
-            slots.push(compound.slot);
+            slots.push(compound_grid_slot(visible, compound.slot));
         }
         if let Some(RenderBoardFocus::BoardSlot(slot)) = visible.focus {
             slots.push(slot);
@@ -102,6 +104,23 @@ impl MinimapWindow {
     }
 }
 
+fn hidden_atom(node: &VisibleBoardNode) -> bool {
+    node.kind == VisibleNodeKind::Atom
+        && matches!(
+            node.surface_content,
+            crate::application::pipeline::scene_sync::TileSurfaceContent::Empty
+        )
+}
+
+fn display_slot(visible: &VisibleBoardState, address: PlacementAddress) -> BoardSlot {
+    match visible.display_address(address) {
+        PlacementAddress::BoardSlot(slot) => slot,
+        PlacementAddress::StackIndex(index) => {
+            crate::domain::board::geometry::stack_display_slot(index.0)
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct UiMinimapContent;
 
@@ -113,33 +132,33 @@ pub struct MinimapSlotAction {
     pub slot: BoardSlot,
 }
 
-pub fn visible_node_color(node: &VisibleBoardNode) -> Color {
+pub fn visible_node_color(semantic: &SemanticColors, node: &VisibleBoardNode) -> Color {
     match node.kind {
-        VisibleNodeKind::Tile => ArtistPalette::TRANSFORM_GENERIC,
-        VisibleNodeKind::Container => ArtistPalette::CONTAINER,
-        VisibleNodeKind::Output => ArtistPalette::OUTPUT,
+        VisibleNodeKind::Tile => semantic.transform_generic,
+        VisibleNodeKind::Container => semantic.container,
+        VisibleNodeKind::Output => semantic.output,
         VisibleNodeKind::Atom => node
             .atom
             .clone()
-            .map(atom_value_color)
-            .unwrap_or(ArtistPalette::ATOM_NOTE),
-        VisibleNodeKind::TrickInstance => ArtistPalette::TRICK_UNSET,
+            .map(|atom| semantic.atom_value_color(atom))
+            .unwrap_or(semantic.atom_note),
+        VisibleNodeKind::TrickInstance => semantic.trick_unset,
     }
 }
 
-pub fn compound_slot_color(compound: &VisibleAtomCompound) -> Color {
+pub fn compound_slot_color(semantic: &SemanticColors, compound: &VisibleAtomCompound) -> Color {
     compound
         .primary_atom
         .clone()
-        .map(atom_value_color)
-        .unwrap_or(ArtistPalette::ATOM_NOTE)
+        .map(|atom| semantic.atom_value_color(atom))
+        .unwrap_or(semantic.atom_note)
 }
 
-pub fn flow_color(scalar: bool) -> Color {
+pub fn flow_color(semantic: &SemanticColors, scalar: bool) -> Color {
     if scalar {
-        ArtistPalette::FLOW_SCALAR
+        semantic.flow_scalar
     } else {
-        ArtistPalette::FLOW_CONTROL
+        semantic.flow_control
     }
 }
 
@@ -167,8 +186,8 @@ pub fn spawn_minimap_content(
         ))
         .with_children(|canvas| {
             let window = MinimapWindow::from_visible(visible);
-            spawn_flow_lines(canvas, visible, &window);
-            spawn_pixel_grid(canvas, images, visible, sprites, &window);
+            spawn_flow_lines(canvas, theme, visible, &window);
+            spawn_pixel_grid(canvas, theme, images, visible, sprites, &window);
         });
 
     for (label, surface) in &paint.surface_buttons {
@@ -182,9 +201,7 @@ pub fn spawn_minimap_content(
                         align_items: AlignItems::Center,
                         ..default()
                     },
-                    InspectorButtonAction(EditorCommand::NavigateToSurface {
-                        surface: *surface,
-                    }),
+                    InspectorButtonAction(EditorCommand::NavigateToSurface { surface: *surface }),
                     label.clone(),
                 ),
                 BackgroundColor(theme.chrome.button_bg),
@@ -195,6 +212,7 @@ pub fn spawn_minimap_content(
 
 fn spawn_pixel_grid(
     canvas: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
     visible: &VisibleBoardState,
     sprites: Option<&UiSpriteAssets>,
@@ -221,24 +239,24 @@ fn spawn_pixel_grid(
         .with_children(|grid| {
             for slot in window.slots() {
                 let node = visible.nodes.iter().find(|entry| {
-                    matches!(
-                        entry.address,
-                        PlacementAddress::BoardSlot(s) if s == slot
-                    )
+                    !hidden_atom(entry) && display_slot(visible, entry.address) == slot
                 });
-                let compound_entry = visible.atom_compounds.iter().find(|c| c.slot == slot);
+                let compound_entry = visible
+                    .atom_compounds
+                    .iter()
+                    .find(|c| compound_grid_slot(visible, c.slot) == slot);
                 let focused = matches!(
                     visible.focus,
                     Some(RenderBoardFocus::BoardSlot(focus_slot)) if focus_slot == slot
                 );
                 let fill = if focused {
-                    ArtistPalette::FOCUS_ACCENT
+                    theme.semantic.focus_accent
                 } else if let Some(node) = node {
-                    visible_node_color(node)
+                    visible_node_color(&theme.semantic, node)
                 } else if let Some(compound) = compound_entry {
-                    compound_slot_color(compound)
+                    compound_slot_color(&theme.semantic, compound)
                 } else {
-                    ArtistPalette::EMPTY_CELL
+                    theme.semantic.empty_cell
                 };
 
                 grid.spawn((
@@ -274,6 +292,7 @@ fn spawn_pixel_grid(
 
 fn spawn_flow_lines(
     canvas: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     visible: &VisibleBoardState,
     window: &MinimapWindow,
 ) {
@@ -291,7 +310,7 @@ fn spawn_flow_lines(
         .with_children(|layer| {
             for connection in &visible.connections {
                 let scalar = connection.from_slot.x == connection.to_slot.x;
-                let color = flow_color(scalar);
+                let color = flow_color(&theme.semantic, scalar);
                 let (from_x, from_y) = window.center_percent(connection.from_slot);
                 let (to_x, to_y) = window.center_percent(connection.to_slot);
                 for step in 0..=FLOW_LINE_STEPS {
@@ -351,8 +370,8 @@ pub fn on_minimap_slot_activated(
     activate: On<'_, '_, Activate>,
     actions: Query<'_, '_, &MinimapSlotAction>,
     visible: Res<'_, VisibleBoardState>,
-    project: Res<'_, crate::application::session::MusaicProject>,
-    mut commands_bus: MessageWriter<'_, EditorCommandBus>,
+    mut pick_events: MessageWriter<'_, BoardPickEvent>,
+    mut camera_requests: MessageWriter<'_, CameraRequest>,
 ) {
     let Ok(action) = actions.get(activate.entity) else {
         return;
@@ -360,20 +379,48 @@ pub fn on_minimap_slot_activated(
     let Some(surface) = visible.active_surface else {
         return;
     };
-    let queries = DocumentQueries::new(&project.document);
-    let pick = crate::application::editor::BoardPick {
-        hit: visible.pick_at(action.slot).unwrap_or(
-            crate::application::editor::PickHit::EmptySlot {
-                surface,
-                slot: action.slot,
-            },
-        ),
-        modifiers: Default::default(),
+    // VisibleBoardState::pick_at owns empty-slot / stack-insert classification.
+    let pick_slot = if visible.layout == crate::domain::board::SurfaceLayoutKind::Stack {
+        let Some(index) = crate::domain::board::geometry::stack_index_at_display_slot(action.slot)
+        else {
+            return;
+        };
+        BoardSlot::new(index as i32, 0)
+    } else {
+        action.slot
     };
-    let Some(command) = command_from_pick_checked(&queries, pick) else {
+    let Some(hit) = visible.pick_at(pick_slot) else {
         return;
     };
-    commands_bus.write(EditorCommandBus(command));
+    let address = match &hit {
+        PickHit::EmptySlot { slot, .. } => PlacementAddress::BoardSlot(*slot),
+        PickHit::StackInsert { index, .. } => PlacementAddress::StackIndex(*index),
+        PickHit::Tile { node } => match visible.address_of(node) {
+            Some(address) => address,
+            None => return,
+        },
+        PickHit::AtomCompound { primary_node, .. } => match visible.address_of(primary_node) {
+            Some(address) => address,
+            None => return,
+        },
+        PickHit::Port { .. } => return,
+    };
+    let kind = match hit {
+        PickHit::EmptySlot { slot, .. } => BoardPickTargetKind::Slot { slot },
+        PickHit::StackInsert { index, .. } => BoardPickTargetKind::StackInsert { index },
+        PickHit::Tile { node } => BoardPickTargetKind::BoardTile { tile_id: node },
+        PickHit::AtomCompound { primary_node, .. } => {
+            BoardPickTargetKind::AtomCompound { primary_node }
+        }
+        PickHit::Port { .. } => return,
+    };
+    pick_events.write(BoardPickEvent::Hit(BoardPickHit {
+        surface_id: surface,
+        kind,
+        world_position: Vec3::ZERO,
+        distance: 0.0,
+    }));
+    camera_requests.write(CameraRequest::FocusAddress(address));
 }
 
 pub fn sync_minimap_content(
@@ -411,4 +458,12 @@ pub fn sync_minimap_content(
 pub struct MinimapContentCache {
     /// Set true after full shell respawn so content rehydrates once.
     pub force_next: bool,
+}
+
+fn compound_grid_slot(visible: &VisibleBoardState, slot: BoardSlot) -> BoardSlot {
+    if visible.layout == crate::domain::board::SurfaceLayoutKind::Stack {
+        crate::domain::board::geometry::stack_display_slot(slot.x as usize)
+    } else {
+        slot
+    }
 }

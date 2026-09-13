@@ -15,8 +15,8 @@ use crate::{
     },
     application::{
         audio::{
-            AudioRuntimeControlDelta, AudioRuntimeControlState, RuntimeControlValue, SignalBinding,
-            VoiceInstanceId, VoiceSpatial,
+            AudioRuntimeControlDelta, AudioRuntimeControlState, FilterPlan, RuntimeControlValue,
+            SignalBinding, VoiceInstanceId, VoiceSpatial,
         },
         sample::{SampleEnvelope, SampleGainRamp},
         synth::SynthTrigger,
@@ -43,7 +43,7 @@ struct FrameModulation {
 /// Cycle time is recovered as `start_cycle + (rendered_frames / sample_rate) *
 /// cps`. This is allocation-free and safe to call on the audio thread.
 fn evaluate_frame_modulation(
-    modulations: &[SignalBinding],
+    modulations: &[Option<SignalBinding>; 3],
     rendered_frames: usize,
     sample_rate: u32,
 ) -> FrameModulation {
@@ -53,7 +53,7 @@ fn evaluate_frame_modulation(
     }
 
     let seconds = rendered_frames as f64 / sample_rate.max(1) as f64;
-    for binding in modulations {
+    for binding in modulations.iter().flatten() {
         let cycle_time = binding.start_cycle + seconds * binding.cps;
         let value = binding.signal.eval(cycle_time);
         match &binding.key {
@@ -64,6 +64,48 @@ fn evaluate_frame_modulation(
         }
     }
     output
+}
+
+fn voice_modulations(bindings: &[SignalBinding]) -> [Option<SignalBinding>; 3] {
+    let keys = [
+        ControlKey::Gain,
+        ControlKey::PlaybackRate,
+        ControlKey::LowPassCutoff,
+    ];
+    std::array::from_fn(|index| {
+        bindings
+            .iter()
+            .find(|binding| binding.key == keys[index])
+            .cloned()
+    })
+}
+
+fn update_voice_modulations(
+    bindings: &mut [Option<SignalBinding>; 3],
+    delta: &AudioRuntimeControlDelta,
+    clock: VoiceSpatial,
+) {
+    for (index, (key, change)) in [
+        (ControlKey::Gain, delta.gain_signal),
+        (ControlKey::PlaybackRate, delta.playback_rate_signal),
+        (ControlKey::LowPassCutoff, delta.low_pass_signal),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match change {
+            RuntimeControlValue::Keep => {}
+            RuntimeControlValue::Reset => bindings[index] = None,
+            RuntimeControlValue::Set(signal) => {
+                bindings[index] = Some(SignalBinding {
+                    key,
+                    signal,
+                    start_cycle: clock.start_cycle,
+                    cps: clock.cps,
+                })
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,17 +123,19 @@ pub struct SampleVoice {
     spatializer: StereoVectorPanner,
     base_pitch: Option<f64>,
     base_playback_rate: f64,
+    resolved_rate_scale: f64,
     playback_limit_frames: Option<usize>,
     rendered_frames: usize,
     fade_out_remaining: Option<usize>,
     fade_out_total: usize,
     envelope: EnvelopeRuntime,
     runtime_controls: AudioRuntimeControlState,
-    modulations: Vec<SignalBinding>,
+    modulations: [Option<SignalBinding>; 3],
     low_pass: Option<BiquadFilter>,
     high_pass: Option<BiquadFilter>,
     compressor: Option<CompressorRuntime>,
     post_gain: f32,
+    inserts: super::inserts::InsertRuntime,
     reverb: Option<ReverbSettings>,
     delay: Option<DelaySettings>,
     live_note: Option<NoteNumber>,
@@ -118,6 +162,7 @@ struct Oscillator {
     source: BuiltInSynthSource,
     phase: f64,
     sample_rate: u32,
+    noise_frame: u64,
 }
 
 impl Oscillator {
@@ -126,26 +171,85 @@ impl Oscillator {
             source,
             phase: 0.0,
             sample_rate: sample_rate.max(1),
+            noise_frame: 0,
         }
     }
 
+    fn seek(&mut self, frame: u64, frequency_hz: f64) {
+        self.noise_frame = frame;
+        self.phase = (frame as f64 * frequency_hz / f64::from(self.sample_rate)).fract();
+    }
+
     fn next_mono(&mut self, frequency_hz: f64) -> f32 {
+        if matches!(self.source, BuiltInSynthSource::Noise) {
+            // Counter-based SplitMix64: no shared random state, allocations,
+            // per-voice identity dependence or iteration when seeking.
+            let mut value = self.noise_frame.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^= value >> 31;
+            self.noise_frame = self.noise_frame.wrapping_add(1);
+            return ((value >> 40) as f32 / 8_388_608.0) - 1.0;
+        }
+        let increment = (frequency_hz / f64::from(self.sample_rate)).clamp(0.0, 0.5);
+        if frequency_hz >= f64::from(self.sample_rate) * 0.5 {
+            // Frequencies above the device's representable range are silent,
+            // rather than being folded or clamped to a different audible pitch.
+            self.phase = (self.phase + increment).fract();
+            return 0.0;
+        }
         let sample = match self.source {
-            BuiltInSynthSource::Sine => (2.0_f64 * f64::from(PI) * self.phase).sin(),
+            BuiltInSynthSource::Sine => (2.0_f64 * PI * self.phase).sin(),
             BuiltInSynthSource::Square => {
-                if self.phase < 0.5 {
-                    1.0_f64
-                } else {
-                    -1.0_f64
-                }
+                let square = if self.phase < 0.5 { 1.0 } else { -1.0 };
+                square + poly_blep(self.phase, increment)
+                    - poly_blep((self.phase + 0.5).fract(), increment)
             }
-            BuiltInSynthSource::Saw => 2.0_f64 * self.phase - 1.0_f64,
-            BuiltInSynthSource::Triangle => 1.0_f64 - 4.0_f64 * (self.phase - 0.5_f64).abs(),
+            BuiltInSynthSource::Saw => 2.0 * self.phase - 1.0 - poly_blep(self.phase, increment),
+            BuiltInSynthSource::Triangle => {
+                1.0 - 4.0 * (self.phase - 0.5).abs()
+                    + 4.0
+                        * increment
+                        * (poly_blamp(self.phase, increment)
+                            - poly_blamp((self.phase + 0.5).fract(), increment))
+            }
+            BuiltInSynthSource::Noise => unreachable!("noise returned above"),
         } as f32;
 
-        let increment = (frequency_hz / self.sample_rate as f64).clamp(0.0, 0.5);
         self.phase = (self.phase + increment).fract();
         sample
+    }
+}
+
+// Two-sample polynomial residuals remove the sharp step/corner locally.
+// These reduce aliasing; they are not ideal brick-wall bandlimiting.
+fn poly_blep(phase: f64, width: f64) -> f64 {
+    if width <= 0.0 {
+        return 0.0;
+    }
+    if phase < width {
+        let x = phase / width;
+        2.0 * x - x * x - 1.0
+    } else if phase > 1.0 - width {
+        let x = (phase - 1.0) / width;
+        x * x + 2.0 * x + 1.0
+    } else {
+        0.0
+    }
+}
+
+fn poly_blamp(phase: f64, width: f64) -> f64 {
+    if width <= 0.0 {
+        return 0.0;
+    }
+    if phase < width {
+        let x = 1.0 - phase / width;
+        x * x * x / 3.0
+    } else if phase > 1.0 - width {
+        let x = 1.0 + (phase - 1.0) / width;
+        x * x * x / 3.0
+    } else {
+        0.0
     }
 }
 
@@ -162,13 +266,14 @@ pub struct SynthVoice {
     spatializer: StereoVectorPanner,
     envelope: EnvelopeRuntime,
     runtime_controls: AudioRuntimeControlState,
-    modulations: Vec<SignalBinding>,
+    modulations: [Option<SignalBinding>; 3],
     rendered_frames: usize,
     sample_rate: u32,
     low_pass: Option<BiquadFilter>,
     high_pass: Option<BiquadFilter>,
     compressor: Option<CompressorRuntime>,
     post_gain: f32,
+    inserts: super::inserts::InsertRuntime,
     reverb: Option<ReverbSettings>,
     delay: Option<DelaySettings>,
     live_note: Option<NoteNumber>,
@@ -205,6 +310,16 @@ impl SampleVoice {
     /// output sample rate is zero or the sample buffer is empty.
     #[must_use]
     pub fn new(loaded: LoadedSampleTrigger, output_sample_rate: u32) -> Option<Self> {
+        let inserts =
+            super::inserts::PreparedInsertChain::new(&loaded.trigger.inserts, output_sample_rate);
+        Self::with_prepared_inserts(loaded, output_sample_rate, inserts)
+    }
+
+    pub(super) fn with_prepared_inserts(
+        loaded: LoadedSampleTrigger,
+        output_sample_rate: u32,
+        inserts: super::inserts::PreparedInsertChain,
+    ) -> Option<Self> {
         if output_sample_rate == 0 || loaded.sample.is_empty() {
             return None;
         }
@@ -216,7 +331,11 @@ impl SampleVoice {
         )?;
         let gain = sanitize_gain(loaded.trigger.gain);
         let velocity = loaded.trigger.velocity.value() as f32;
-        let speed = sanitize_speed(loaded.trigger.playback_rate);
+        let speed = loaded.trigger.playback_rate;
+        if !speed.is_finite() || speed <= 0.0 || speed > 65_536.0 {
+            return None;
+        }
+        let elapsed_seconds = loaded.trigger.envelope.elapsed().as_secs_f64();
         let playback_step = loaded.sample.sample_rate() as f64 / output_sample_rate as f64 * speed;
         let gain_ramp = loaded.trigger.gain_ramp.map(|gain_ramp| {
             let natural_output_frames =
@@ -230,13 +349,16 @@ impl SampleVoice {
             ActiveLinearGainRamp::new(gain_ramp, total_output_frames)
         });
 
-        Some(Self {
+        let mut voice = Self {
             voice_id: loaded.trigger.voice_id,
             output_sample_rate,
             transport: Transport::new(
                 PlaybackPosition::default(),
                 Some(region),
-                None,
+                loaded
+                    .sustain_loop
+                    .and_then(|sustain| sustain.region(loaded.sample.len()))
+                    .or_else(|| loaded.trigger.looped.then_some(region)),
                 loaded.trigger.reverse,
                 loaded.sample.sample_rate(),
                 loaded.sample.len(),
@@ -250,6 +372,7 @@ impl SampleVoice {
             spatializer: StereoVectorPanner::new(),
             base_pitch: loaded.trigger.pitch,
             base_playback_rate: speed,
+            resolved_rate_scale: loaded.trigger.resolved_rate_scale,
             playback_limit_frames: loaded
                 .playback_limit
                 .and_then(|limit| frames_for_duration(limit, output_sample_rate)),
@@ -257,8 +380,16 @@ impl SampleVoice {
             fade_out_remaining: None,
             fade_out_total: 0,
             envelope: EnvelopeRuntime::new(loaded.trigger.envelope.clone(), output_sample_rate),
-            runtime_controls: loaded.trigger.runtime_controls,
-            modulations: loaded.trigger.modulations.clone(),
+            runtime_controls: AudioRuntimeControlState {
+                filters: FilterPlan {
+                    low_pass_cutoff_hz: loaded.trigger.low_pass_cutoff_hz,
+                    low_pass_resonance: loaded.trigger.low_pass_resonance,
+                    high_pass_cutoff_hz: loaded.trigger.high_pass_cutoff_hz,
+                    high_pass_resonance: loaded.trigger.high_pass_resonance,
+                },
+                ..loaded.trigger.runtime_controls
+            },
+            modulations: voice_modulations(&loaded.trigger.modulations),
             low_pass: loaded.trigger.low_pass_cutoff_hz.map(|cutoff| {
                 BiquadFilter::low_pass(
                     cutoff as f32,
@@ -276,14 +407,20 @@ impl SampleVoice {
             compressor: loaded
                 .trigger
                 .compressor
-                .clone()
                 .map(|settings| CompressorRuntime::new(settings, output_sample_rate)),
             post_gain: sanitize_gain(loaded.trigger.post_gain),
-            reverb: loaded.trigger.reverb.clone(),
-            delay: loaded.trigger.delay.clone(),
+            inserts: super::inserts::InsertRuntime::new(inserts),
+            reverb: loaded.trigger.reverb,
+            delay: loaded.trigger.delay,
             live_note: loaded.trigger.live_note,
             finished: false,
-        })
+        };
+        // Keep the original region so a seek cannot shorten the loop. Source
+        // position follows elapsed wall time and the resolved playback rate.
+        voice.advance_by(
+            elapsed_seconds * f64::from(output_sample_rate) * voice.current_playback_step(),
+        );
+        Some(voice)
     }
 
     /// Returns `true` when the voice is finished and can be removed.
@@ -313,10 +450,30 @@ impl SampleVoice {
     }
 
     /// Applies a runtime control update to this voice.
-    pub fn update_runtime_controls(&mut self, delta: AudioRuntimeControlDelta) {
+    pub fn update_runtime_controls(&mut self, mut delta: AudioRuntimeControlDelta) {
+        delta.playback_rate = match delta.playback_rate {
+            RuntimeControlValue::Keep => RuntimeControlValue::Keep,
+            RuntimeControlValue::Set(rate) => {
+                RuntimeControlValue::Set(rate * self.resolved_rate_scale)
+            }
+            RuntimeControlValue::Reset => RuntimeControlValue::Set(self.resolved_rate_scale),
+        };
+        update_voice_modulations(&mut self.modulations, &delta, self.spatial);
         delta.apply_to(&mut self.runtime_controls);
+        apply_voice_dsp_delta(
+            &delta,
+            self.runtime_controls.filters,
+            self.output_sample_rate,
+            VoiceDspState {
+                low_pass: &mut self.low_pass,
+                high_pass: &mut self.high_pass,
+                compressor: &mut self.compressor,
+                reverb: &mut self.reverb,
+                delay: &mut self.delay,
+            },
+        );
         apply_voice_level_delta(
-            delta,
+            &delta,
             &mut self.gain,
             &mut self.gain_ramp,
             &mut self.post_gain,
@@ -378,11 +535,16 @@ impl SampleVoice {
             frame = compressor.process(frame);
         }
 
+        frame = self.inserts.process(frame);
         frame *= self.post_gain;
+        if !self.runtime_controls.gate {
+            frame = Frame::ZERO;
+        }
         let position = self
             .spatial
             .position_at_frame(self.rendered_frames, self.output_sample_rate);
         frame = self.spatializer.place(frame, position);
+        frame = frame.panned(self.runtime_controls.pan.clamp(-1.0, 1.0) as f32);
 
         if let Some(remaining) = self.fade_out_remaining {
             let denominator = self.fade_out_total.max(1) as f32;
@@ -392,11 +554,11 @@ impl SampleVoice {
         let reverb = self
             .reverb
             .as_ref()
-            .map(|settings| (settings.clone(), frame * settings.amount().value() as f32));
+            .map(|settings| (*settings, frame * settings.amount().value() as f32));
         let delay = self
             .delay
             .as_ref()
-            .map(|settings| (settings.clone(), frame * settings.amount().value() as f32));
+            .map(|settings| (*settings, frame * settings.amount().value() as f32));
 
         let playback_step = self.current_playback_step() * modulation.playback_rate.unwrap_or(1.0);
         self.advance_by(playback_step);
@@ -417,9 +579,13 @@ impl SampleVoice {
     }
 
     fn current_playback_step(&self) -> f64 {
-        let bend_ratio = self.base_pitch.map_or(1.0, |_| {
-            2.0_f64.powf(self.runtime_controls.pitch_bend_semitones / 12.0)
-        });
+        let cycle = self.spatial.start_cycle
+            + self.rendered_frames as f64 / self.output_sample_rate as f64 * self.spatial.cps;
+        let transpose = self.runtime_controls.transpose.eval(cycle);
+        let bend = self
+            .base_pitch
+            .map_or(0.0, |_| self.runtime_controls.pitch_bend_semitones);
+        let bend_ratio = 2.0_f64.powf((transpose + bend) / 12.0);
         self.sample.sample_rate() as f64 / self.output_sample_rate as f64
             * self.base_playback_rate
             * bend_ratio
@@ -430,24 +596,22 @@ impl SampleVoice {
             return Frame::ZERO;
         }
 
-        let current_index = self.transport.position() as isize;
-        let last_index = self.sample.len().saturating_sub(1) as isize;
         let fraction = self.phase as f32;
 
         if self.transport.reverse() {
             interpolate_frame(
-                self.frame_at((current_index + 1).clamp(0, last_index) as usize),
-                self.frame_at(current_index.clamp(0, last_index) as usize),
-                self.frame_at((current_index - 1).clamp(0, last_index) as usize),
-                self.frame_at((current_index - 2).clamp(0, last_index) as usize),
+                self.frame_at(self.transport.sample_index(1)),
+                self.frame_at(self.transport.sample_index(0)),
+                self.frame_at(self.transport.sample_index(-1)),
+                self.frame_at(self.transport.sample_index(-2)),
                 fraction,
             )
         } else {
             interpolate_frame(
-                self.frame_at((current_index - 1).clamp(0, last_index) as usize),
-                self.frame_at(current_index.clamp(0, last_index) as usize),
-                self.frame_at((current_index + 1).clamp(0, last_index) as usize),
-                self.frame_at((current_index + 2).clamp(0, last_index) as usize),
+                self.frame_at(self.transport.sample_index(-1)),
+                self.frame_at(self.transport.sample_index(0)),
+                self.frame_at(self.transport.sample_index(1)),
+                self.frame_at(self.transport.sample_index(2)),
                 fraction,
             )
         }
@@ -458,19 +622,13 @@ impl SampleVoice {
     }
 
     fn advance_by(&mut self, step: f64) {
-        let mut remaining = step.max(0.0);
-
-        while remaining > 0.0 && self.transport.playing() {
-            let room = 1.0 - self.phase;
-            if remaining < room {
-                self.phase += remaining;
-                remaining = 0.0;
-            } else {
-                remaining -= room;
-                self.phase = 0.0;
-                self.transport.advance();
-            }
+        let position = self.phase + step.max(0.0);
+        if !position.is_finite() {
+            self.finished = true;
+            return;
         }
+        self.phase = position.fract();
+        self.transport.advance_frames(position.floor() as usize);
 
         if !self.transport.playing() {
             self.finished = true;
@@ -480,10 +638,10 @@ impl SampleVoice {
     fn consume_output_frame(&mut self) {
         self.rendered_frames = self.rendered_frames.saturating_add(1);
 
-        if let Some(limit) = self.playback_limit_frames {
-            if self.rendered_frames >= limit {
-                self.finished = true;
-            }
+        if let Some(limit) = self.playback_limit_frames
+            && self.rendered_frames >= limit
+        {
+            self.finished = true;
         }
 
         if let Some(gain_ramp) = &mut self.gain_ramp {
@@ -513,11 +671,28 @@ impl SynthVoice {
     /// frequency.
     #[must_use]
     pub fn new(trigger: SynthTrigger, output_sample_rate: u32) -> Option<Self> {
+        let inserts =
+            super::inserts::PreparedInsertChain::new(&trigger.inserts, output_sample_rate);
+        Self::with_prepared_inserts(trigger, output_sample_rate, inserts)
+    }
+
+    pub(super) fn with_prepared_inserts(
+        trigger: SynthTrigger,
+        output_sample_rate: u32,
+        inserts: super::inserts::PreparedInsertChain,
+    ) -> Option<Self> {
         if output_sample_rate == 0 {
             return None;
         }
 
-        let initial_frequency_hz = midi_note_to_hz(trigger.pitch)?;
+        let initial_frequency_hz = midi_note_to_hz(
+            trigger.pitch
+                + trigger
+                    .runtime_controls
+                    .transpose
+                    .eval(trigger.spatial.start_cycle)
+                + trigger.runtime_controls.pitch_bend_semitones,
+        )?;
         if !initial_frequency_hz.is_finite() || initial_frequency_hz <= 0.0 {
             return None;
         }
@@ -526,9 +701,14 @@ impl SynthVoice {
             gain_ramp_total_frames(&trigger.envelope, trigger.play_for, output_sample_rate)
                 .map(|frames| ActiveLinearGainRamp::new(gain_ramp, frames))
         });
+        let mut oscillator = Oscillator::new(trigger.source, output_sample_rate);
+        let elapsed_frames = (trigger.envelope.elapsed().as_secs_f64()
+            * f64::from(output_sample_rate))
+        .round() as u64;
+        oscillator.seek(elapsed_frames, initial_frequency_hz);
         Some(Self {
             voice_id: trigger.voice_id,
-            oscillator: Oscillator::new(trigger.source, output_sample_rate),
+            oscillator,
             base_pitch: trigger.pitch,
             gain: sanitize_gain(trigger.gain),
             gain_ramp,
@@ -536,8 +716,16 @@ impl SynthVoice {
             spatial: trigger.spatial,
             spatializer: StereoVectorPanner::new(),
             envelope: EnvelopeRuntime::new(trigger.envelope.clone(), output_sample_rate),
-            runtime_controls: trigger.runtime_controls,
-            modulations: trigger.modulations.clone(),
+            runtime_controls: AudioRuntimeControlState {
+                filters: FilterPlan {
+                    low_pass_cutoff_hz: trigger.low_pass_cutoff_hz,
+                    low_pass_resonance: trigger.low_pass_resonance,
+                    high_pass_cutoff_hz: trigger.high_pass_cutoff_hz,
+                    high_pass_resonance: trigger.high_pass_resonance,
+                },
+                ..trigger.runtime_controls
+            },
+            modulations: voice_modulations(&trigger.modulations),
             rendered_frames: 0,
             sample_rate: output_sample_rate,
             low_pass: trigger.low_pass_cutoff_hz.map(|cutoff| {
@@ -556,11 +744,11 @@ impl SynthVoice {
             }),
             compressor: trigger
                 .compressor
-                .clone()
                 .map(|settings| CompressorRuntime::new(settings, output_sample_rate)),
             post_gain: sanitize_gain(trigger.post_gain),
-            reverb: trigger.reverb.clone(),
-            delay: trigger.delay.clone(),
+            inserts: super::inserts::InsertRuntime::new(inserts),
+            reverb: trigger.reverb,
+            delay: trigger.delay,
             live_note: trigger.live_note,
             finished: false,
         })
@@ -591,9 +779,22 @@ impl SynthVoice {
 
     /// Applies a runtime control update to this voice.
     pub fn update_runtime_controls(&mut self, delta: AudioRuntimeControlDelta) {
+        update_voice_modulations(&mut self.modulations, &delta, self.spatial);
         delta.apply_to(&mut self.runtime_controls);
+        apply_voice_dsp_delta(
+            &delta,
+            self.runtime_controls.filters,
+            self.sample_rate,
+            VoiceDspState {
+                low_pass: &mut self.low_pass,
+                high_pass: &mut self.high_pass,
+                compressor: &mut self.compressor,
+                reverb: &mut self.reverb,
+                delay: &mut self.delay,
+            },
+        );
         apply_voice_level_delta(
-            delta,
+            &delta,
             &mut self.gain,
             &mut self.gain_ramp,
             &mut self.post_gain,
@@ -612,15 +813,12 @@ impl SynthVoice {
             return VoiceFrame::SILENT;
         }
 
-        let amplitude = self.envelope.current_level();
-        if amplitude <= f32::EPSILON {
-            self.consume_output_frame();
-            return VoiceFrame::SILENT;
-        }
-
-        let Some(frequency_hz) =
-            midi_note_to_hz(self.base_pitch + self.runtime_controls.pitch_bend_semitones)
-        else {
+        let cycle = self.spatial.start_cycle
+            + self.rendered_frames as f64 / self.sample_rate as f64 * self.spatial.cps;
+        let transpose = self.runtime_controls.transpose.eval(cycle);
+        let Some(frequency_hz) = midi_note_to_hz(
+            self.base_pitch + transpose + self.runtime_controls.pitch_bend_semitones,
+        ) else {
             self.finished = true;
             return VoiceFrame::SILENT;
         };
@@ -628,6 +826,9 @@ impl SynthVoice {
             evaluate_frame_modulation(&self.modulations, self.rendered_frames, self.sample_rate);
 
         let mut frame = Frame::from_mono(self.oscillator.next_mono(frequency_hz));
+        // Advance phase even while an attack starts at zero; block boundaries
+        // and silent envelope samples must not change note phase/noise position.
+        let amplitude = self.envelope.current_level();
         frame *= self.current_gain() * self.velocity * amplitude;
         if let Some(gain) = modulation.gain {
             frame *= gain;
@@ -648,20 +849,25 @@ impl SynthVoice {
             frame = compressor.process(frame);
         }
 
+        frame = self.inserts.process(frame);
         frame *= self.post_gain;
+        if !self.runtime_controls.gate {
+            frame = Frame::ZERO;
+        }
         let position = self
             .spatial
             .position_at_frame(self.rendered_frames, self.sample_rate);
         frame = self.spatializer.place(frame, position);
+        frame = frame.panned(self.runtime_controls.pan.clamp(-1.0, 1.0) as f32);
 
         let reverb = self
             .reverb
             .as_ref()
-            .map(|settings| (settings.clone(), frame * settings.amount().value() as f32));
+            .map(|settings| (*settings, frame * settings.amount().value() as f32));
         let delay = self
             .delay
             .as_ref()
-            .map(|settings| (settings.clone(), frame * settings.amount().value() as f32));
+            .map(|settings| (*settings, frame * settings.amount().value() as f32));
 
         self.consume_output_frame();
 
@@ -859,13 +1065,13 @@ impl EnvelopeRuntime {
     }
 
     fn stage_for_elapsed(&self, elapsed_frames: usize) -> EnvelopeStage {
-        if let Some(gate_frames) = self.gate_frames {
-            if elapsed_frames >= gate_frames {
-                return self.release_stage(
-                    self.base_level_at(gate_frames),
-                    elapsed_frames.saturating_sub(gate_frames),
-                );
-            }
+        if let Some(gate_frames) = self.gate_frames
+            && elapsed_frames >= gate_frames
+        {
+            return self.release_stage(
+                self.base_level_at(gate_frames),
+                elapsed_frames.saturating_sub(gate_frames),
+            );
         }
 
         if self.attack_frames > 0 && elapsed_frames < self.attack_frames {
@@ -895,7 +1101,7 @@ impl EnvelopeRuntime {
 }
 
 #[derive(Debug, Clone)]
-struct BiquadFilter {
+pub(super) struct BiquadFilter {
     coefficients: BiquadCoefficients,
     mode: FilterMode,
     resonance: UnitValue,
@@ -907,6 +1113,18 @@ struct BiquadFilter {
 }
 
 impl BiquadFilter {
+    pub(super) fn from_coefficients(coefficients: BiquadCoefficients) -> Self {
+        Self {
+            coefficients,
+            mode: FilterMode::LowPass,
+            resonance: UnitValue::new(0.0).unwrap(),
+            sample_rate: 1,
+            left_1: 0.0,
+            left_2: 0.0,
+            right_1: 0.0,
+            right_2: 0.0,
+        }
+    }
     fn low_pass(cutoff_hz: f32, resonance: UnitValue, sample_rate: u32) -> Self {
         Self::new(FilterMode::LowPass, cutoff_hz, resonance, sample_rate)
     }
@@ -937,7 +1155,7 @@ impl BiquadFilter {
             BiquadCoefficients::new(self.mode, cutoff_hz, self.resonance, self.sample_rate);
     }
 
-    fn process(&mut self, input: Frame) -> Frame {
+    pub(super) fn process(&mut self, input: Frame) -> Frame {
         Frame::new(
             self.process_left(input.left),
             self.process_right(input.right),
@@ -960,13 +1178,13 @@ impl BiquadFilter {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum FilterMode {
+pub(super) enum FilterMode {
     LowPass,
     HighPass,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BiquadCoefficients {
+pub(super) struct BiquadCoefficients {
     b0: f32,
     b1: f32,
     b2: f32,
@@ -975,7 +1193,12 @@ struct BiquadCoefficients {
 }
 
 impl BiquadCoefficients {
-    fn new(mode: FilterMode, cutoff_hz: f32, resonance: UnitValue, sample_rate: u32) -> Self {
+    pub(super) fn new(
+        mode: FilterMode,
+        cutoff_hz: f32,
+        resonance: UnitValue,
+        sample_rate: u32,
+    ) -> Self {
         let nyquist_guard = (sample_rate as f32 * 0.45).max(20.0);
         let cutoff_hz = cutoff_hz.clamp(20.0, nyquist_guard);
         let omega = 2.0 * PI32 * cutoff_hz / sample_rate.max(1) as f32;
@@ -1013,6 +1236,88 @@ impl BiquadCoefficients {
     }
 }
 
+/// Updates fixed-size DSP state in place on the audio thread. Filter memories
+/// and the compressor detector survive parameter changes; no buffers allocate.
+struct VoiceDspState<'a> {
+    low_pass: &'a mut Option<BiquadFilter>,
+    high_pass: &'a mut Option<BiquadFilter>,
+    compressor: &'a mut Option<CompressorRuntime>,
+    reverb: &'a mut Option<ReverbSettings>,
+    delay: &'a mut Option<DelaySettings>,
+}
+
+fn apply_voice_dsp_delta(
+    delta: &AudioRuntimeControlDelta,
+    filters: FilterPlan,
+    sample_rate: u32,
+    state: VoiceDspState<'_>,
+) {
+    let VoiceDspState {
+        low_pass,
+        high_pass,
+        compressor,
+        reverb,
+        delay,
+    } = state;
+    for (cutoff_delta, resonance_delta, cutoff, resonance, mode, filter) in [
+        (
+            delta.low_pass_cutoff_hz,
+            delta.low_pass_resonance,
+            filters.low_pass_cutoff_hz,
+            filters.low_pass_resonance,
+            FilterMode::LowPass,
+            low_pass,
+        ),
+        (
+            delta.high_pass_cutoff_hz,
+            delta.high_pass_resonance,
+            filters.high_pass_cutoff_hz,
+            filters.high_pass_resonance,
+            FilterMode::HighPass,
+            high_pass,
+        ),
+    ] {
+        if matches!(cutoff_delta, RuntimeControlValue::Keep)
+            && matches!(resonance_delta, RuntimeControlValue::Keep)
+        {
+            continue;
+        }
+        match (cutoff, filter.as_mut()) {
+            (Some(cutoff), Some(active)) => {
+                active.resonance = resonance;
+                active.set_cutoff(cutoff as f32);
+            }
+            (Some(cutoff), None) => {
+                *filter = Some(BiquadFilter::new(
+                    mode,
+                    cutoff as f32,
+                    resonance,
+                    sample_rate,
+                ))
+            }
+            (None, _) => *filter = None,
+        }
+    }
+    match delta.compressor {
+        RuntimeControlValue::Keep => {}
+        RuntimeControlValue::Set(settings) => match compressor {
+            Some(active) => active.settings = settings,
+            None => *compressor = Some(CompressorRuntime::new(settings, sample_rate)),
+        },
+        RuntimeControlValue::Reset => *compressor = None,
+    }
+    match delta.reverb {
+        RuntimeControlValue::Keep => {}
+        RuntimeControlValue::Set(settings) => *reverb = Some(settings),
+        RuntimeControlValue::Reset => *reverb = None,
+    }
+    match delta.delay {
+        RuntimeControlValue::Keep => {}
+        RuntimeControlValue::Set(settings) => *delay = Some(settings),
+        RuntimeControlValue::Reset => *delay = None,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompressorRuntime {
     settings: CompressorSettings,
@@ -1030,7 +1335,7 @@ impl CompressorRuntime {
     }
 
     fn process(&mut self, input: Frame) -> Frame {
-        let amplitude = input.as_mono().left.abs().max(input.as_mono().right.abs());
+        let amplitude = input.left.abs().max(input.right.abs());
         let attack_coeff = smoothing_coefficient(self.settings.attack(), self.sample_rate);
         let release_coeff = smoothing_coefficient(self.settings.release(), self.sample_rate);
         let target = amplitude;
@@ -1041,16 +1346,30 @@ impl CompressorRuntime {
             self.detector += (target - self.detector) * release_coeff;
         }
 
-        let threshold = self.settings.threshold().value() as f32;
-        let gain = if self.detector <= threshold || threshold <= f32::EPSILON {
-            1.0
-        } else {
-            let compressed = threshold + (self.detector - threshold) / self.settings.ratio() as f32;
-            (compressed / self.detector).clamp(0.0, 1.0)
-        };
+        let gain = compressor_gain(self.detector, &self.settings);
 
         input * gain
     }
+}
+
+/// Smooth downward compression in decibels. The knee spans the threshold;
+/// its quadratic joins both straight sections with matching slopes.
+fn compressor_gain(level: f32, settings: &CompressorSettings) -> f32 {
+    let threshold = settings.threshold().value() as f32;
+    if level <= f32::EPSILON || threshold <= f32::EPSILON {
+        return 1.0;
+    }
+    let over_db = 20.0 * (level / threshold).log10();
+    let knee = settings.knee_db() as f32;
+    let slope = (1.0 / settings.ratio() as f32 - 1.0).min(0.0);
+    let reduction_db = if knee > 0.0 && over_db > -knee * 0.5 && over_db < knee * 0.5 {
+        slope * (over_db + knee * 0.5).powi(2) / (2.0 * knee)
+    } else if over_db >= knee * 0.5 {
+        slope * over_db
+    } else {
+        0.0
+    };
+    10.0_f32.powf(reduction_db / 20.0).clamp(0.0, 1.0)
 }
 
 fn smoothing_coefficient(duration: Duration, sample_rate: u32) -> f32 {
@@ -1127,7 +1446,7 @@ fn frames_for_duration(duration: Duration, output_sample_rate: u32) -> Option<us
 }
 
 fn apply_voice_level_delta(
-    delta: AudioRuntimeControlDelta,
+    delta: &AudioRuntimeControlDelta,
     gain: &mut f32,
     gain_ramp: &mut Option<ActiveLinearGainRamp>,
     post_gain: &mut f32,
@@ -1161,14 +1480,6 @@ fn apply_voice_level_delta(
 fn sanitize_gain(gain: f64) -> f32 {
     if gain.is_finite() && gain >= 0.0 {
         gain as f32
-    } else {
-        1.0
-    }
-}
-
-fn sanitize_speed(speed: f64) -> f64 {
-    if speed.is_finite() && speed > 0.0 {
-        speed
     } else {
         1.0
     }
@@ -1256,6 +1567,7 @@ mod tests {
     fn attack_decay_sustain_release_shape_voice_level() {
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("pad")
                     .envelope(envelope(
@@ -1307,6 +1619,7 @@ mod tests {
 
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("pad")
                     .envelope(envelope(
@@ -1380,6 +1693,7 @@ mod tests {
     fn in_progress_attack_enters_with_intermediate_level_instead_of_finishing() {
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("pad")
                     .envelope(envelope(
@@ -1411,6 +1725,7 @@ mod tests {
     fn gate_duration_drives_release_until_voice_is_done() {
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("pad")
                     .envelope(envelope(
@@ -1446,6 +1761,7 @@ mod tests {
         let note = NoteNumber::new(60).unwrap();
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("pad")
                     .live_note(note)
@@ -1482,6 +1798,7 @@ mod tests {
     fn high_pass_reduces_dc_heavily() {
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("dc")
                     .high_pass_cutoff_hz(800.0)
@@ -1514,6 +1831,35 @@ mod tests {
     }
 
     #[test]
+    fn compressor_ratio_and_soft_knee_follow_decibel_levels() {
+        let hard = CompressorSettings::new(
+            UnitValue::new(0.1).unwrap(),
+            4.0,
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+        );
+        let soft = hard.with_knee_db(10.0);
+        // 20 dB over a 4:1 threshold becomes 5 dB over: 15 dB reduction.
+        assert!((compressor_gain(1.0, &hard) - 10.0_f32.powf(-15.0 / 20.0)).abs() < 1e-6);
+        assert_eq!(compressor_gain(0.08, &hard), 1.0);
+        assert!(compressor_gain(0.08, &soft) < 1.0);
+        assert_eq!(compressor_gain(0.01, &soft), 1.0);
+        for boundary in [-5.0_f32, 5.0] {
+            let below = 0.1 * 10.0_f32.powf((boundary - 0.0001) / 20.0);
+            let above = 0.1 * 10.0_f32.powf((boundary + 0.0001) / 20.0);
+            assert!((compressor_gain(below, &soft) - compressor_gain(above, &soft)).abs() < 1e-4);
+        }
+        // Opposite-polarity stereo must still activate the linked detector.
+        let mut runtime = CompressorRuntime::new(soft, 1000);
+        let frame = runtime.process(Frame {
+            left: 1.0,
+            right: -1.0,
+        });
+        assert!(frame.left < 0.3 && frame.right > -0.3);
+        assert_eq!(frame.left, -frame.right);
+    }
+
+    #[test]
     fn compressor_reduces_hot_signal() {
         let compressor = CompressorSettings::new(
             UnitValue::new(0.3).unwrap(),
@@ -1523,6 +1869,7 @@ mod tests {
         );
         let mut voice = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("hot")
                     .compressor(compressor)
@@ -1667,6 +2014,7 @@ mod tests {
         let sample = mono_sample(&values, 8_000);
         let mut plain = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("resonant")
                     .low_pass_cutoff_hz(1_200.0)
@@ -1692,6 +2040,7 @@ mod tests {
         .unwrap();
         let mut resonant = SampleVoice::new(
             LoadedSampleTrigger {
+                sustain_loop: None,
                 trigger: SampleTriggerBuilder::new()
                     .sample("resonant")
                     .low_pass_cutoff_hz(1_200.0)

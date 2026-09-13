@@ -61,14 +61,17 @@ impl From<u64> for TileId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 /// Repetition policy for a source voice or control track.
 pub enum Repeat {
-    /// Repeat forever.
+    /// Repeat at every integer multiple of the period, including before zero.
+    ///
+    /// This is a cyclic pattern with no beginning or end. Its phase remains
+    /// defined when querying negative transport time or shifting the pattern.
     #[default]
     Forever,
-    /// Play a single period once.
+    /// Play a single period once, beginning at phase zero.
     Once,
-    /// Repeat for a fixed number of periods.
+    /// Repeat for a fixed number of periods, beginning at phase zero.
     Count(u32),
-    /// Repeat until the transport reaches the given time.
+    /// Repeat from phase zero until the transport reaches the given time.
     Until(Time),
 }
 
@@ -79,6 +82,7 @@ pub struct Tile {
     phase: Span<Phase>,
     intent: Intent,
     position: SpatialMotion,
+    value_identity: Option<crate::domain::prelude::Symbol>,
 }
 
 impl Tile {
@@ -94,6 +98,7 @@ impl Tile {
             phase,
             intent,
             position: SpatialMotion::ORIGIN,
+            value_identity: None,
         })
     }
 
@@ -110,7 +115,7 @@ impl Tile {
     /// ```
     #[must_use]
     pub fn spanning(start: Time, end: Time, intent: Intent) -> Option<Self> {
-        Some(Self::new(Span::new(start, end)?, intent)?)
+        Self::new(Span::new(start, end)?, intent)
     }
 
     /// Attaches a stable identifier to the tile.
@@ -125,6 +130,19 @@ impl Tile {
     pub fn with_position(mut self, position: SpatialMotion) -> Self {
         self.position = position;
         self
+    }
+
+    /// Attaches a host-defined musical value key, independent of the sound source.
+    #[must_use]
+    pub fn with_value_identity(mut self, value: impl Into<crate::domain::prelude::Symbol>) -> Self {
+        self.value_identity = Some(value.into());
+        self
+    }
+
+    /// Returns the optional musical value key supplied by the host.
+    #[must_use]
+    pub fn value_identity(&self) -> Option<&crate::domain::prelude::Symbol> {
+        self.value_identity.as_ref()
     }
 
     /// Returns the optional tile identifier.

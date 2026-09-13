@@ -7,7 +7,7 @@ use tessera::prelude::{
 fn stack_compound_roundtrips_from_linear_tiles() {
     let tiles = vec![
         ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new("e"))),
-        ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
+        ContainerSurfaceTile::Atom(AtomTile::Octave(2)),
         ContainerSurfaceTile::Atom(AtomTile::Operator(AtomOperatorToken::Elongate)),
         ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
     ];
@@ -21,7 +21,7 @@ fn stack_compound_roundtrips_from_linear_tiles() {
         StackPiece::note(NoteValue::E, "e"),
         StackPiece::Operator(AtomOperatorToken::Elongate),
         StackPiece::Scalar(Rational::from_integer(2)),
-        StackPiece::Scalar(Rational::from_integer(2)),
+        StackPiece::Octave(2),
     ] {
         manual.try_push(piece).expect("push");
     }
@@ -34,11 +34,11 @@ fn stack_compound_permuted_tile_order_matches_manual() {
         ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new("e"))),
         ContainerSurfaceTile::Atom(AtomTile::Operator(AtomOperatorToken::Elongate)),
         ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
-        ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
+        ContainerSurfaceTile::Atom(AtomTile::Octave(2)),
     ];
     let canonical = vec![
         ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new("e"))),
-        ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
+        ContainerSurfaceTile::Atom(AtomTile::Octave(2)),
         ContainerSurfaceTile::Atom(AtomTile::Operator(AtomOperatorToken::Elongate)),
         ContainerSurfaceTile::Atom(AtomTile::Scalar(ScalarAtom::integer(2))),
     ];

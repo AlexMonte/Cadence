@@ -3,21 +3,19 @@
 use bevy::{ecs::system::SystemParam, prelude::*};
 
 use crate::{
-    application::board_view_settings::BoardViewSettings,
     application::editor::{InspectorLayout, MinimapPanelState, TimelinePanelState},
-    application::pipeline::runtime::RuntimePreviewSnapshot,
     application::pipeline::scene_sync::VisibleBoardState,
     application::pipeline::ui_projection::{
         EditorUiProjection, UiDirty, inspector_layout_identity,
     },
 };
 
-use super::breadcrumbs::spawn_bottom_tabs;
+use super::breadcrumbs::spawn_shell_footer;
 use super::layout::{MusaicUiRoot, spawn_main_row};
 use super::menu::spawn_top_menu;
 use crate::adapter::load_up::UiSpriteAssets;
 use crate::infrastructure::ui::board::Board3dCamera;
-use crate::infrastructure::ui::controls::{UiTilePaletteCamera, UiTilePaletteDisplay};
+use crate::infrastructure::ui::controls::UiTilePaletteDisplay;
 use crate::infrastructure::ui::theme::{
     InspectorPanelHost, InspectorTransitionQueue, MusaicUiTheme, PendingInspectorTransition,
 };
@@ -26,10 +24,10 @@ use crate::infrastructure::ui::{minimap_view, timeline_view};
 #[derive(SystemParam)]
 pub(crate) struct RebuildUiInputs<'w> {
     theme: Res<'w, MusaicUiTheme>,
+    preferences: Res<'w, crate::application::editor::preferences::EditorPreferences>,
     minimap_panel: Res<'w, MinimapPanelState>,
     timeline_panel: Res<'w, TimelinePanelState>,
     visible: Res<'w, VisibleBoardState>,
-    preview_snapshot: Res<'w, RuntimePreviewSnapshot>,
     projection: Res<'w, EditorUiProjection>,
     dirty: Res<'w, UiDirty>,
     host: ResMut<'w, InspectorPanelHost>,
@@ -38,14 +36,12 @@ pub(crate) struct RebuildUiInputs<'w> {
     timeline_cache: ResMut<'w, timeline_view::TimelineContentCache>,
     ui_sprites: Option<Res<'w, UiSpriteAssets>>,
     images: Res<'w, Assets<Image>>,
-    view_settings: Res<'w, BoardViewSettings>,
 }
 
 pub(crate) fn rebuild_ui(
     mut commands: Commands,
     existing_root: Query<'_, '_, Entity, With<MusaicUiRoot>>,
     board_camera: Query<'_, '_, Entity, With<Board3dCamera>>,
-    palette_camera: Query<'_, '_, Entity, With<UiTilePaletteCamera>>,
     mut palette_display: ResMut<'_, UiTilePaletteDisplay>,
     mut inputs: RebuildUiInputs,
 ) {
@@ -75,7 +71,8 @@ pub(crate) fn rebuild_ui(
             .as_ref()
             .map(|layout| inspector_layout_identity(Some(layout)))
             .unwrap_or_else(|| "empty".into());
-        let animate = prev_identity != inputs.projection.inspector_identity;
+        let animate = !inputs.preferences.reduced_motion
+            && prev_identity != inputs.projection.inspector_identity;
         inputs.transition_queue.pending = Some(PendingInspectorTransition {
             layout: inspector_layout,
             animate,
@@ -89,7 +86,6 @@ pub(crate) fn rebuild_ui(
             &mut commands,
             &existing_root,
             board_camera.iter().next(),
-            palette_camera.iter().next(),
             &mut inputs,
             inspector_layout,
         );
@@ -100,7 +96,6 @@ fn full_shell_respawn(
     commands: &mut Commands,
     existing_root: &Query<'_, '_, Entity, With<MusaicUiRoot>>,
     board_camera: Option<Entity>,
-    palette_camera: Option<Entity>,
     inputs: &mut RebuildUiInputs<'_>,
     inspector_layout: InspectorLayout,
 ) {
@@ -113,20 +108,17 @@ fn full_shell_respawn(
         commands.entity(entity).despawn();
     }
 
-    let active_surface = inputs.projection.active_surface;
-    let gap = inputs.theme.spacing.panel_gap;
-    let pad = inputs.theme.spacing.shell_padding;
-
     commands
         .spawn((
             MusaicUiRoot,
+            bevy::input_focus::tab_navigation::TabGroup::new(0),
+            TextColor(inputs.theme.chrome.text_main),
+            bevy_feathers::theme::ThemeFontColor(bevy_feathers::tokens::TEXT_MAIN),
             Node {
                 width: percent(100),
                 height: percent(100),
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
-                row_gap: px(gap),
-                padding: UiRect::all(px(pad)),
                 ..default()
             },
         ))
@@ -137,30 +129,21 @@ fn full_shell_respawn(
                 &inputs.images,
                 inputs.ui_sprites.as_deref(),
             );
+            crate::infrastructure::ui::first_loop::spawn(root, &inputs.theme);
             spawn_main_row(
                 root,
                 &inputs.theme,
                 &inputs.visible,
                 &inputs.projection,
                 &inspector_layout,
-                &inputs.preview_snapshot,
                 board_camera,
-                palette_camera,
                 inputs.minimap_panel.visible_width(),
                 inputs.timeline_panel.visible_height(),
                 &mut inputs.host,
                 inputs.ui_sprites.as_deref(),
                 &inputs.images,
-                *inputs.view_settings,
             );
-            spawn_bottom_tabs(
-                root,
-                &inputs.theme,
-                &inputs.projection.breadcrumbs,
-                active_surface,
-                inputs.ui_sprites.as_deref(),
-                &inputs.images,
-            );
+            spawn_shell_footer(root, &inputs.theme);
         });
 
     inputs.host.displayed_layout = Some(inspector_layout);

@@ -6,6 +6,49 @@ use crate::infrastructure::ui::theme::MusaicUiTheme;
 #[derive(Component)]
 pub struct DiagnosticsBanner;
 
+#[derive(Component)]
+pub(crate) struct PlaybackStatus;
+
+pub(crate) fn spawn_playback_status(parent: &mut ChildSpawnerCommands<'_>, theme: &MusaicUiTheme) {
+    let mut accessible = accesskit::Node::new(accesskit::Role::Status);
+    accessible.set_live(accesskit::Live::Polite);
+    accessible.set_live_atomic();
+    parent.spawn((
+        PlaybackStatus,
+        bevy::a11y::AccessibilityNode(accessible),
+        Text::new("Checking edits…"),
+        TextFont {
+            font_size: 11.0,
+            ..default()
+        },
+        TextColor(theme.chrome.text_dim),
+    ));
+}
+
+pub(crate) fn sync_playback_status(
+    dirty: Res<UiDirty>,
+    projection: Res<EditorUiProjection>,
+    mut labels: Query<(&mut Text, &mut bevy::a11y::AccessibilityNode), With<PlaybackStatus>>,
+) {
+    for (mut text, mut accessible) in &mut labels {
+        if !dirty.diagnostics && !text.is_added() {
+            continue;
+        }
+        let feedback = &projection.playback_feedback;
+        let summary = feedback.summary();
+        if text.0 != summary {
+            text.0.clone_from(&summary);
+        }
+        if accessible.label() != Some(summary.as_str()) {
+            accessible.set_label(summary);
+        }
+        let detail = feedback.detail.as_str();
+        if accessible.description() != Some(detail) {
+            accessible.set_description(detail);
+        }
+    }
+}
+
 pub fn sync_diagnostics_banner(
     dirty: Res<'_, UiDirty>,
     projection: Res<'_, EditorUiProjection>,
@@ -26,15 +69,20 @@ pub fn sync_diagnostics_banner(
 }
 
 pub fn spawn_diagnostics_banner(mut commands: Commands, theme: Res<MusaicUiTheme>) {
-    // Anchored above the bottom tab bar, right-aligned, so it never covers
-    // the breadcrumbs.
+    // Only actionable errors appear above the status footer.
     commands.spawn((
         DiagnosticsBanner,
+        DespawnOnExit(crate::infrastructure::app::AppState::Editor),
         Visibility::Hidden,
-        Text::new("No diagnostics"),
+        Text::new(""),
+        TextColor(theme.chrome.text_main),
+        TextFont {
+            font_size: 13.0,
+            ..default()
+        },
         Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Px(58.0),
+            bottom: Val::Px(40.0),
             right: Val::Px(12.0),
             max_width: Val::Percent(60.0),
             padding: UiRect::all(Val::Px(theme.spacing.sm)),

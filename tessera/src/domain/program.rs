@@ -6,7 +6,6 @@ use super::{Container, ContainerId, RootRelation, RootSurfaceNodeKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[serde(transparent)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct NodeId(pub String);
 
 impl NodeId {
@@ -16,7 +15,6 @@ impl NodeId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct TesseraProgram {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub root_nodes: BTreeMap<NodeId, RootSurfaceNodeKind>,
@@ -33,7 +31,6 @@ impl TesseraProgram {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct NormalizedProgram {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub root_nodes: BTreeMap<NodeId, RootSurfaceNodeKind>,

@@ -3,6 +3,7 @@ use bevy::prelude::*;
 #[derive(Resource, Debug, Clone, Default)]
 pub struct DiagnosticStore {
     pub items: Vec<LayeredDiagnostic>,
+    pub(crate) rejection_serial: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,6 +37,7 @@ pub enum HostDiagnostic {
 
 #[derive(Debug, Clone)]
 pub enum TransactionDiagnostic {
+    Info { message: String },
     Rejected { message: String },
 }
 
@@ -52,7 +54,12 @@ pub enum RuntimeDiagnostic {
 
 impl DiagnosticStore {
     pub fn has_errors(&self) -> bool {
-        !self.items.is_empty()
+        self.items.iter().any(|item| {
+            !matches!(
+                item.diagnostic,
+                AppDiagnostic::Transaction(TransactionDiagnostic::Info { .. })
+            )
+        })
     }
 
     pub fn summary(&self) -> String {
@@ -69,18 +76,22 @@ impl DiagnosticStore {
         diagnostics: impl IntoIterator<Item = AppDiagnostic>,
     ) {
         self.items.retain(|item| item.phase != phase);
-        self.items.extend(
-            diagnostics
-                .into_iter()
-                .map(|diagnostic| LayeredDiagnostic { phase, diagnostic }),
-        );
+        for diagnostic in diagnostics {
+            self.push(LayeredDiagnostic { phase, diagnostic });
+        }
+    }
+
+    pub fn push(&mut self, item: LayeredDiagnostic) {
+        if !matches!(
+            item.diagnostic,
+            AppDiagnostic::Transaction(TransactionDiagnostic::Info { .. })
+        ) {
+            self.rejection_serial = self.rejection_serial.wrapping_add(1);
+        }
+        self.items.push(item);
     }
 
     pub fn clear_phase(&mut self, phase: DiagnosticPhase) {
         self.items.retain(|item| item.phase != phase);
     }
 }
-
-mod hierarchy_audit;
-
-pub use hierarchy_audit::HierarchyAuditPlugin;

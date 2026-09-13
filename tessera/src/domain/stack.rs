@@ -31,7 +31,6 @@ use super::surface::{BoardSlot, TileFootprint};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum SignedAccidental {
     Sharp,
     Flat,
@@ -39,13 +38,15 @@ pub enum SignedAccidental {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum StackPiece {
     Note { value: NoteValue, label: String },
+    Sound(String),
     Accidental(SignedAccidental),
     Scalar(Rational),
     Operator(AtomOperatorToken),
+    Octave(i64),
+    Modifier(AtomModifier),
     Rest,
     Nested(ContainerId),
 }
@@ -60,7 +61,6 @@ impl StackPiece {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct StackCompound {
     layers: Vec<StackPiece>,
 }
@@ -102,17 +102,24 @@ impl StackCompound {
         }
 
         match piece {
-            StackPiece::Note { .. } | StackPiece::Rest | StackPiece::Nested(_) => {
-                Err(StackReject::InvalidRoot)
-            }
-            StackPiece::Scalar(_) => Ok(()),
-            StackPiece::Accidental(_) => {
-                if !matches!(self.layers.first(), Some(StackPiece::Note { .. })) {
+            StackPiece::Note { .. }
+            | StackPiece::Sound(_)
+            | StackPiece::Rest
+            | StackPiece::Nested(_) => Err(StackReject::InvalidRoot),
+            StackPiece::Scalar(_) | StackPiece::Modifier(_) => Ok(()),
+            StackPiece::Octave(_) => {
+                if matches!(self.layers.first(), Some(StackPiece::Note { .. })) {
+                    Ok(())
+                } else {
                     Err(StackReject::InvalidRoot)
-                } else if self
-                    .layers
-                    .iter()
-                    .any(|layer| matches!(layer, StackPiece::Accidental(_)))
+                }
+            }
+            StackPiece::Accidental(_) => {
+                if !matches!(self.layers.first(), Some(StackPiece::Note { .. }))
+                    || self
+                        .layers
+                        .iter()
+                        .any(|layer| matches!(layer, StackPiece::Accidental(_)))
                 {
                     Err(StackReject::InvalidRoot)
                 } else {
@@ -149,82 +156,97 @@ impl StackCompound {
             return Err(StackReject::InvalidRoot);
         }
 
-        let mut accidentals = Vec::new();
-        let mut scalars = Vec::new();
-        let mut operators = Vec::new();
-
-        for piece in self.layers.iter().skip(1) {
-            match piece {
-                StackPiece::Accidental(accidental) => accidentals.push(*accidental),
-                StackPiece::Scalar(value) => scalars.push(*value),
-                StackPiece::Operator(token) => {
-                    if matches!(
-                        token,
-                        AtomOperatorToken::Choice | AtomOperatorToken::Parallel
-                    ) {
-                        return Err(StackReject::InvalidModifierArgument {
-                            operator: *token,
-                            value: Rational::zero(),
-                        });
-                    }
-                    operators.push(*token);
-                }
-                StackPiece::Note { .. } | StackPiece::Rest | StackPiece::Nested(_) => {
-                    return Err(StackReject::InvalidRoot);
-                }
-            }
-        }
-
-        match root {
+        let mut value = match root {
             StackPiece::Note { value, label } => {
-                let mut note = NoteAtom {
-                    value: value.clone(),
+                let value = if label.is_empty() {
+                    value.clone()
+                } else {
+                    try_parse_note_value(label).ok_or(StackReject::InvalidRoot)?
+                };
+                MusicalValue::Note(NoteAtom {
+                    value,
                     label: label.clone(),
                     octave: None,
-                };
-                if !note.label.is_empty() {
-                    if try_parse_note_value(&note.label).is_err() {
+                    accidental: None,
+                })
+            }
+            StackPiece::Modifier(modifier) => {
+                validate_modifier(modifier)?;
+                MusicalValue::Effect(modifier.effect_value().ok_or(StackReject::InvalidRoot)?)
+            }
+            StackPiece::Sound(value) => MusicalValue::Sound(value.clone()),
+            StackPiece::Rest => MusicalValue::Rest,
+            StackPiece::Scalar(value) => MusicalValue::Scalar(ScalarAtom { value: *value }),
+            StackPiece::Nested(id) => MusicalValue::NestedContainer(id.clone()),
+            _ => return Err(StackReject::InvalidRoot),
+        };
+        let mut modifiers = Vec::new();
+        let mut index = 1;
+        while let Some(piece) = self.layers.get(index) {
+            match piece {
+                StackPiece::Accidental(accidental) => {
+                    let MusicalValue::Note(note) = &mut value else {
+                        return Err(StackReject::InvalidRoot);
+                    };
+                    if note.accidental.replace(*accidental).is_some() {
                         return Err(StackReject::InvalidRoot);
                     }
-                    note.value = try_parse_note_value(&note.label).expect("validated above");
                 }
-                apply_accidentals(&mut note, &accidentals);
-                let (octave_scalar, modifier_scalars) = partition_octave_scalars(scalars);
-                if let Some(octave) = octave_scalar {
-                    if octave.denominator != 1 {
-                        return Err(StackReject::InvalidOctave { value: octave });
+                StackPiece::Octave(octave) => {
+                    let MusicalValue::Note(note) = &mut value else {
+                        return Err(StackReject::InvalidRoot);
+                    };
+                    if note.octave.replace(*octave).is_some() {
+                        return Err(StackReject::DuplicateOctave);
                     }
-                    note.octave = Some(octave.numerator);
                 }
-                let modifiers = pair_modifiers(&operators, modifier_scalars)?;
-                Ok(AtomExpr {
-                    kind: AtomExprKind::Value(MusicalValue::Note(note)),
-                    modifiers,
-                })
+                StackPiece::Scalar(scalar) => {
+                    return Err(StackReject::UnassignedScalar { value: *scalar });
+                }
+                StackPiece::Modifier(modifier) => {
+                    if matches!(value, MusicalValue::Effect(_))
+                        && modifier.parameter_key().is_some()
+                    {
+                        return Err(StackReject::InvalidRoot);
+                    }
+                    validate_modifier(modifier)?;
+                    modifiers.push(modifier.clone());
+                }
+                StackPiece::Operator(operator) => {
+                    let count = match operator {
+                        AtomOperatorToken::Euclid => 2,
+                        AtomOperatorToken::EuclidRot => 3,
+                        AtomOperatorToken::Choice | AtomOperatorToken::Parallel => {
+                            return Err(StackReject::InvalidRoot);
+                        }
+                        AtomOperatorToken::Degrade => usize::from(matches!(
+                            self.layers.get(index + 1),
+                            Some(StackPiece::Scalar(_))
+                        )),
+                        _ => 1,
+                    };
+                    let mut arguments = Vec::new();
+                    for offset in 1..=count {
+                        let Some(StackPiece::Scalar(value)) = self.layers.get(index + offset)
+                        else {
+                            return Err(StackReject::MissingModifierArgument {
+                                operator: *operator,
+                            });
+                        };
+                        arguments.push(*value);
+                    }
+                    modifiers.extend(pair_modifiers(&[*operator], arguments)?);
+                    index += count;
+                }
+                _ => return Err(StackReject::InvalidRoot),
             }
-            StackPiece::Rest => {
-                let modifiers = pair_modifiers(&operators, scalars)?;
-                Ok(AtomExpr {
-                    kind: AtomExprKind::Value(MusicalValue::Rest),
-                    modifiers,
-                })
-            }
-            StackPiece::Scalar(scalar) => {
-                let modifiers = pair_modifiers(&operators, scalars)?;
-                Ok(AtomExpr {
-                    kind: AtomExprKind::Value(MusicalValue::Scalar(ScalarAtom { value: *scalar })),
-                    modifiers,
-                })
-            }
-            StackPiece::Nested(container) => {
-                let modifiers = pair_modifiers(&operators, scalars)?;
-                Ok(AtomExpr {
-                    kind: AtomExprKind::Value(MusicalValue::NestedContainer(container.clone())),
-                    modifiers,
-                })
-            }
-            StackPiece::Accidental(_) | StackPiece::Operator(_) => Err(StackReject::InvalidRoot),
+            index += 1;
         }
+        Ok(AtomExpr {
+            source_node: None,
+            kind: AtomExprKind::Value(value),
+            modifiers,
+        })
     }
 
     pub fn display_parts(&self) -> StackDisplay {
@@ -241,8 +263,12 @@ impl StackCompound {
 fn is_valid_root(piece: &StackPiece) -> bool {
     matches!(
         piece,
-        StackPiece::Note { .. } | StackPiece::Rest | StackPiece::Scalar(_) | StackPiece::Nested(_)
-    )
+        StackPiece::Note { .. }
+            | StackPiece::Sound(_)
+            | StackPiece::Rest
+            | StackPiece::Scalar(_)
+            | StackPiece::Nested(_)
+    ) || matches!(piece, StackPiece::Modifier(modifier) if modifier.effect_value().is_some())
 }
 
 impl StackPiece {
@@ -254,44 +280,103 @@ impl StackPiece {
     }
 }
 
-fn apply_accidentals(note: &mut NoteAtom, accidentals: &[SignedAccidental]) {
-    for accidental in accidentals {
-        match accidental {
-            SignedAccidental::Sharp => match note.value {
-                NoteValue::A => note.value = NoteValue::B,
-                NoteValue::B => note.value = NoteValue::C,
-                NoteValue::C => note.value = NoteValue::D,
-                NoteValue::D => note.value = NoteValue::E,
-                NoteValue::E => note.value = NoteValue::F,
-                NoteValue::F => note.value = NoteValue::G,
-                NoteValue::G => note.value = NoteValue::A,
-            },
-            SignedAccidental::Flat => match note.value {
-                NoteValue::A => note.value = NoteValue::G,
-                NoteValue::B => note.value = NoteValue::A,
-                NoteValue::C => note.value = NoteValue::B,
-                NoteValue::D => note.value = NoteValue::C,
-                NoteValue::E => note.value = NoteValue::D,
-                NoteValue::F => note.value = NoteValue::E,
-                NoteValue::G => note.value = NoteValue::F,
-            },
-            SignedAccidental::Natural => {}
+/// Validation shared by the spatial stack and the normalizer's bound groups.
+pub fn validate_modifier(modifier: &AtomModifier) -> Result<(), StackReject> {
+    let parameter = modifier.parameter_key().zip(modifier.parameter_value());
+    if let Some((parameter, value)) = parameter {
+        return parameter
+            .spec()
+            .validate(&value)
+            .map_err(|_| StackReject::InvalidParameter { parameter, value });
+    }
+    match modifier {
+        AtomModifier::Scale(value) => {
+            value
+                .validate()
+                .map_err(|message| StackReject::InvalidMusicalPattern {
+                    message: message.into(),
+                })?
         }
+        AtomModifier::EuclidPattern(value) => {
+            value
+                .validate()
+                .map_err(|message| StackReject::InvalidMusicalPattern {
+                    message: message.into(),
+                })?
+        }
+        AtomModifier::Fast(value) => {
+            build_scalar_modifier(AtomOperatorToken::Fast, *value)?;
+        }
+        AtomModifier::Slow(value) => {
+            build_scalar_modifier(AtomOperatorToken::Slow, *value)?;
+        }
+        AtomModifier::Elongate(value) => {
+            build_scalar_modifier(AtomOperatorToken::Elongate, *value)?;
+        }
+        AtomModifier::Replicate(count) => {
+            build_scalar_modifier(
+                AtomOperatorToken::Replicate,
+                Rational::from_integer(i64::from(*count)),
+            )?;
+        }
+        AtomModifier::Degrade(Some(value))
+            if *value < Rational::zero() || *value > Rational::one() =>
+        {
+            return Err(StackReject::InvalidModifierArgument {
+                operator: AtomOperatorToken::Degrade,
+                value: *value,
+            });
+        }
+        AtomModifier::Euclid { pulses, steps } | AtomModifier::EuclidRot { pulses, steps, .. } => {
+            validate_euclid(
+                Rational::from_integer(i64::from(*pulses)),
+                Rational::from_integer(i64::from(*steps)),
+            )?
+        }
+        AtomModifier::Rev | AtomModifier::Degrade(_) => {}
+        AtomModifier::Late(value) => {
+            if value.denominator <= 0
+                || *value < Rational::from_integer(-1024)
+                || *value > Rational::from_integer(1024)
+            {
+                return Err(StackReject::InvalidMusicalPattern {
+                    message: "Timing offset must be within 1024 cycles".into(),
+                });
+            }
+        }
+        AtomModifier::Modulation { .. }
+        | AtomModifier::Gain(_)
+        | AtomModifier::Attack(_)
+        | AtomModifier::Decay(_)
+        | AtomModifier::Release(_)
+        | AtomModifier::Transpose(_)
+        | AtomModifier::Pan(_)
+        | AtomModifier::Delay(_)
+        | AtomModifier::Reverb(_)
+        | AtomModifier::Compressor(_)
+        | AtomModifier::Velocity(_)
+        | AtomModifier::ClipLength(_)
+        | AtomModifier::PostGain(_)
+        | AtomModifier::PitchBend(_)
+        | AtomModifier::Expression(_)
+        | AtomModifier::HighPassCutoff(_)
+        | AtomModifier::HighPassResonance(_)
+        | AtomModifier::Gate(_)
+        | AtomModifier::Legato(_)
+        | AtomModifier::Sustain(_)
+        | AtomModifier::LowPassCutoff(_)
+        | AtomModifier::LowPassResonance(_)
+        | AtomModifier::SampleBank(_)
+        | AtomModifier::SampleVariant(_)
+        | AtomModifier::PlaybackRate(_)
+        | AtomModifier::PlaybackStart(_)
+        | AtomModifier::PlaybackEnd(_)
+        | AtomModifier::Reverse(_)
+        | AtomModifier::Fit(_)
+        | AtomModifier::Loop(_)
+        | AtomModifier::Slice { .. } => unreachable!("validated parameter above"),
     }
-}
-
-fn partition_octave_scalars(scalars: Vec<Rational>) -> (Option<Rational>, Vec<Rational>) {
-    if let Some((index, _octave)) = scalars
-        .iter()
-        .enumerate()
-        .find(|(_, scalar)| scalar.denominator == 1)
-    {
-        let mut rest = scalars;
-        let octave = rest.remove(index);
-        (Some(octave), rest)
-    } else {
-        (None, scalars)
-    }
+    Ok(())
 }
 
 fn pair_modifiers(
@@ -305,7 +390,10 @@ fn pair_modifiers(
         match operator {
             AtomOperatorToken::Degrade => {
                 if let Some(probability) = scalar_iter.next() {
-                    if probability < Rational::zero() || probability > Rational::one() {
+                    if probability.denominator <= 0
+                        || probability < Rational::zero()
+                        || probability > Rational::one()
+                    {
                         return Err(StackReject::InvalidModifierArgument {
                             operator,
                             value: probability,
@@ -398,7 +486,7 @@ fn build_scalar_modifier(
 ) -> Result<AtomModifier, StackReject> {
     match operator {
         AtomOperatorToken::Fast | AtomOperatorToken::Slow | AtomOperatorToken::Elongate => {
-            if value <= Rational::zero() {
+            if value.denominator <= 0 || value <= Rational::zero() {
                 return Err(StackReject::InvalidModifierArgument { operator, value });
             }
             Ok(match operator {
@@ -419,7 +507,6 @@ fn build_scalar_modifier(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct StackSequence {
     pub compounds: Vec<StackCompound>,
 }
@@ -436,8 +523,14 @@ impl StackSequence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum StackReject {
+    InvalidMusicalPattern {
+        message: String,
+    },
+    InvalidParameter {
+        parameter: super::ParameterKey,
+        value: super::FieldValue,
+    },
     InvalidRoot,
     MissingModifierArgument {
         operator: AtomOperatorToken,
@@ -445,9 +538,7 @@ pub enum StackReject {
     UnassignedScalar {
         value: Rational,
     },
-    InvalidOctave {
-        value: Rational,
-    },
+    DuplicateOctave,
     InvalidModifierArgument {
         operator: AtomOperatorToken,
         value: Rational,
@@ -457,7 +548,6 @@ pub enum StackReject {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum StackSlotHint {
     NeedsRoot,
     AcceptsLayer,
@@ -465,19 +555,20 @@ pub enum StackSlotHint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct StackDisplay {
     pub parts: Vec<StackDisplayPart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum StackDisplayPart {
     Note { label: String },
+    Sound(String),
     Accidental(SignedAccidental),
     Scalar(Rational),
     Operator(AtomOperatorToken),
+    Octave(i64),
+    Modifier(AtomModifier),
     Rest,
     Nested(ContainerId),
 }
@@ -488,9 +579,12 @@ impl StackDisplayPart {
             StackPiece::Note { label, .. } => Self::Note {
                 label: label.clone(),
             },
+            StackPiece::Sound(value) => Self::Sound(value.clone()),
             StackPiece::Accidental(accidental) => Self::Accidental(*accidental),
             StackPiece::Scalar(value) => Self::Scalar(*value),
             StackPiece::Operator(token) => Self::Operator(*token),
+            StackPiece::Octave(value) => Self::Octave(*value),
+            StackPiece::Modifier(modifier) => Self::Modifier(modifier.clone()),
             StackPiece::Rest => Self::Rest,
             StackPiece::Nested(container) => Self::Nested(container.clone()),
         }
@@ -499,7 +593,6 @@ impl StackDisplayPart {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum InputStackPiece {
     Container {
         node: NodeId,
@@ -509,7 +602,6 @@ pub enum InputStackPiece {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct InputStackSurface {
     pub port: InputPort,
     pub role: super::flow::NodeInputRole,
@@ -519,7 +611,6 @@ pub struct InputStackSurface {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct InputStackHost {
     pub node: NodeId,
     pub surfaces: Vec<InputStackSurface>,
@@ -636,7 +727,6 @@ impl InputStackHost {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum InputStackReject {
     UnknownHost,
     UnknownInputPort {
@@ -655,7 +745,6 @@ pub enum InputStackReject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct StackSurfaceRect {
     pub port: InputPort,
     pub slot: BoardSlot,
@@ -663,7 +752,6 @@ pub struct StackSurfaceRect {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct StackSurfaceLayout {
     pub host_footprint: TileFootprint,
     pub surfaces: Vec<StackSurfaceRect>,
@@ -710,6 +798,14 @@ pub fn stack_compound_from_tiles(tiles: &[ContainerSurfaceTile], start: usize) -
         return compound;
     };
     let _ = compound.try_push(first);
+    if let Some(ContainerSurfaceTile::Atom(AtomTile::Note(note))) = tiles.get(start) {
+        if let Some(octave) = note.octave {
+            let _ = compound.try_push(StackPiece::Octave(octave));
+        }
+        if let Some(accidental) = note.accidental {
+            let _ = compound.try_push(StackPiece::Accidental(accidental));
+        }
+    }
     let mut index = start + 1;
     while index < tiles.len() {
         let Some(piece) = stack_piece_from_tile(tiles.get(index)) else {
@@ -734,11 +830,21 @@ fn stack_piece_from_tile(tile: Option<&ContainerSurfaceTile>) -> Option<StackPie
                 note.label.clone()
             },
         )),
+        ContainerSurfaceTile::Atom(AtomTile::Sound(value)) => {
+            Some(StackPiece::Sound(value.clone()))
+        }
         ContainerSurfaceTile::Atom(AtomTile::Rest) => Some(StackPiece::Rest),
         ContainerSurfaceTile::Atom(AtomTile::Scalar(scalar)) => {
             Some(StackPiece::Scalar(scalar.value))
         }
         ContainerSurfaceTile::Atom(AtomTile::Operator(token)) => Some(StackPiece::Operator(*token)),
+        ContainerSurfaceTile::Atom(AtomTile::Accidental(value)) => {
+            Some(StackPiece::Accidental(*value))
+        }
+        ContainerSurfaceTile::Atom(AtomTile::Octave(value)) => Some(StackPiece::Octave(*value)),
+        ContainerSurfaceTile::Atom(AtomTile::Modifier(modifier)) => {
+            Some(StackPiece::Modifier(modifier.clone()))
+        }
         ContainerSurfaceTile::NestedContainer(container) => {
             Some(StackPiece::Nested(container.clone()))
         }
@@ -760,32 +866,42 @@ mod tests {
     }
 
     #[test]
-    fn stack_compound_e2_at_2_order_independent() {
-        let left = compound_from_pieces(vec![
-            StackPiece::note(NoteValue::E, "e"),
-            StackPiece::Scalar(Rational::from_integer(2)),
-            StackPiece::Operator(AtomOperatorToken::Elongate),
-            StackPiece::Scalar(Rational::from_integer(2)),
-        ]);
-        let right = compound_from_pieces(vec![
-            StackPiece::note(NoteValue::E, "e"),
-            StackPiece::Operator(AtomOperatorToken::Elongate),
-            StackPiece::Scalar(Rational::from_integer(2)),
-            StackPiece::Scalar(Rational::from_integer(2)),
-        ]);
-
-        let left_expr = left.resolve().expect("left resolves");
-        let right_expr = right.resolve().expect("right resolves");
-        assert_eq!(left_expr, right_expr);
-        assert!(matches!(
-            left_expr.modifiers.as_slice(),
-            [AtomModifier::Elongate(value)] if *value == Rational::from_integer(2)
-        ));
-        match left_expr.kind {
-            AtomExprKind::Value(MusicalValue::Note(note)) => {
-                assert_eq!(note.octave, Some(2));
-            }
-            other => panic!("unexpected expr kind: {other:?}"),
+    fn stack_compound_bound_groups_are_reorderable() {
+        let groups = [
+            StackPiece::Octave(4),
+            StackPiece::Modifier(AtomModifier::Elongate(Rational::from_integer(2))),
+            StackPiece::Modifier(AtomModifier::Fast(Rational::from_integer(3))),
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut layers = vec![StackPiece::note(NoteValue::C, "c")];
+            layers.extend(order.into_iter().map(|i| groups[i].clone()));
+            let compound = compound_from_pieces(layers);
+            let decoded: StackCompound =
+                serde_json::from_str(&serde_json::to_string(&compound).unwrap()).unwrap();
+            assert_eq!(decoded, compound);
+            let expr = decoded.resolve().unwrap();
+            assert!(matches!(
+                expr.kind,
+                AtomExprKind::Value(MusicalValue::Note(NoteAtom {
+                    octave: Some(4),
+                    ..
+                }))
+            ));
+            assert!(
+                expr.modifiers
+                    .contains(&AtomModifier::Elongate(Rational::from_integer(2)))
+            );
+            assert!(
+                expr.modifiers
+                    .contains(&AtomModifier::Fast(Rational::from_integer(3)))
+            );
         }
     }
 
@@ -821,12 +937,15 @@ mod tests {
         let compound = compound_from_pieces(vec![
             StackPiece::note(NoteValue::C, "c"),
             StackPiece::Accidental(SignedAccidental::Sharp),
-            StackPiece::Scalar(Rational::from_integer(4)),
+            StackPiece::Octave(4),
         ]);
         let expr = compound.resolve().expect("resolves");
         match expr.kind {
             AtomExprKind::Value(MusicalValue::Note(note)) => {
-                assert_eq!(note.value, NoteValue::D);
+                assert_eq!(note.value, NoteValue::C);
+                assert_eq!(note.accidental, Some(SignedAccidental::Sharp));
+                assert_eq!(note.pitch_label(), "c#");
+                assert_eq!(note.semitone(4), 61);
                 assert_eq!(note.octave, Some(4));
             }
             other => panic!("unexpected expr kind: {other:?}"),
@@ -839,8 +958,8 @@ mod tests {
         host.try_stack(
             InputPort::new("main"),
             InputStackPiece::Container {
-                node: NodeId::new("phrase"),
-                container: ContainerId::new("phrase"),
+                node: NodeId::new("pattern"),
+                container: ContainerId::new("pattern"),
             },
         )
         .expect("main accepts container");
@@ -857,7 +976,7 @@ mod tests {
             RootRelation::FlowsTo {
                 from: StreamSource { node, .. },
                 ..
-            } if *node == NodeId::new("phrase")
+            } if *node == NodeId::new("pattern")
         ));
     }
 

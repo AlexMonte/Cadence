@@ -111,6 +111,7 @@ pub(crate) fn drive_inspector_slides(
     mut host: ResMut<InspectorPanelHost>,
     mut slides: Query<(Entity, &mut InspectorSlideLayer, &mut UiTransform)>,
     theme: Res<super::MusaicUiTheme>,
+    preferences: Option<Res<crate::application::editor::preferences::EditorPreferences>>,
 ) {
     if slides.is_empty() {
         return;
@@ -123,7 +124,11 @@ pub(crate) fn drive_inspector_slides(
 
     for (entity, mut slide, mut transform) in &mut slides {
         slide.elapsed += dt;
-        let t = (slide.elapsed / duration).min(1.0);
+        let t = if preferences.as_ref().is_some_and(|p| p.reduced_motion) || duration <= 0.0 {
+            1.0
+        } else {
+            (slide.elapsed / duration).min(1.0)
+        };
         let eased = ease_out_cubic(t);
         let x = slide_translation_x(slide.direction, slide.distance, eased);
         transform.translation = Val2::px(x, 0.0);

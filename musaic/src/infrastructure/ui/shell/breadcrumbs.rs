@@ -1,153 +1,171 @@
-//! Bottom bar: surface breadcrumb trail plus the timeline edge grip.
-//!
-//! Labels come from [`BreadcrumbPaint`] — this module paints only.
+//! Surface navigation above the board and a quiet, live status footer.
 
-use bevy::{picking::prelude::Pickable, prelude::*, ui::widget::Text as UiText};
-use bevy_feathers::theme::ThemedText;
+use bevy::{prelude::*, ui::widget::Text as UiText};
 
 use crate::{
-    application::command::EditorCommand,
-    application::editor::TimelinePanelState,
-    application::pipeline::ui_projection::BreadcrumbPaint,
+    application::command::EditorCommand, application::pipeline::ui_projection::BreadcrumbPaint,
     domain::board::BoardSurfaceId,
 };
 
-use super::menu::{InspectorButtonAction, on_inspector_button_activated};
-use crate::adapter::load_up::UiSpriteAssets;
-use crate::infrastructure::ui::minimap;
-use crate::infrastructure::ui::theme::MusaicUiTheme;
-use crate::infrastructure::ui::ui_sprites;
-use crate::infrastructure::ui::widgets::{
-    MusaicClickable, PanelBackdrop, musaic_button, spawn_shell_panel,
+use super::menu::{
+    InspectorButtonAction, MenuAudioLabel, MenuClockLabel, on_inspector_button_activated,
 };
+use crate::infrastructure::ui::theme::MusaicUiTheme;
+use crate::infrastructure::ui::widgets::musaic_button;
 
-const BOTTOM_TAB_HEIGHT: f32 = 32.0;
-
-#[derive(Component)]
-struct UiShellTabs;
-
-pub(crate) fn spawn_bottom_tabs(
+pub(crate) fn spawn_board_breadcrumbs(
     parent: &mut ChildSpawnerCommands<'_>,
     theme: &MusaicUiTheme,
     breadcrumbs: &BreadcrumbPaint,
     active_surface: Option<BoardSurfaceId>,
-    sprites: Option<&UiSpriteAssets>,
-    images: &Assets<Image>,
 ) {
-    let grip_height = TimelinePanelState::EDGE_HIT_HEIGHT;
-    let bar_height = BOTTOM_TAB_HEIGHT + grip_height;
-
-    spawn_shell_panel(
-        parent,
-        (
-            UiShellTabs,
+    parent
+        .spawn((
             Node {
                 width: percent(100),
-                height: px(bar_height),
+                min_height: px(45.0),
                 flex_shrink: 0.0,
-                display: Display::Flex,
-                flex_direction: FlexDirection::Column,
-                row_gap: px(0.0),
-                padding: UiRect::ZERO,
-                overflow: Overflow::clip(),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                flex_wrap: FlexWrap::Wrap,
+                padding: UiRect::axes(px(22.0), px(8.0)),
+                column_gap: px(12.0),
+                row_gap: px(4.0),
                 ..default()
             },
-            BackgroundColor(theme.chrome.panel_bg),
-        ),
-        images,
-        sprites,
-        PanelBackdrop::Panel,
-        |tabs| {
-            minimap::spawn_timeline_edge_handle(tabs, theme);
-            tabs.spawn((Node {
-                width: percent(100),
-                flex_grow: 1.0,
-                min_height: px(0.0),
-                display: Display::Flex,
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: px(theme.spacing.xs),
-                padding: UiRect::horizontal(px(theme.spacing.md)),
-                ..default()
-            },))
-                .with_children(|row| {
+            BackgroundColor(theme.chrome.window_bg),
+        ))
+        .with_children(|header| {
+            header
+                .spawn(Node {
+                    min_width: px(0),
+                    flex_wrap: FlexWrap::Wrap,
+                    align_items: AlignItems::Center,
+                    column_gap: px(9.0),
+                    row_gap: px(4.0),
+                    ..default()
+                })
+                .with_children(|trail| {
                     for (index, (label, surface)) in breadcrumbs.entries.iter().enumerate() {
                         if index > 0 {
-                            row.spawn((UiText::new("|"), ThemedText));
+                            trail.spawn((
+                                UiText::new("/"),
+                                TextFont {
+                                    font_size: 12.0,
+                                    ..default()
+                                },
+                                TextColor(theme.chrome.text_dim),
+                            ));
                         }
                         let selected = active_surface == Some(*surface);
-                        spawn_breadcrumb_tab(
-                            row,
-                            theme,
-                            images,
-                            sprites,
-                            label,
-                            selected,
-                            *surface,
-                        );
+                        trail
+                            .spawn(musaic_button(
+                                Node {
+                                    min_height: px(22.0),
+                                    align_items: AlignItems::Center,
+                                    padding: UiRect::axes(px(2.0), px(2.0)),
+                                    ..default()
+                                },
+                                InspectorButtonAction(EditorCommand::NavigateToSurface {
+                                    surface: *surface,
+                                }),
+                                label,
+                            ))
+                            .insert((
+                                TextFont {
+                                    font_size: 12.0,
+                                    ..default()
+                                },
+                                TextColor(if selected {
+                                    theme.chrome.text_main
+                                } else {
+                                    theme.chrome.text_dim
+                                }),
+                            ))
+                            .observe(on_inspector_button_activated);
                     }
                 });
-        },
-    );
+            header.spawn((
+                UiText::new("Tessera"),
+                TextFont {
+                    font_size: 12.0,
+                    ..default()
+                },
+                TextColor(theme.chrome.text_dim),
+            ));
+        });
 }
 
-fn spawn_breadcrumb_tab(
-    tabs: &mut ChildSpawnerCommands<'_>,
-    theme: &MusaicUiTheme,
-    images: &Assets<Image>,
-    sprites: Option<&UiSpriteAssets>,
-    label: &str,
-    selected: bool,
-    surface: BoardSurfaceId,
-) {
-    let chip = Node {
-        min_width: px(56.0),
-        height: px(26.0),
-        flex_shrink: 0.0,
-        display: Display::Flex,
-        justify_content: JustifyContent::Center,
-        align_items: AlignItems::Center,
-        padding: UiRect::horizontal(px(theme.spacing.md)),
-        position_type: PositionType::Relative,
-        ..default()
-    };
-
-    // `breadcrumb_slot.png` marks the *active* tab only; its light fill needs
-    // dark label text (ThemedText would render white-on-white).
-    if selected && let Some(sprites) = sprites {
-        tabs.spawn(chip).with_children(|chip_root| {
-            ui_sprites::spawn_breadcrumb_chip_background(chip_root, images, sprites);
-            chip_root
-                .spawn((
-                    Node {
-                        width: percent(100),
-                        height: percent(100),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    MusaicClickable,
-                    Pickable::default(),
-                    InspectorButtonAction(EditorCommand::NavigateToSurface { surface }),
-                    UiText::new(label.to_string()),
-                    TextColor(theme.chrome.crumb_active_text),
-                ))
-                .observe(on_inspector_button_activated);
+pub(crate) fn spawn_shell_footer(parent: &mut ChildSpawnerCommands<'_>, theme: &MusaicUiTheme) {
+    parent
+        .spawn((
+            Node {
+                width: percent(100),
+                flex_shrink: 0.0,
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(px(22), px(7)),
+                border: UiRect::top(px(1)),
+                row_gap: px(4),
+                ..default()
+            },
+            BackgroundColor(theme.chrome.panel_inset),
+            BorderColor::all(theme.chrome.border),
+        ))
+        .with_children(|footer| {
+            footer
+                .spawn(Node {
+                    width: percent(100),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::SpaceBetween,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: px(14),
+                    row_gap: px(4),
+                    ..default()
+                })
+                .with_children(|messages| {
+                    messages.spawn((
+                        crate::infrastructure::ui::keyboard_help::KeyboardStatus,
+                        UiText::new("Standard · Navigate · F1 keyboard help"),
+                        TextFont {
+                            font_size: 11.0,
+                            ..default()
+                        },
+                        TextColor(theme.chrome.text_dim),
+                    ));
+                    messages
+                        .spawn(Node {
+                            align_items: AlignItems::Center,
+                            column_gap: px(16),
+                            row_gap: px(4),
+                            flex_wrap: FlexWrap::Wrap,
+                            ..default()
+                        })
+                        .with_children(|status| {
+                            crate::infrastructure::ui::diagnostics_panel::spawn_playback_status(
+                                status, theme,
+                            );
+                            status.spawn((
+                                MenuClockLabel,
+                                UiText::new("Cycle 1"),
+                                TextFont {
+                                    font_size: 11.0,
+                                    ..default()
+                                },
+                                TextColor(theme.chrome.text_dim),
+                            ));
+                            status.spawn((
+                                MenuAudioLabel,
+                                UiText::new("Audio starting"),
+                                TextFont {
+                                    font_size: 11.0,
+                                    ..default()
+                                },
+                                TextColor(theme.chrome.text_dim),
+                            ));
+                        });
+                });
+            // Keep actionable audio controls at the bottom. Focus/status text can
+            // wrap above without moving a pressed button before its release.
+            crate::infrastructure::ui::audio_meter::spawn(footer, theme);
         });
-        return;
-    }
-
-    tabs.spawn((
-        musaic_button(
-            chip,
-            InspectorButtonAction(EditorCommand::NavigateToSurface { surface }),
-            label.to_string(),
-        ),
-        if selected {
-            BackgroundColor(theme.chrome.crumb_selected_bg)
-        } else {
-            BackgroundColor(Color::NONE)
-        },
-    ))
-    .observe(on_inspector_button_activated);
 }

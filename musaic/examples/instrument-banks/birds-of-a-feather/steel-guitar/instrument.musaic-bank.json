@@ -1,0 +1,68 @@
+{
+  "variants": [
+    {
+      "path": "Steel guitar - zone 012.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 60.76,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 48649,
+          "end_frame": 57664
+        }
+      },
+      "pitch_zone": {
+        "low": 61.0,
+        "high": 62.0
+      }
+    },
+    {
+      "path": "Steel guitar - zone 019.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 72.67999999999999,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 52582,
+          "end_frame": 63360
+        }
+      },
+      "pitch_zone": {
+        "low": 73.0,
+        "high": 74.0
+      }
+    },
+    {
+      "path": "Steel guitar - zone 016.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 67.66999999999999,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 36929,
+          "end_frame": 47232
+        }
+      },
+      "pitch_zone": {
+        "low": 68.0,
+        "high": 69.0
+      }
+    },
+    {
+      "path": "Steel guitar - zone 022.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 77.58,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 42358,
+          "end_frame": 53120
+        }
+      },
+      "pitch_zone": {
+        "low": 79.0,
+        "high": 83.0
+      }
+    }
+  ]
+}

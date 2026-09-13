@@ -147,6 +147,43 @@ pub enum SpatialMotion {
 }
 
 impl SpatialMotion {
+    /// Moves the trajectory's local clock to an arrangement occurrence.
+    pub(crate) fn shifted_time(self, offset: Rational) -> Self {
+        let shift = |signal: Signal| signal.with_phase(signal.phase() - signal.rate() * offset);
+        match self {
+            Self::Static(_) => self,
+            Self::Orbit {
+                center,
+                radius,
+                rate,
+                phase,
+            } => Self::Orbit {
+                center,
+                radius,
+                rate,
+                phase: phase - rate * offset,
+            },
+            Self::Signal3 { x, y, z } => Self::Signal3 {
+                x: shift(x),
+                y: shift(y),
+                z: shift(z),
+            },
+            Self::Linear { start, end } => {
+                let axis = |from: Coord, to: Coord| {
+                    shift(
+                        Signal::saw()
+                            .with_depth((to.value() - from.value()) * 0.5)
+                            .with_bias((to.value() + from.value()) * 0.5),
+                    )
+                };
+                Self::Signal3 {
+                    x: axis(start.x, end.x),
+                    y: axis(start.y, end.y),
+                    z: axis(start.z, end.z),
+                }
+            }
+        }
+    }
     /// A static motion fixed at the lattice origin.
     pub const ORIGIN: Self = Self::Static(Point3::ORIGIN);
 

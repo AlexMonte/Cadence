@@ -23,10 +23,28 @@ pub struct BoardPickHit {
 
 #[derive(Clone, Debug)]
 pub enum BoardPickTargetKind {
-    Slot { slot: BoardSlot },
-    StackInsert { index: StackIndex },
-    BoardTile { tile_id: NodeId },
-    StackTile { tile_id: NodeId },
-    Connection { from: NodeId, to: NodeId },
-    PortSide { tile_id: NodeId, side: SpatialSide },
+    Slot {
+        slot: BoardSlot,
+    },
+    StackInsert {
+        index: StackIndex,
+    },
+    BoardTile {
+        tile_id: NodeId,
+    },
+    StackTile {
+        tile_id: NodeId,
+    },
+    /// Minimap / projection pick of a stacked atom compound (focuses primary).
+    AtomCompound {
+        primary_node: NodeId,
+    },
+    Connection {
+        from: NodeId,
+        to: NodeId,
+    },
+    PortSide {
+        tile_id: NodeId,
+        side: SpatialSide,
+    },
 }

@@ -1,10 +1,9 @@
 use musaic::domain::board::BoardSlot;
 use musaic::domain::document::{AtomValue, ContainerKind, NoteName};
 use musaic::domain::document::{
-    MusaicDocument, PlacementAddress, StackIndex, TileSpawnKind, export_document_to_board,
-    finish_board_export, hydrate_board_from_document,
+    MusaicDocument, PlacementAddress, StackIndex, TileSpawnKind, bind_tiles,
+    export_document_program,
 };
-use tessera::bevy::TesseraBoard;
 use tessera::prelude::TesseraCompiler;
 
 #[test]
@@ -15,7 +14,7 @@ fn bpm_defaults_to_120() {
 
 #[test]
 fn export_is_idempotent_for_sequence_and_output() {
-    let mut document = build_sequence_output_document();
+    let document = build_sequence_output_document();
     let first = compile_exported_ir(&document);
     let second = compile_exported_ir(&document);
     assert_eq!(first.outputs.len(), second.outputs.len());
@@ -33,19 +32,18 @@ fn connections_survive_board_reexport() {
         .collect();
     assert_eq!(nodes.len(), 2);
 
-    let mut board = TesseraBoard::new();
-    hydrate_board_from_document(&mut board, &document).expect("export");
-    musaic::domain::document::bind_tiles_on_board(
-        &mut board,
+    let mut program = export_document_program(&document).expect("export");
+    bind_tiles(
+        &mut program,
         &nodes[0],
         &nodes[1],
         tessera::prelude::SpatialSide::East,
     )
     .expect("bind");
-    document.tessera.authored_program = board.authored_program();
+    document.replace_connections_from(&program);
 
-    hydrate_board_from_document(&mut board, &document).expect("re-export");
-    let binding_count = board.authored_program().root_surface.bindings.len();
+    let reexported = export_document_program(&document).expect("re-export");
+    let binding_count = reexported.root_surface.bindings.len();
     assert!(binding_count >= 1, "expected output bindings on board");
 }
 
@@ -81,8 +79,8 @@ fn build_sequence_output_document() -> MusaicDocument {
         .insert_tile(
             &mut document.surfaces,
             root,
-            // 2×2 footprints: sequence at (0,0) occupies through (1,1); east neighbor anchors at (2,0).
-            PlacementAddress::BoardSlot(BoardSlot::new(2, 0)),
+            // The 5×1 sequence fills columns 0–4; its east neighbor begins at column 5.
+            PlacementAddress::BoardSlot(BoardSlot::new(5, 0)),
             TileSpawnKind::Output {
                 name: "main".into(),
             },
@@ -92,10 +90,9 @@ fn build_sequence_output_document() -> MusaicDocument {
 }
 
 fn compile_exported_ir(document: &MusaicDocument) -> tessera::prelude::PatternIr {
-    let export = export_document_to_board(document).expect("export");
-    let program = finish_board_export(export);
-    let (_, _, report) = TesseraCompiler::new()
-        .compile_authored_pipeline(&program)
+    let program = export_document_program(document).expect("export");
+    let report = TesseraCompiler::new()
+        .compile_authored(&program)
         .expect("compile");
     report.ir
 }

@@ -1,0 +1,12 @@
+{
+  "variants": [
+    {
+      "path": "Linn hi-hat.wav",
+      "bank": "LinnDrum",
+      "hat_choke": true,
+      "options": {
+        "root_pitch": 36
+      }
+    }
+  ]
+}

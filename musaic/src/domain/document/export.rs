@@ -15,14 +15,12 @@ use super::graph::{
 };
 use crate::domain::transform::transform_kind_from_prototype;
 
-pub struct DocumentBoardExport {
+struct DocumentBoardExport {
     pub board: Board,
     pub nested_containers: BTreeMap<ContainerId, Container>,
 }
 
-pub fn export_document_to_board(
-    document: &MusaicDocument,
-) -> Result<DocumentBoardExport, BoardError> {
+fn export_document_to_board(document: &MusaicDocument) -> Result<DocumentBoardExport, BoardError> {
     let mut board = Board::new();
     let mut nested_containers = BTreeMap::new();
     let root = document.root_surface;
@@ -54,12 +52,72 @@ pub fn export_document_to_board(
     })
 }
 
-pub fn finish_board_export(
-    export: DocumentBoardExport,
-) -> tessera::prelude::AuthoredTesseraProgram {
+fn finish_board_export(export: DocumentBoardExport) -> tessera::prelude::AuthoredTesseraProgram {
     let mut program = export.board.finish();
     program.containers.extend(export.nested_containers);
     program
+}
+
+/// Derives Tessera's complete authored input from the canonical document.
+pub fn export_document_program(
+    document: &MusaicDocument,
+) -> Result<tessera::prelude::AuthoredTesseraProgram, BoardError> {
+    let mut program = finish_board_export(export_document_to_board(document)?);
+    for (node, bindings) in &document.connections.bindings {
+        program
+            .root_surface
+            .bindings
+            .insert(node.clone(), bindings.clone());
+    }
+    program.root_surface.explicit_relations = document.connections.explicit_relations.clone();
+    for (id, node) in &mut program.root_surface.nodes {
+        match (node, document.graph.node(id).map(|node| &node.kind)) {
+            (
+                tessera::prelude::RootSurfaceNodeKind::Output(output),
+                Some(DocumentNodeKind::Output(authored)),
+            ) => output.label = Some(authored.name.clone()),
+            (
+                tessera::prelude::RootSurfaceNodeKind::Transform(transform),
+                Some(DocumentNodeKind::Arrangement(arrangement)),
+            ) => {
+                use tessera::prelude::{FlowComposer, FlowRef};
+                transform.signature.input_sockets.clear();
+                transform.sequence = arrangement
+                    .arrangement
+                    .segments
+                    .iter()
+                    .filter_map(|segment| match &segment.composer {
+                        FlowComposer::Ref(
+                            FlowRef::Container { node }
+                            | FlowRef::Transform { node }
+                            | FlowRef::Arrangement { node },
+                        ) => Some((node.clone(), segment.duration, 1)),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(bindings) = program.root_surface.bindings.get_mut(id) {
+                    bindings.inputs.clear();
+                }
+            }
+            (
+                tessera::prelude::RootSurfaceNodeKind::Transform(transform),
+                Some(DocumentNodeKind::TrickInstance(instance)),
+            ) => {
+                if let Some(definition) = document.tricks.get(&instance.prototype.0) {
+                    transform.reference = Some(definition.source.clone());
+                    transform.argument = definition.input.clone();
+                    if definition.input.is_none() {
+                        transform.signature.input_sockets.clear();
+                        if let Some(bindings) = program.root_surface.bindings.get_mut(id) {
+                            bindings.inputs.clear();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(program)
 }
 
 fn place_root_node(
@@ -83,6 +141,9 @@ fn place_root_node(
                 ContainerKind::Sequence => {
                     let _ = slot_builder.sequence(stack)?;
                 }
+                ContainerKind::Arrangement => {
+                    let _ = slot_builder.arrangement(stack)?;
+                }
                 ContainerKind::Alternate => {
                     let _ = slot_builder.alternate(stack)?;
                 }
@@ -98,6 +159,20 @@ fn place_root_node(
                 .footprint(footprint)
                 .output()?;
         }
+        DocumentNodeKind::FlowControl(control) => {
+            board
+                .at(slot.x, slot.y)
+                .named(name)
+                .footprint(footprint)
+                .flow_control_node(control.clone())?;
+        }
+        DocumentNodeKind::Sound(_) => {
+            board
+                .at(slot.x, slot.y)
+                .named(name)
+                .footprint(footprint)
+                .transform(tessera::prelude::TransformKind::Instrument)?;
+        }
         DocumentNodeKind::TrickInstance(trick) => {
             let Some(kind) = transform_kind_from_prototype(trick.prototype) else {
                 return Err(BoardError::UnknownTile);
@@ -108,9 +183,22 @@ fn place_root_node(
                 .footprint(footprint)
                 .transform(kind)?;
         }
-        DocumentNodeKind::Tile(_)
-        | DocumentNodeKind::Atom(_)
-        | DocumentNodeKind::Arrangement(_) => {}
+        DocumentNodeKind::Atom(atom) => {
+            if let Some(value) = atom.atom.numeric_rational() {
+                board
+                    .at(slot.x, slot.y)
+                    .named(name)
+                    .footprint(footprint)
+                    .scalar(value)?;
+            }
+        }
+        DocumentNodeKind::Arrangement(_) => {
+            board
+                .at(slot.x, slot.y)
+                .named(name)
+                .transform(tessera::prelude::TransformKind::Trick)?;
+        }
+        DocumentNodeKind::Tile(_) => {}
     }
     Ok(())
 }
@@ -210,17 +298,18 @@ pub fn export_container_stack_excluding(
 
 fn export_stack_from_nodes(
     graph: &DocumentGraph,
-    _container_node: &DocumentNode,
+    container_node: &DocumentNode,
     stack_nodes: &[(StackIndex, &DocumentNode)],
     nested: &mut BTreeMap<ContainerId, Container>,
 ) -> Vec<ContainerSurfaceTile> {
-    let mut stack = SequenceStack::new();
+    let mut stack = Vec::new();
+    let mut source_nodes = BTreeMap::new();
     let mut next_stack_index = 0usize;
     let mut index = 0;
     while index < stack_nodes.len() {
         let (stack_index, node) = &stack_nodes[index];
         while next_stack_index < stack_index.0 {
-            stack = stack.push(ContainerSurfaceTile::Atom(AtomTile::Rest));
+            stack.push(ContainerSurfaceTile::Atom(AtomTile::Rest));
             next_stack_index += 1;
         }
         match &node.kind {
@@ -229,7 +318,8 @@ fn export_stack_from_nodes(
                     atom_tiles_from_stack(&stack_nodes[index..], &atom_node.atom)
                 {
                     for tile in tiles {
-                        stack = stack.push(tile);
+                        source_nodes.insert(stack.len(), node.id.clone());
+                        stack.push(tile);
                     }
                     index += consumed;
                     next_stack_index = stack_index.0 + consumed;
@@ -238,17 +328,9 @@ fn export_stack_from_nodes(
             }
             DocumentNodeKind::Container(container) => {
                 let container_id = ContainerId::new(node.id.0.clone());
-                let inner_stack =
-                    export_container_stack(graph, node, container.local_surface, nested);
-                nested.insert(
-                    container_id.clone(),
-                    Container {
-                        kind: map_container_kind_for_document(container.kind),
-                        axis: ContainerAxis::Time,
-                        stack: inner_stack,
-                    },
-                );
-                stack = stack.push(ContainerSurfaceTile::NestedContainer(container_id));
+                export_container_stack(graph, node, container.local_surface, nested);
+                source_nodes.insert(stack.len(), node.id.clone());
+                stack.push(ContainerSurfaceTile::NestedContainer(container_id));
                 next_stack_index = stack_index.0 + 1;
             }
             _ => {}
@@ -256,7 +338,18 @@ fn export_stack_from_nodes(
         index += 1;
     }
 
-    stack.build()
+    if let DocumentNodeKind::Container(container) = &container_node.kind {
+        nested.insert(
+            ContainerId::new(container_node.id.0.clone()),
+            Container {
+                kind: map_container_kind_for_document(container.kind),
+                axis: ContainerAxis::Time,
+                stack: stack.clone(),
+                source_nodes,
+            },
+        );
+    }
+    stack
 }
 
 fn document_node_from_spawn(id: NodeId, tile: &TileSpawnKind) -> Option<DocumentNode> {
@@ -273,13 +366,18 @@ fn atom_tiles_from_stack(
     atom: &AtomValue,
 ) -> Option<(usize, Vec<ContainerSurfaceTile>)> {
     match atom {
-        AtomValue::NoteName(note) => {
-            let (consumed, note_atom) = compound_note_from_stack(nodes, *note);
-            Some((
-                consumed,
-                vec![ContainerSurfaceTile::Atom(AtomTile::Note(note_atom))],
-            ))
-        }
+        AtomValue::NoteName(note) => Some((
+            1,
+            vec![ContainerSurfaceTile::Atom(AtomTile::Note(NoteAtom::new(
+                note_letter(*note),
+            )))],
+        )),
+        AtomValue::DrumHit(hit) => Some((
+            1,
+            vec![ContainerSurfaceTile::Atom(AtomTile::Sound(
+                hit.code().into(),
+            ))],
+        )),
         AtomValue::Rest => Some((1, vec![ContainerSurfaceTile::Atom(AtomTile::Rest)])),
         AtomValue::Number(value) => Some((
             1,
@@ -287,46 +385,36 @@ fn atom_tiles_from_stack(
                 tessera::prelude::ScalarAtom::integer(*value as i64),
             ))],
         )),
+        AtomValue::Ratio(value) => Some((
+            1,
+            vec![ContainerSurfaceTile::Atom(AtomTile::Scalar(
+                tessera::prelude::ScalarAtom { value: *value },
+            ))],
+        )),
         AtomValue::Operator(operator) => operator_tiles_from_stack(nodes, *operator),
-        AtomValue::Octave(_) | AtomValue::Accidental(_) => None,
+        AtomValue::Modifier(modifier) => Some((
+            1,
+            vec![ContainerSurfaceTile::Atom(AtomTile::Modifier(
+                modifier.clone(),
+            ))],
+        )),
+        AtomValue::Octave(value) => Some((
+            1,
+            vec![ContainerSurfaceTile::Atom(AtomTile::Octave(*value as i64))],
+        )),
+        AtomValue::Accidental(value) => Some((
+            1,
+            vec![ContainerSurfaceTile::Atom(AtomTile::Accidental(
+                match value {
+                    super::graph::Accidental::Sharp => tessera::prelude::SignedAccidental::Sharp,
+                    super::graph::Accidental::Flat => tessera::prelude::SignedAccidental::Flat,
+                    super::graph::Accidental::Natural => {
+                        tessera::prelude::SignedAccidental::Natural
+                    }
+                },
+            ))],
+        )),
     }
-}
-
-fn compound_note_from_stack(
-    nodes: &[(StackIndex, &DocumentNode)],
-    note: NoteName,
-) -> (usize, NoteAtom) {
-    let mut note_atom = NoteAtom::new(note_letter(note));
-    let mut consumed = 1;
-
-    if let Some((
-        _,
-        DocumentNode {
-            kind: DocumentNodeKind::Atom(atom),
-            ..
-        },
-    )) = nodes.get(consumed)
-    {
-        if let AtomValue::Accidental(_accidental) = atom.atom {
-            consumed += 1;
-        }
-    }
-
-    if let Some((
-        _,
-        DocumentNode {
-            kind: DocumentNodeKind::Atom(atom),
-            ..
-        },
-    )) = nodes.get(consumed)
-    {
-        if let AtomValue::Octave(octave) = atom.atom {
-            note_atom = note_atom.with_octave(octave as i64);
-            consumed += 1;
-        }
-    }
-
-    (consumed, note_atom)
 }
 
 fn operator_tiles_from_stack(
@@ -335,6 +423,8 @@ fn operator_tiles_from_stack(
 ) -> Option<(usize, Vec<ContainerSurfaceTile>)> {
     let token = match operator {
         OperatorValue::Power => AtomOperatorToken::Replicate,
+        OperatorValue::Choice => AtomOperatorToken::Choice,
+        OperatorValue::Parallel => AtomOperatorToken::Parallel,
         OperatorValue::At => AtomOperatorToken::Elongate,
         OperatorValue::Multiply => AtomOperatorToken::Fast,
         OperatorValue::Divide => AtomOperatorToken::Slow,
@@ -345,17 +435,36 @@ fn operator_tiles_from_stack(
 
     if operator_takes_scalar_operand(operator) {
         if let Some((
-            _,
+            operand_index,
             DocumentNode {
                 kind: DocumentNodeKind::Atom(atom),
                 ..
             },
         )) = nodes.get(consumed)
         {
-            if let AtomValue::Number(value) = atom.atom {
-                tiles.push(ContainerSurfaceTile::Atom(AtomTile::Scalar(
-                    tessera::prelude::ScalarAtom::integer(value as i64),
-                )));
+            if let Some(value) = atom.atom.numeric_rational() {
+                if nodes[0].0.0.checked_add(1) != Some(operand_index.0) {
+                    return Some((consumed, tiles));
+                }
+                use tessera::prelude::AtomModifier;
+                let factor = value;
+                let modifier = match operator {
+                    OperatorValue::Choice | OperatorValue::Parallel => None,
+                    OperatorValue::At => Some(AtomModifier::Elongate(factor)),
+                    OperatorValue::Multiply => Some(AtomModifier::Fast(factor)),
+                    OperatorValue::Divide => Some(AtomModifier::Slow(factor)),
+                    OperatorValue::Power => (value.denominator == 1)
+                        .then(|| u32::try_from(value.numerator).ok())
+                        .flatten()
+                        .map(AtomModifier::Replicate),
+                };
+                if let Some(modifier) = modifier {
+                    tiles = vec![ContainerSurfaceTile::Atom(AtomTile::Modifier(modifier))];
+                } else {
+                    tiles.push(ContainerSurfaceTile::Atom(AtomTile::Scalar(
+                        tessera::prelude::ScalarAtom { value },
+                    )));
+                }
                 consumed += 1;
             }
         }
@@ -376,6 +485,7 @@ pub fn map_container_kind_for_document(kind: DocumentContainerKind) -> Container
         DocumentContainerKind::Sequence | DocumentContainerKind::Subdivision => {
             ContainerKind::Sequence
         }
+        DocumentContainerKind::Arrangement => ContainerKind::Arrangement,
         DocumentContainerKind::Alternating => ContainerKind::Alternate,
         DocumentContainerKind::Parallel => ContainerKind::Layer,
     }
@@ -384,6 +494,7 @@ pub fn map_container_kind_for_document(kind: DocumentContainerKind) -> Container
 pub fn map_tessera_container_kind_to_document(kind: ContainerKind) -> DocumentContainerKind {
     match kind {
         ContainerKind::Sequence => DocumentContainerKind::Sequence,
+        ContainerKind::Arrangement => DocumentContainerKind::Arrangement,
         ContainerKind::Alternate => DocumentContainerKind::Alternating,
         ContainerKind::Layer => DocumentContainerKind::Parallel,
     }
@@ -405,7 +516,7 @@ fn note_letter(note: NoteName) -> &'static str {
 mod tests {
     use super::*;
     use crate::domain::document::{ContainerKind, MusaicDocument, TileSpawnKind};
-    use tessera::prelude::{ContainerId, TesseraCompiler};
+    use tessera::prelude::{ContainerId, Rational, TesseraCompiler};
 
     #[test]
     fn export_sequence_and_output_compiles() {
@@ -444,17 +555,16 @@ mod tests {
             .insert_tile(
                 &mut document.surfaces,
                 root,
-                PlacementAddress::BoardSlot(BoardSlot::new(2, 0)),
+                PlacementAddress::BoardSlot(BoardSlot::new(5, 0)),
                 TileSpawnKind::Output {
                     name: "main".into(),
                 },
             )
             .unwrap();
 
-        let export = export_document_to_board(&document).expect("export should succeed");
-        let program = finish_board_export(export);
-        let (_, _, report) = TesseraCompiler::new()
-            .compile_authored_pipeline(&program)
+        let program = export_document_program(&document).expect("export should succeed");
+        let report = TesseraCompiler::new()
+            .compile_authored(&program)
             .expect("exported board should compile");
         let ir = report.ir;
         assert_eq!(ir.outputs.len(), 1);
@@ -539,35 +649,32 @@ mod tests {
             .insert_tile(
                 &mut document.surfaces,
                 root,
-                PlacementAddress::BoardSlot(BoardSlot::new(2, 0)),
+                PlacementAddress::BoardSlot(BoardSlot::new(5, 0)),
                 TileSpawnKind::Output {
                     name: "main".into(),
                 },
             )
             .unwrap();
 
-        let export = export_document_to_board(&document).expect("export should succeed");
-        let program = finish_board_export(export);
+        let program = export_document_program(&document).expect("export should succeed");
         let sequence_stack = &program
             .containers
             .get(&ContainerId::new(sequence.0.clone()))
             .expect("sequence container")
             .stack;
         assert_eq!(
-            sequence_stack[1..5],
+            sequence_stack[1..3],
             [
-                ContainerSurfaceTile::Atom(AtomTile::Operator(AtomOperatorToken::Fast)),
-                ContainerSurfaceTile::Atom(AtomTile::Scalar(
-                    tessera::prelude::ScalarAtom::integer(2)
+                ContainerSurfaceTile::Atom(AtomTile::Modifier(
+                    tessera::prelude::AtomModifier::Fast(Rational::from_integer(2))
                 )),
-                ContainerSurfaceTile::Atom(AtomTile::Operator(AtomOperatorToken::Slow)),
-                ContainerSurfaceTile::Atom(AtomTile::Scalar(
-                    tessera::prelude::ScalarAtom::integer(3)
+                ContainerSurfaceTile::Atom(AtomTile::Modifier(
+                    tessera::prelude::AtomModifier::Slow(Rational::from_integer(3))
                 )),
             ]
         );
         TesseraCompiler::new()
-            .compile_authored_pipeline(&program)
+            .compile_authored(&program)
             .expect("fast/slow operators should compile");
     }
 }

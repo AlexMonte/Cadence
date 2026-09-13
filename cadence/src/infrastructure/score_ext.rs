@@ -69,16 +69,17 @@ pub fn with_controls(source: Score, controls: ControlScore) -> Score {
     Score::with_controls(source, controls)
 }
 
-/// Attaches a continuous [`Signal`] to one control lane of `source`.
+/// Attaches a [`Signal`] to one control lane of `source`.
 ///
 /// This builds a one-cycle signal control track for `key` and applies it via
-/// [`Score::with_controls`], so the signal is carried unchanged through
-/// projection and evaluated per audio frame on the audio thread.
+/// [`Score::with_controls`]. Velocity samples the signal at each exact note
+/// onset; continuous controls evaluate it during audio rendering.
 ///
 /// # Panics
 ///
-/// Panics if `key` does not accept a signal value (the modulatable lanes are
-/// `Gain`, `PlaybackRate`, and `LowPassCutoff`).
+/// Panics if the signal range is invalid for `key`, or if `key` does not accept
+/// signals. Supported lanes are `Velocity`, `Gain`, `PlaybackRate`,
+/// `LowPassCutoff`, and `Transpose`.
 #[must_use]
 pub fn with_signal(source: Score, key: ControlKey, signal: Signal) -> Score {
     let track = ControlTrack::from_signal(key, signal)

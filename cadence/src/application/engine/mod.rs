@@ -81,6 +81,24 @@ where
         Ok(())
     }
 
+    /// Prepares the complete lookahead for a frame-timed performer.
+    /// Unlike `tick`, the performer must enqueue future work, never play it immediately.
+    pub fn tick_ahead(
+        &mut self,
+        now: ClockTime,
+        look_ahead: Time,
+    ) -> Result<(), ControlModelError> {
+        if self.status != EngineStatus::Playing {
+            return Ok(());
+        }
+        self.clock.reset_at(now);
+        self.scheduler
+            .schedule_due_windows(&self.clock, &mut self.event_sink)?;
+        self.event_sink
+            .process_due(now + look_ahead, &self.performer);
+        Ok(())
+    }
+
     /// Applies a high-level engine command.
     pub fn command(&mut self, command: EngineCommand) {
         match command {

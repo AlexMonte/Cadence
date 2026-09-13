@@ -69,7 +69,9 @@ pub fn visible_kind_for_spawn(tile: &TileSpawnKind) -> VisibleNodeKind {
         TileSpawnKind::Atom { .. } => VisibleNodeKind::Atom,
         TileSpawnKind::Container { .. } => VisibleNodeKind::Container,
         TileSpawnKind::Output { .. } => VisibleNodeKind::Output,
-        TileSpawnKind::TrickInstance { .. } => VisibleNodeKind::TrickInstance,
+        TileSpawnKind::Sound { .. }
+        | TileSpawnKind::TrickInstance { .. }
+        | TileSpawnKind::FlowControl { .. } => VisibleNodeKind::TrickInstance,
         TileSpawnKind::Tile { .. } => VisibleNodeKind::Tile,
     }
 }
@@ -200,6 +202,25 @@ pub fn spawn_board_tile_child(
         spec,
         mode,
     )?;
+    Some(spawn_resolved_board_tile_child(
+        parent,
+        visual,
+        extra,
+        |_, _| {},
+    ))
+}
+
+/// Spawn a previously [`resolve_board_tile`]-d visual under `parent`.
+///
+/// Callers that need mesh/material assets in the finish hook must resolve
+/// first so those borrows end before the hook runs (placed tiles + icons/ports).
+pub fn spawn_resolved_board_tile_child(
+    parent: &mut ChildSpawnerCommands<'_>,
+    visual: ResolvedBoardTile,
+    extra: impl Bundle,
+    finish: impl FnOnce(&mut EntityCommands<'_>, BoardTileVisualSource),
+) -> Entity {
+    let source = visual.source;
     let mut entity = parent.spawn((
         extra,
         Mesh3d(visual.mesh),
@@ -207,10 +228,11 @@ pub fn spawn_board_tile_child(
         SCENE_NODE_VISIBILITY,
         visual.transform,
     ));
-    if visual.source == BoardTileVisualSource::Ortho {
+    if source == BoardTileVisualSource::Ortho {
         entity.insert(TransformTileBase);
     }
-    Some(entity.id())
+    finish(&mut entity, source);
+    entity.id()
 }
 
 fn material_for_mode(

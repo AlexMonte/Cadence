@@ -1,0 +1,52 @@
+{
+  "variants": [
+    {
+      "path": "Electric piano - zone 002.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 47.8,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 6310,
+          "end_frame": 6647
+        }
+      },
+      "pitch_zone": {
+        "low": 46.0,
+        "high": 52.0
+      }
+    },
+    {
+      "path": "Electric piano - zone 003.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 54.86,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 6613,
+          "end_frame": 6837
+        }
+      },
+      "pitch_zone": {
+        "low": 53.0,
+        "high": 60.0
+      }
+    },
+    {
+      "path": "Electric piano - zone 005.audio",
+      "sample_rate": 48000,
+      "options": {
+        "root_pitch": 90.0,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 50,
+          "end_frame": 82
+        }
+      },
+      "pitch_zone": {
+        "low": 61.0,
+        "high": 68.0
+      }
+    }
+  ]
+}

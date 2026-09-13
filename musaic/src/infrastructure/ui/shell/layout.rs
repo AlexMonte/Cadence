@@ -1,9 +1,9 @@
-//! Shell layout: UI root, main row (timeline band, board region, inspector
-//! column), board viewport, and edge-drag panel resizing.
+//! Shell layout: a left board/preview workspace beside the full-height inspector,
+//! with breadcrumbs above the board and edge-drag panel resizing.
 //!
 //! [`WorkspaceLayoutKind`] selects the document tree:
 //! - Compose — board + inspector only (no timeline band entity)
-//! - TimelineStacked — timeline band above board + inspector (default open)
+//! - TimelineStacked — preview below the board, within the left workspace
 
 use bevy::{
     picking::prelude::*,
@@ -13,12 +13,8 @@ use bevy::{
 use bevy_feathers::theme::ThemedText;
 
 use crate::{
-    application::board_view_settings::BoardViewSettings,
     application::command::{EditorCommand, EditorCommandBus},
-    application::editor::{
-        InspectorLayout, MinimapPanelState, TimelinePanelState, WorkspaceLayoutKind,
-    },
-    application::pipeline::runtime::RuntimePreviewSnapshot,
+    application::editor::{InspectorLayout, MinimapPanelState, TimelinePanelState},
     application::pipeline::scene_sync::VisibleBoardState,
     application::pipeline::ui_projection::{EditorUiProjection, MinimapPaint},
 };
@@ -51,77 +47,76 @@ pub(crate) fn spawn_main_row(
     visible: &VisibleBoardState,
     projection: &EditorUiProjection,
     layout: &InspectorLayout,
-    preview_snapshot: &RuntimePreviewSnapshot,
     board_camera: Option<Entity>,
-    palette_camera: Option<Entity>,
     minimap_width: f32,
     timeline_height: f32,
     host: &mut InspectorPanelHost,
     sprites: Option<&UiSpriteAssets>,
     images: &Assets<Image>,
-    view_settings: BoardViewSettings,
 ) {
-    let gap = theme.spacing.panel_gap;
     root.spawn((
         UiShellMain,
         Node {
             width: percent(100),
             flex_grow: 1.0,
+            flex_basis: px(0),
             min_height: px(0),
             display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            row_gap: px(gap),
+            flex_direction: FlexDirection::Row,
             ..default()
         },
     ))
     .with_children(|main| {
-        match projection.layout_kind {
-            WorkspaceLayoutKind::ComposeBoardInspector => {
-                // Compose contract: no timeline band in the tree.
-            }
-            WorkspaceLayoutKind::TimelineStackedOverBoardInspector => {
-                let height = if timeline_height > 0.0 {
-                    timeline_height
-                } else {
-                    TimelinePanelState::DEFAULT_HEIGHT
-                };
-                spawn_timeline_band(main, theme, height, preview_snapshot, images, sprites);
-            }
-        }
-
-        main.spawn((Node {
-            width: percent(100),
+        // The board and its preview share one column. The inspector is a sibling
+        // of that whole column, so its bottom stays aligned with the workspace.
+        main.spawn(Node {
             flex_grow: 1.0,
-            display: Display::Flex,
-            flex_direction: FlexDirection::Row,
-            column_gap: px(gap),
+            flex_basis: px(0),
+            min_width: px(0),
+            height: percent(100),
             min_height: px(0),
+            flex_direction: FlexDirection::Column,
             ..default()
-        },))
-            .with_children(|row| {
-                spawn_board_region(
-                    row,
-                    theme,
-                    visible,
-                    &projection.minimap_paint,
-                    board_camera,
-                    minimap_width,
-                    sprites,
-                    images,
-                );
-                spawn_inspector_column(
-                    row,
-                    theme,
-                    layout,
-                    &projection.inspector_paint,
-                    preview_snapshot,
-                    palette_camera,
-                    host,
-                    sprites,
-                    images,
-                    view_settings,
-                );
-            });
+        })
+        .with_children(|workspace| {
+            super::breadcrumbs::spawn_board_breadcrumbs(
+                workspace,
+                theme,
+                &projection.breadcrumbs,
+                projection.active_surface,
+            );
+            spawn_board_region(
+                workspace,
+                theme,
+                visible,
+                &projection.minimap_paint,
+                board_camera,
+                minimap_width,
+                sprites,
+                images,
+            );
+            // This seam remains reachable when the preview is closed.
+            minimap::spawn_timeline_edge_handle(workspace, theme);
+            // Keep the band and its grip alive throughout opening/closing drags.
+            spawn_timeline_band(
+                workspace,
+                theme,
+                timeline_height,
+                projection,
+                images,
+                sprites,
+            );
+        });
+        spawn_inspector_column(
+            main,
+            theme,
+            layout,
+            &projection.inspector_paint,
+            host,
+            sprites,
+            images,
+            projection.view_settings,
+        );
     });
 }
 
@@ -129,7 +124,7 @@ fn spawn_timeline_band(
     parent: &mut ChildSpawnerCommands<'_>,
     theme: &MusaicUiTheme,
     height: f32,
-    preview_snapshot: &RuntimePreviewSnapshot,
+    projection: &EditorUiProjection,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
 ) {
@@ -137,23 +132,34 @@ fn spawn_timeline_band(
         parent,
         (
             UiShellTimeline,
+            super::super::keyboard_regions::KeyboardRegion(
+                super::super::keyboard_regions::RegionKind::Timing,
+            ),
+            bevy::input_focus::tab_navigation::TabIndex(-1),
             Node {
                 width: percent(100),
                 height: px(height),
                 flex_shrink: 0.0,
-                display: Display::Flex,
+                display: if height > 0.0 {
+                    Display::Flex
+                } else {
+                    Display::None
+                },
                 flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(theme.spacing.md + 2.0)),
-                row_gap: px(theme.spacing.sm),
+                padding: UiRect::axes(px(22.0), px(12.0)),
+                border: UiRect::top(px(1.0)),
+                row_gap: px(8.0),
                 overflow: Overflow::clip(),
                 position_type: PositionType::Relative,
                 ..default()
             },
-            BackgroundColor(theme.chrome.panel_bg),
+            BackgroundColor(theme.chrome.window_bg),
+            BorderColor::all(theme.chrome.border),
         ),
+        theme,
         images,
         sprites,
-        PanelBackdrop::Section,
+        PanelBackdrop::None,
         |band| {
             band.spawn((
                 timeline_view::UiTimelineContent,
@@ -168,7 +174,7 @@ fn spawn_timeline_band(
                 },
             ))
             .with_children(|content| {
-                timeline_view::spawn_timeline_content(content, theme, preview_snapshot);
+                timeline_view::spawn_timeline_content(content, theme, &projection.timeline_paint);
             });
         },
     );
@@ -184,36 +190,85 @@ fn spawn_board_region(
     sprites: Option<&UiSpriteAssets>,
     images: &Assets<Image>,
 ) {
-    // Minimap overlays the board's left side instead of occupying a sibling
-    // column, so the board viewport always spans the full region.
     spawn_shell_panel(
         parent,
         (
+            super::super::keyboard_regions::KeyboardRegion(
+                super::super::keyboard_regions::RegionKind::Board,
+            ),
             Node {
                 flex_grow: 1.0,
+                flex_basis: px(0),
                 min_width: px(0),
-                height: percent(100),
-                position_type: PositionType::Relative,
+                min_height: px(0),
+                width: percent(100),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(8.0),
+                padding: UiRect {
+                    left: px(22.0),
+                    right: px(22.0),
+                    top: px(6.0),
+                    bottom: px(18.0),
+                },
                 overflow: Overflow::clip(),
                 ..default()
             },
-            BackgroundColor(theme.chrome.panel_bg),
+            BackgroundColor(theme.chrome.window_bg),
         ),
+        theme,
         images,
         sprites,
-        PanelBackdrop::Panel,
-        |board_column| {
-            spawn_board_viewport(board_column, board_camera);
-            minimap::spawn_minimap_panel(
-                board_column,
-                theme,
-                visible,
-                minimap_paint,
-                minimap_width,
-                images,
-                sprites,
-            );
-            minimap::spawn_minimap_edge_handle(board_column, theme, minimap_width);
+        PanelBackdrop::None,
+        |board_area| {
+            board_area
+                .spawn((
+                    Node {
+                        width: percent(100),
+                        flex_grow: 1.0,
+                        flex_basis: px(0),
+                        min_width: px(0),
+                        min_height: px(0),
+                        border: UiRect::all(px(1.0)),
+                        position_type: PositionType::Relative,
+                        padding: UiRect {
+                            left: px(super::super::board_rulers::LEFT),
+                            top: px(super::super::board_rulers::TOP),
+                            ..default()
+                        },
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BorderColor::all(theme.chrome.border),
+                ))
+                .with_children(|frame| {
+                    // The marker stays on the image itself, inside the inset border,
+                    // so pointer-to-camera coordinates use the real render rectangle.
+                    spawn_board_viewport(frame, board_camera);
+                    super::super::board_rulers::spawn(frame, theme);
+                    minimap::spawn_minimap_panel(
+                        frame,
+                        theme,
+                        visible,
+                        minimap_paint,
+                        minimap_width,
+                        images,
+                        sprites,
+                    );
+                    minimap::spawn_minimap_edge_handle(frame, theme, minimap_width);
+                });
+            board_area.spawn((
+                super::super::board::detail::DetailLegend,
+                UiText::new(""),
+                TextFont {
+                    font_size: 11.0,
+                    ..default()
+                },
+                TextColor(theme.chrome.text_dim),
+                Node {
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+            ));
         },
     );
 }
@@ -255,7 +310,6 @@ fn spawn_board_viewport(column: &mut ChildSpawnerCommands<'_>, board_camera: Opt
 pub(crate) fn sync_shell_panel_sizes(
     minimap_panel: Res<'_, MinimapPanelState>,
     timeline_panel: Res<'_, TimelinePanelState>,
-    projection: Res<'_, EditorUiProjection>,
     mut panel_nodes: ParamSet<(
         Query<'_, '_, &mut Node, With<minimap::UiShellMinimap>>,
         Query<'_, '_, &mut Node, With<UiShellTimeline>>,
@@ -277,25 +331,14 @@ pub(crate) fn sync_shell_panel_sizes(
         node.left = px(minimap_width);
     }
 
-    // Timeline height only applies when the shell tree includes the band.
-    if matches!(
-        projection.layout_kind,
-        WorkspaceLayoutKind::TimelineStackedOverBoardInspector
-    ) {
-        let timeline_height = timeline_panel.visible_height().max(0.0);
-        let show = timeline_height > 0.0;
-        for mut node in panel_nodes.p1().iter_mut() {
-            node.height = px(if show {
-                timeline_height
-            } else {
-                TimelinePanelState::DEFAULT_HEIGHT
-            });
-            node.display = if show {
-                Display::Flex
-            } else {
-                Display::None
-            };
-        }
+    let height = timeline_panel.visible_height();
+    for mut node in panel_nodes.p1().iter_mut() {
+        node.height = px(height);
+        node.display = if height > 0.0 {
+            Display::Flex
+        } else {
+            Display::None
+        };
     }
 }
 
@@ -318,7 +361,7 @@ pub(crate) fn on_minimap_edge_drag(
         return;
     }
     // Minimap overlays the board's left side: drag right widens it, drag left closes it.
-    minimap.apply_drag_delta(event.delta.x);
+    minimap.apply_drag_distance(event.distance.x);
     event.propagate(false);
 }
 
@@ -336,19 +379,9 @@ pub(crate) fn on_minimap_edge_drag_end(
 pub(crate) fn on_timeline_edge_drag_start(
     mut event: On<'_, '_, Pointer<DragStart>>,
     mut timeline: ResMut<'_, TimelinePanelState>,
-    projection: Res<'_, EditorUiProjection>,
-    mut bus: MessageWriter<'_, EditorCommandBus>,
 ) {
     if event.button != PointerButton::Primary {
         return;
-    }
-    // Compose has no timeline band — enter TimelineStacked so the shell can
-    // rebuild with the region before height tracking continues.
-    if matches!(
-        projection.layout_kind,
-        WorkspaceLayoutKind::ComposeBoardInspector
-    ) {
-        bus.write(EditorCommandBus(EditorCommand::EnterTimelineMode));
     }
     timeline.begin_drag();
     event.propagate(false);
@@ -361,7 +394,7 @@ pub(crate) fn on_timeline_edge_drag(
     if event.button != PointerButton::Primary {
         return;
     }
-    timeline.apply_drag_delta(-event.delta.y);
+    timeline.apply_drag_distance(-event.distance.y);
     event.propagate(false);
 }
 

@@ -1,0 +1,10 @@
+use bevy::prelude::*;
+use load_up_macros::LoadAssetResource;
+
+#[derive(Resource, Asset, LoadAssetResource, TypePath, Clone)]
+struct BadAsset {
+    #[dependency(path = "a.png", on_fail = explode)]
+    texture: Handle<Image>,
+}
+
+fn main() {}

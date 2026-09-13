@@ -33,6 +33,7 @@ pub struct Moment {
     span: Span,
     intent: Intent,
     position: SpatialMotion,
+    value_identity: Option<crate::domain::prelude::Symbol>,
 }
 
 impl Moment {
@@ -47,6 +48,7 @@ impl Moment {
             span,
             intent,
             position: SpatialMotion::ORIGIN,
+            value_identity: None,
         }
     }
 
@@ -70,6 +72,20 @@ impl Moment {
     pub fn with_position(mut self, position: SpatialMotion) -> Self {
         self.position = position;
         self
+    }
+
+    /// Attaches a host-defined musical value key for value-based flow policies.
+    /// This is independent of lifecycle identity and the assigned sound source.
+    #[must_use]
+    pub fn with_value_identity(mut self, value: impl Into<crate::domain::prelude::Symbol>) -> Self {
+        self.value_identity = Some(value.into());
+        self
+    }
+
+    /// Returns the optional musical value key supplied by the host.
+    #[must_use]
+    pub fn value_identity(&self) -> Option<&crate::domain::prelude::Symbol> {
+        self.value_identity.as_ref()
     }
 
     /// Returns the optional stable moment identifier.

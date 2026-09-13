@@ -1,236 +1,189 @@
-# Musaic module contracts
+# Musaic architecture
 
-The registry of per-module architectural contracts. Every module section names
-its **pattern**, its **single writer**, its **public API**, and its
-**forbidden operations**. A change that violates a contract is wrong even if
-it works; extend the owning module instead.
+Musaic lets a person arrange musical tiles, hear the result, and save the
+authored project. The implementation follows that experience in one direction:
 
-**Global rule: every resource has exactly one writer system. Everything else
-submits requests (messages/commands) or reads.**
+```text
+project file
+    → MusaicDocument
+    → Tessera program
+    → PatternIr
+    → Cadence PreparedScore
+    → preview, playback, and WAV export
+```
 
-Sections are added as each module is migrated (see the module architecture
-plan). Declared exceptions are listed explicitly — anything not listed is not
-an exception.
+The document is the only editable source of truth. Everything after it is a
+derived result that can be rebuilt.
 
----
+## Crate responsibilities
 
-## Frame schedule — `MusaicSet`
+| Crate | What the user gets | What the crate owns |
+| --- | --- | --- |
+| `tessera` | Tiles have precise musical meaning | The authored tile language, spatial resolution, validation, normalization, and `PatternIr` compilation |
+| `cadence` | The music can be queried and played at exact times | Scores, exact transport time, bounded preparation, event evaluation, scheduling, voices, and audio rendering |
+| `musaic` | A complete editor | The document, commands, persistence, Tessera-to-Cadence lowering, project assets, transport, and UI |
 
-**Pattern:** Host-owned pipeline order. Kernel Bevy glue exposes nestable
-sets; Musaic places them inside `MusaicSet` so compile/tick cannot race
-bare `Update`.
+Tessera and Cadence do not depend on each other. Musaic is the only crate that
+knows both.
 
-| Stage | `MusaicSet` | Who runs |
-|-------|-------------|----------|
-| Input | `Input` | editor interaction |
-| Commands | `Commands` | `dispatch_commands` (+ staging) |
-| Document mutation | `DocumentMutation` | graph mutations after commands |
-| Compile | `Compile` | document→`TesseraBoard` → nested `TesseraSystems` → collect IR |
-| Lower | `Lower` | Pattern IR → Cadence `Score` / `ActiveScores` |
-| Runtime | `Runtime` | nested `CadenceSet::{ReplaceScores, Tick}` + transport/preview/audio pump |
-| Scene sync | `SceneSync` | `VisibleBoardState` + UI projection |
-| Render UI | `RenderUi` | shell / inspector paint |
+## Authoritative state
 
-**Compile order (same frame):**
-`sync_document_to_tessera_board` → `TesseraSystems` (authored sync →
-`compile_on_request` → tile sync) → `collect_tessera_compile_output`.
+### `domain/document`
 
-**Runtime order (same frame):**
-`CadenceSet::ReplaceScores` → `sync_transport_to_playback` →
-`CadenceSet::Tick` → transport clock readback → preview dirty/project →
-audio pump (after `Tick`).
+`MusaicProject` is the persisted aggregate. It contains the canonical
+`MusaicDocument`, project metadata, the reusable sound library, and
+project-owned samples.
 
-Nesting is configured in `MusaicPlugin` after `TesseraPlugin` /
-`PlaybackPlugin` (`CadencePlugin`) are added:
-`TesseraSystems.in_set(Compile)`, both `CadenceSet` variants
-`.in_set(Runtime)`.
+`MusaicDocument` contains the editable composition graph:
 
-**Forbidden:** scheduling Tessera compile or Cadence tick in bare `Update`
-from Musaic host code; relying on accidental plugin registration order for
-correctness.
+- the node graph and surface hierarchy;
+- each node's location and authored tile data, including each Sound tile's
+  complete sound definition;
+- spatial endpoint bindings and explicit root relations;
+- tricks, channel limits, and playback settings.
 
----
+Document constructors and edits enforce ownership, placement, endpoint, and
+reference rules. A document never needs a second board-shaped store to explain
+what it means.
 
-## Board camera — `infrastructure/ui/camera_rig.rs`
+`export_document_program(&MusaicDocument)` is the only boundary from the
+editor document to Tessera. It derives a complete `AuthoredTesseraProgram`
+without changing the document.
 
-**Pattern:** Camera rig (dolly-style): request queue → single arbitrator →
-single smoother.
+### Application resources
 
-| Role | Owner |
-|------|-------|
-| Pose truth | `BoardCameraRig` resource |
-| Only `BoardCameraRig` writer | `arbitrate_camera_rig` (`CameraRigSet::Arbitrate`) |
-| Only camera `Transform`/`Projection` writer | `smooth_camera_transform` (`CameraRigSet::Smooth`) |
-| Input vocabulary | `CameraRequest::{FrameSurface, FocusAddress, Pan, Orbit}` |
+| Resource | Purpose | Writer |
+| --- | --- | --- |
+| `MusaicProject` | Saved document, reusable sounds, and project assets | Command dispatcher |
+| `ProjectSession` | File location, save state, and recovery session | Command dispatcher |
+| `EditorSession` | Current pointer/keyboard interaction mode | Editor interaction systems |
+| `RuntimeState` | Attempted, proposed, and accepted pipeline revisions | Compile, lower, and runtime stages |
+| `VisibleBoardState` | Board read model | Scene-sync projection |
+| `EditorUiProjection` | Inspector, timeline, palette, and shell read model | UI projection |
 
-**Arbitration priority (per frame):** `FrameSurface` > `FocusAddress` >
-`Pan`/`Orbit`. A pan arriving in the same frame as a deliberate jump is
-dropped, never merged. Deliberate jumps reset `pan_offset`.
+Each resource has one writer. Other modules read it or submit a command.
 
-**Smoothing:** frame-rate-independent exponential damping
-(`1 - exp(-rate * dt)`); rates differ between `Follow` and `UserControl`
-modes. Never a fixed per-frame lerp.
+## Editing path
 
-**Producers (emit requests only):**
+### `application/editor`
 
-- `OnEnter(AppState::Editor)` — `CameraRequest::FrameSurface(OpenDocument)`
-  (never poke `BoardCameraRig` directly).
-- `board_camera_nav.rs` — pointer pan / orbit / edge scroll (screen deltas;
-  the rig converts to plane units using its own yaw, never the smoothed
-  transform).
-- `camera_rig::emit_navigation_requests` — surface changes
-  (`ActiveSurfaceChanged`), focus jumps (`EditorAttention` change), placement
-  settles (drawer drag end).
+Editor interaction translates pointer and keyboard activity into intent. Its
+session state represents one mutually exclusive mode: idle, armed, placing, or
+connecting. Cursor and picking code may observe that mode but do not mutate the
+document.
 
-**Declared read-only consumers of the smoothed transform:**
-`sync_board_grid_anchor` (grid backdrop coverage),
-`sample_board_placement_pointer` (cursor ray).
+### `application/command`
 
-**Forbidden:** writing `BoardCameraRig` or the camera `Transform` anywhere
-else; reading the smoothed `Transform` to derive *input* (feedback loop);
-camera chasing the drag ghost (`BOARD_PLACEMENT.md` invariant).
+`EditorCommand` is the write interface for durable project changes. The
+dispatcher applies a command to a candidate document, verifies the affected
+invariants, and commits the candidate atomically. A rejected edit leaves the
+document and history unchanged.
 
----
+Undo and redo store canonical document changes and their change impact. UI
+systems never construct inverse commands.
 
-## Command authority — `application/command/`
+### `application/history`
 
-**Pattern:** CQRS write side — producers emit intents; one dispatcher mutates.
+History groups one accepted user action into one entry. Replaying an entry
+reuses its recorded composition, sound, presentation, or transport impact so
+the necessary pipeline stages run again.
 
-| Role | Owner |
-|------|-------|
-| User intent vocabulary | `EditorCommand` (public) |
-| Undo vocabulary | `EditorInverse` (private; never emitted by UI) |
-| Only mutation authority | `dispatch_commands` via `CommandContext` |
-| History | `CommandHistory` + `HistoryEntry { forward, inverse, invalidation }` |
+## Compile and playback path
 
-**Public API:** `EditorCommandBus(EditorCommand)`. Producers (keyboard, picks,
-menu, inspector, drawer) write the bus only — they do not touch document,
-attention, selection, session, tool, view settings, project open/save, or
-project replacement.
+Musaic orders all editor work with `MusaicSet`:
 
-**Execution split:**
+| Stage | Responsibility |
+| --- | --- |
+| `Input` | Read interaction and emit editor commands |
+| `Commands` | Validate and commit document changes |
+| `DocumentMutation` | Finish document-owned mutation work |
+| `Compile` | Export the document and ask Tessera for `PatternIr` |
+| `Lower` | Translate `PatternIr` into Cadence scores and prepare them |
+| `Runtime` | Publish accepted scores, advance transport, and render audio |
+| `SceneSync` | Derive board and UI read models |
+| `RenderUi` | Reconcile Bevy entities with those read models |
 
-- Durable / attention commands → `execute_command` → transactions
-- Undo inverses → `execute_inverse` (history path only)
-- Session/tool/panel/project/view/save arms → dispatcher early match (still the
-  single writer; not free-form resource pokes from UI)
+### `application/pipeline`
 
-**Undo contract:** redo/undo applies the **stored**
-`HistoryEntry.invalidation`, not a recomputed inverse result.
+Compile calls Tessera directly. Tessera resolves the authored spatial program,
+validates its shape, normalizes it once, and returns `PatternIr`.
 
-**Declared exceptions (UI-local chrome, not editor semantics):**
+Lowering maps each `PatternIr` operation to the matching Cadence score
+operation. Finite source events become `Score::events(Vec<Moment>)`.
+Recursive structure stays recursive until Cadence evaluates a requested time
+window.
 
-- Minimap / timeline edge-drag panel width (`shell/layout.rs`)
-- Drawer override clear on surface change (`interaction/plugin.rs`)
+Cadence prepares the complete lowered score once. A `PreparedScore` proves
+that its structure and bounded workload are safe for the supported query
+window. Preview, live playback, and export all consume that prepared source.
 
-**Forbidden:** mutating `MusaicProject` / `RuntimeState` / `ProjectSession` /
-`EditorAttention` / `SelectionState` / `EditorSession` / `BoardViewSettings` /
-`CommandHistory` from UI observers or menu systems; putting undo payloads on
-`EditorCommand`; ignoring stored invalidation on undo/redo.
+`RuntimeState` records exact revisions:
 
----
+- attempted: the document revision most recently compiled;
+- proposed: a valid prepared result waiting to become audible;
+- accepted: the result currently driving playback and visual feedback.
 
-## Document vs pipeline resources
+If compilation or preparation fails, diagnostics describe the attempted
+revision while the accepted revision continues playing.
 
-`MusaicProject` no longer bundles compile/runtime state. Each resource has a
-clear writer role (no silent multi-writer on one bag of fields).
+## Persistence and assets
 
-| Resource | Contents | Writer |
-|----------|----------|--------|
-| `MusaicProject` | `document` + `metadata` (incl. save dirty / file path) | `dispatch_commands` only |
-| `ProjectSession` | recent paths, `last_saved_path` | `dispatch_commands` only |
-| `RuntimeState` dirty flags | `ProjectDirty` (tessera/lower/scene/runtime/…) | **Set** by `dispatch_commands` via `apply_invalidation` / project replace; **cleared** by Compile / Lower / Runtime / SceneSync |
-| `RuntimeState` compiled IR | `compiled: Option<CompiledProject>` | Compile + Lower only |
+### `adapter/persistence`
 
-Pipeline stages (`MusaicSet::{Compile, Lower, Runtime, SceneSync}`) may
-`ResMut<RuntimeState>` and may **read** `MusaicProject`. They must not
-`ResMut<MusaicProject>`.
+Persistence reads one private project DTO with required fields and rejects
+unknown fields. Construction validates the full document before publishing it.
+An invalid file produces a normal project-read error and cannot partially
+replace the open project.
 
-Save/open: menu and unsaved-dialog emit `EditorCommand::{SaveProject,
-SaveProjectAs, OpenProject, …}` only. Persistence adapters perform I/O and
-return paths; the dispatcher applies metadata/`ProjectSession` updates.
+Saving serializes the canonical document directly. Project audio is copied into
+the adjacent `assets/samples` directory with stable sample identities. Atomic
+writes and recovery checkpoints protect the current file without changing the
+document model.
 
----
+Preferences and exported keymaps each have one schema. Invalid stored
+preferences reset to defaults with one warning. An invalid explicit keymap
+import leaves the active keymap untouched.
 
-## Session statechart — `application/editor/interaction/session.rs`
+### `adapter/audio`
 
-**Pattern:** Modal statechart — mutually exclusive authoring modes with
-`Result` transitions. Illegal overlaps are unrepresentable.
+The audio adapter resolves project-owned samples and connects prepared Cadence
+scores to the platform audio device. It contains device and asset plumbing, not
+musical authoring rules.
 
-| Role | Owner |
-|------|-------|
-| Mode truth | `EditorSession.mode: EditorMode` |
-| Mode writers | Session systems (`MutateState`) + command dispatcher arms |
-| Transition API | `arm` / `begin_placing` / `cancel` / `start_connection` / `abort_connection` |
+## Presentation
 
-**Modes:** `Idle | Armed { tile } | Placing(PlacementSession) | Connecting { source }`
+### `application/pipeline/scene_sync`
 
-Connect tool is not a separate resource — `Connecting` *is* the connect tool
-(`EditorToolState` deleted).
+Scene sync projects `MusaicDocument` directly into `VisibleBoardState`.
+Ports, cables, tile faces, nested surfaces, and focus addresses are derived from
+the same committed document revision.
 
-**Outside the enum (by design):**
-- `pending_drawer_press` — pre-mode latch while a drawer tile is held
-- `last_placement_address` — camera settle side-channel after commit
+### `infrastructure/ui`
 
-**Readers (never write mode):** cursor FSM, pick classify, keyboard Esc,
-board preview, inspector palette highlight, camera edge-scroll gate.
+UI modules paint read models and emit commands:
 
-**Attention validation** (`workspace/types.rs`): `EditorAttention::focus`
-requires `DocumentQueries` and rejects missing nodes/surfaces and occupied
-"empty" slots. `set_active_board_unchecked` is deleted; `enter_compose` stays.
+- `board` reconciles keyed tile and cable entities;
+- `controls` presents the contextual tile library;
+- `inspector` edits the focused document concept;
+- `shell` owns application chrome and dialogs;
+- `timeline_view` displays evaluated Cadence events;
+- `camera_rig` owns framing, pan, orbit, and smoothing;
+- `widgets` provides shared interaction components.
 
-**Forbidden:** setting `armed_tile` and `placement` independently; a separate
-Connect tool flag; cursor writing session mode; blind `focus = …` in
-production paths (tests may assign the field when testing readers only).
+Entity construction includes the transform and visibility components required
+by Bevy. Keyed reconciliation creates, updates, and removes rendered entities;
+it does not repair document state.
 
----
+## Invariant boundaries
 
-## Root-board connections
+Checks run where invalid state could first enter:
 
-Connection legality, executable bindings, automatic placement wiring, and the
-connect-mode preview are specified in [CONNECTIONS.md](CONNECTIONS.md).
+- file shape and full-document integrity during import;
+- placement, ownership, connection, and reference rules at command commit;
+- Tessera language rules during compilation;
+- Cadence workload bounds during score preparation;
+- time-dependent source evaluation immediately before runtime publication.
 
----
-
-## UI projection — `application/pipeline/ui_projection.rs`
-
-**Pattern:** Single post-`SceneSync` read model + region dirty flags. One writer
-computes identity-aware fingerprints; region systems consume their flag only.
-
-| Role | Owner |
-|------|-------|
-| Read-model truth | `EditorUiProjection` |
-| Region dirty flags | `UiDirty` |
-| Only writer | `compute_ui_projection_system` (after `rebuild_visible_board_state`, in `MusaicSet::SceneSync`) |
-| Enter-editor reset | `reset_ui_projection` in `ui_projection.rs` (OnEnter Editor; scheduled from `scene_sync`) |
-| Pure diff | `diff_ui_regions(prev, next) → UiDirty` |
-| Inspector layout | `derive_inspector_layout` called **only** inside the projection writer |
-
-**Identity rules (no same-count staleness):**
-
-| Region | Diff key |
-|--------|----------|
-| Timeline | `preview_event_ids` set (+ revision/surface) |
-| Minimap | `board_occupancy_hash` + `connection_hash` + `focused_slot` |
-| Inspector | full `InspectorLayout` + `selection_ids` + focus |
-| Diagnostics | `diagnostics_summary` string — never `shell_structure` |
-| Palette | context + armed tile + options content hash |
-| Shell structure | surface / `layout_kind` / sprites-ready |
-| Shell layout | panel open/dims chrome only |
-
-Board 3D is **not** a `UiDirty` flag. `sync_board_3d_scene` owns keyed
-`NodeId` / connection reconcile under a stable `Board3dRoot` (surface/layout/
-asset-ready changes rebuild the root once).
-
-**Consumers (`MusaicSet::RenderUi`):** shell rebuild, inspector transition,
-minimap, timeline, diagnostics banner, palette sync. Each clears nothing
-beyond its own work; they never recompute inspector layout.
-
-**Declared exceptions (UI-local chrome writers that projection *reads*):**
-
-- Minimap / timeline edge-drag panel dims (`shell/layout.rs` →
-  `MinimapPanelState` / `TimelinePanelState`)
-
-**Forbidden:** length-only fingerprints; `diagnostic_count` forcing shell
-respawn; inventing inspector content from `armed_tile` alone; placement ghost /
-slot highlight / grid anchor / camera reading `UiDirty`.
+Later stages trust those guarantees. They do not maintain parallel stores,
+repeat structural validation, or scan the running world to repair authored
+state.

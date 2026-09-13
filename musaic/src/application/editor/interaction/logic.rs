@@ -16,10 +16,20 @@ pub fn classify_board_pick(
     session: &EditorSession,
     pick: &BoardPickEvent,
 ) -> Option<EditorCommand> {
+    classify_board_pick_with_modifiers(queries, attention, session, pick, PickModifiers::default())
+}
+
+pub fn classify_board_pick_with_modifiers(
+    queries: &DocumentQueries<'_>,
+    attention: &EditorAttention,
+    session: &EditorSession,
+    pick: &BoardPickEvent,
+    modifiers: PickModifiers,
+) -> Option<EditorCommand> {
     match pick {
         BoardPickEvent::Miss => Some(EditorCommand::ClearSelection),
         BoardPickEvent::Hit(hit) => {
-            classify_board_pick_hit(queries, attention, session, hit, PickModifiers::default())
+            classify_board_pick_hit(queries, attention, session, hit, modifiers)
         }
     }
 }
@@ -42,6 +52,16 @@ fn classify_board_pick_hit(
     }
 
     if let BoardPickTargetKind::PortSide { tile_id, side } = &hit.kind {
+        if matches!(
+            queries.node_kind(tile_id),
+            Some(crate::domain::document::DocumentNodeKind::FlowControl(_))
+        ) {
+            return Some(EditorCommand::Focus {
+                target: crate::application::editor::FocusTarget::Tile {
+                    node: tile_id.clone(),
+                },
+            });
+        }
         return Some(EditorCommand::BindOutputSide {
             node: tile_id.clone(),
             side: *side,
@@ -50,15 +70,17 @@ fn classify_board_pick_hit(
 
     let pick_hit = board_pick_hit_to_pick_hit(hit);
 
-    if let Some(command) = context_command_from_pick_hit(queries, attention, &pick_hit) {
-        return Some(command);
+    if !modifiers.additive && !modifiers.toggle {
+        if let Some(command) = context_command_from_pick_hit(queries, attention, &pick_hit) {
+            return Some(command);
+        }
     }
 
     if let Some(command) = connection_command_from_pick_hit(session, &pick_hit) {
         return Some(command);
     }
 
-    if let Some(command) = placement_command_from_pick_hit(session, &pick_hit) {
+    if let Some(command) = placement_command_from_pick_hit(queries, session, &pick_hit) {
         return Some(command);
     }
 
@@ -86,6 +108,10 @@ fn board_pick_hit_to_pick_hit(hit: &BoardPickHit) -> PickHit {
                 node: tile_id.clone(),
             }
         }
+        BoardPickTargetKind::AtomCompound { primary_node } => PickHit::AtomCompound {
+            primary_node: primary_node.clone(),
+            members: vec![primary_node.clone()],
+        },
         BoardPickTargetKind::Connection { .. } | BoardPickTargetKind::PortSide { .. } => {
             unreachable!("connection and port picks are handled earlier")
         }
@@ -93,6 +119,7 @@ fn board_pick_hit_to_pick_hit(hit: &BoardPickHit) -> PickHit {
 }
 
 fn placement_command_from_pick_hit(
+    queries: &DocumentQueries<'_>,
     session: &EditorSession,
     hit: &PickHit,
 ) -> Option<EditorCommand> {
@@ -105,6 +132,23 @@ fn placement_command_from_pick_hit(
             surface: *surface,
             index: *index,
         },
+        PickHit::Tile { node }
+        | PickHit::AtomCompound {
+            primary_node: node, ..
+        } if session
+            .armed_tile()
+            .is_some_and(crate::application::editor::transaction::drop::is_number) =>
+        {
+            let location = queries.location_of(node)?;
+            let crate::domain::document::PlacementAddress::StackIndex(index) = location.address
+            else {
+                return None;
+            };
+            PlacementTarget::StackIndex {
+                surface: location.surface,
+                index,
+            }
+        }
         _ => return None,
     };
 

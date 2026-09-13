@@ -7,7 +7,6 @@ use super::container::ContainerId;
 use super::program::NodeId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct Rational {
     pub numerator: i64,
     pub denominator: i64,
@@ -108,15 +107,12 @@ fn gcd_i64(a: i64, b: i64) -> i64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct CycleTime(pub Rational);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct CycleDuration(pub Rational);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct CycleSpan {
     pub start: CycleTime,
     pub duration: CycleDuration,
@@ -157,12 +153,15 @@ impl CycleSpan {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum EventValue {
     Note {
         value: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         octave: Option<i64>,
+    },
+    /// A named, unpitched sound selected by a host-owned instrument or kit.
+    Sound {
+        value: String,
     },
     Rest,
     Scalar {
@@ -182,11 +181,34 @@ impl EventValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum FieldValue {
-    Rational { value: Rational },
-    Bool { value: bool },
-    Symbol { value: String },
+    Modulation {
+        value: super::ModulationParameters,
+    },
+    Delay {
+        value: super::DelayParameters,
+    },
+    Reverb {
+        value: super::ReverbParameters,
+    },
+    Compressor {
+        value: super::CompressorParameters,
+    },
+
+    /// Composite source selection; never a free-standing scalar.
+    Slice {
+        index: u32,
+        count: u32,
+    },
+    Rational {
+        value: Rational,
+    },
+    Bool {
+        value: bool,
+    },
+    Symbol {
+        value: String,
+    },
 }
 
 impl FieldValue {
@@ -212,7 +234,6 @@ impl FieldValue {
 /// surface. `x` is lateral, `y` vertical, `z` depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum AxisIr {
     X,
     Y,
@@ -221,7 +242,6 @@ pub enum AxisIr {
 
 /// An exact lattice position authored in Tessera, lowered to a Cadence `Point3`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct Point3Ir {
     pub x: Rational,
     pub y: Rational,
@@ -283,7 +303,6 @@ impl Add for Point3Ir {
 /// `SpatialMotion`. Exact and cycle-relative, mirroring the runtime kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum SpatialMotionIr {
     Static {
         point: Point3Ir,
@@ -388,17 +407,27 @@ impl Default for SpatialMotionIr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum EventField {
+    Gate(FieldValue),
+    Legato(FieldValue),
+    SampleBank(FieldValue),
+    SampleVariant(FieldValue),
     Gain(FieldValue),
     PostGain(FieldValue),
+    Pan(FieldValue),
+    Expression(FieldValue),
+    ClipLength(FieldValue),
+    Velocity(FieldValue),
     Pitch(FieldValue),
     PitchBend(FieldValue),
     PlaybackRate(FieldValue),
     PlaybackStart(FieldValue),
     PlaybackEnd(FieldValue),
     Reverse(FieldValue),
+    Fit(FieldValue),
+    Loop(FieldValue),
+    Slice(FieldValue),
     Attack(FieldValue),
     Decay(FieldValue),
     Sustain(FieldValue),
@@ -409,6 +438,7 @@ pub enum EventField {
     HighPassResonance(FieldValue),
     ReverbSend(FieldValue),
     DelaySend(FieldValue),
+    Compressor(FieldValue),
     Select(FieldValue),
     Custom { key: String, value: FieldValue },
     Elongate(FieldValue),
@@ -419,8 +449,10 @@ pub enum EventField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PatternProvenance {
+    /// Authored sound-producing tile supplying this event, independent of its output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,7 +462,6 @@ pub struct PatternProvenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PatternEvent {
     pub span: CycleSpan,
     pub value: EventValue,
@@ -486,24 +517,36 @@ impl PatternEvent {
     }
 
     pub fn shift_by(mut self, offset: CycleDuration) -> Self {
-        self.span = self.span.shift_by(offset);
+        self.remap_onset(self.span.shift_by(offset));
         self
     }
 
     pub fn scale_relative_to(mut self, origin: CycleTime, factor: Rational) -> Self {
-        self.span = self.span.scale_relative_to(origin, factor);
+        self.remap_onset(self.span.scale_relative_to(origin, factor));
         self
     }
 
     pub fn reverse_within(mut self, origin: CycleTime, end: CycleTime) -> Self {
-        self.span = self.span.reverse_within(origin, end);
+        self.remap_onset(self.span.reverse_within(origin, end));
         self
+    }
+
+    /// Keep a note's sampled velocity attached to its original musical onset
+    /// when timing transforms move that note. Repetition advances the clock
+    /// instead and must move the span directly.
+    pub(crate) fn remap_onset(&mut self, span: CycleSpan) {
+        let delta = self.span.start.0 - span.start.0;
+        for field in &mut self.fields {
+            if let EventField::Velocity(FieldValue::Modulation { value }) = field {
+                value.phase = value.phase + value.rate * delta;
+            }
+        }
+        self.span = span;
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum PatternStreamShape {
     Event,
     Control,
@@ -511,7 +554,6 @@ pub enum PatternStreamShape {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PatternStream {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<PatternEvent>,
@@ -674,16 +716,12 @@ impl PatternStream {
                     mask_end
                 };
                 if end > start {
-                    clipped.push(PatternEvent {
-                        span: CycleSpan {
-                            start: CycleTime(start),
-                            duration: CycleDuration(end - start),
-                        },
-                        value: event.value.clone(),
-                        fields: event.fields.clone(),
-                        position: event.position,
-                        source: event.source.clone(),
+                    let mut visible = event.clone();
+                    visible.remap_onset(CycleSpan {
+                        start: CycleTime(start),
+                        duration: CycleDuration(end - start),
                     });
+                    clipped.push(visible);
                 }
             }
         }
@@ -697,15 +735,18 @@ impl PatternStream {
         if keep_probability >= Rational::one() {
             return self;
         }
-        let threshold =
-            ((keep_probability.numerator * 1024) / keep_probability.denominator).clamp(0, 1024);
         Self {
             events: self
                 .events
                 .into_iter()
                 .filter(|event| {
-                    let event_seed = flatten_event_seed(event) ^ seed;
-                    (event_seed % 1024) >= threshold as u64
+                    let mut value =
+                        (flatten_event_seed(event) ^ seed).wrapping_add(0x9E37_79B9_7F4A_7C15);
+                    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                    let roll =
+                        Rational::new(((value ^ (value >> 31)) % 1_000_000) as i64, 1_000_000);
+                    roll < keep_probability
                 })
                 .collect(),
         }
@@ -720,27 +761,28 @@ fn mask_event_active(event: &PatternEvent) -> bool {
 }
 
 fn flatten_event_seed(event: &PatternEvent) -> u64 {
-    let value_bias = match &event.value {
-        EventValue::Note { value, octave } => {
-            let text = value.bytes().fold(0u64, |acc, byte| {
-                acc.wrapping_mul(31).wrapping_add(byte as u64)
-            });
-            text.wrapping_add(octave.unwrap_or_default() as u64)
-        }
-        EventValue::Rest => 17,
-        EventValue::Scalar { value } => (value.numerator as u64)
-            .wrapping_mul(13)
-            .wrapping_add(value.denominator as u64),
-    };
-    value_bias
-        .wrapping_add(event.span.start.0.numerator as u64 * 97)
-        .wrapping_add(event.span.start.0.denominator as u64 * 53)
-        .wrapping_add(event.span.duration.0.numerator as u64 * 29)
-        .wrapping_add(event.span.duration.0.denominator as u64 * 11)
+    // Host conformance uses this canonical musical value plus its whole span;
+    // allocations and process-local node IDs cannot change a seeded pattern.
+    let mut hash = 0xCBF2_9CE4_8422_2325u64;
+    let value = serde_json::to_string(&event.value).expect("musical values serialize");
+    let start = event.span.start.0;
+    let end = event.span.end().0;
+    for byte in value.bytes().chain(
+        [
+            start.numerator,
+            start.denominator,
+            end.numerator,
+            end.denominator,
+        ]
+        .into_iter()
+        .flat_map(i64::to_le_bytes),
+    ) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct ControlStream {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<ControlEvent>,
@@ -764,7 +806,6 @@ impl ControlStream {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct ControlEvent {
     pub span: CycleSpan,
     pub key: ControlKeyIr,
@@ -796,17 +837,26 @@ impl From<ControlEvent> for PatternEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum ControlKeyIr {
+    Legato,
+    Transpose,
+    SampleBank,
+    SampleVariant,
     Gate,
     Gain,
     PostGain,
+    Pan,
+    Expression,
+    ClipLength,
+    Velocity,
     Pitch,
     PitchBend,
     PlaybackRate,
     PlaybackStart,
     PlaybackEnd,
     Reverse,
+    Fit,
+    Loop,
     Attack,
     Decay,
     Sustain,
@@ -817,6 +867,7 @@ pub enum ControlKeyIr {
     HighPassResonance,
     ReverbSend,
     DelaySend,
+    Compressor,
     Select(String),
     Custom(String),
 }
@@ -825,24 +876,35 @@ impl ControlKeyIr {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Gate => "gate",
+            Self::Legato => "legato",
+            Self::Transpose => "transpose",
+            Self::SampleBank => "sample_bank",
+            Self::SampleVariant => "sample_variant",
             Self::Gain => "gain",
             Self::PostGain => "post_gain",
+            Self::Pan => "pan",
+            Self::Expression => "expression",
+            Self::ClipLength => "clip_length",
+            Self::Velocity => "velocity",
             Self::Pitch => "pitch",
             Self::PitchBend => "pitch_bend",
             Self::PlaybackRate => "playback_rate",
             Self::PlaybackStart => "playback_start",
             Self::PlaybackEnd => "playback_end",
             Self::Reverse => "reverse",
+            Self::Fit => "fit",
+            Self::Loop => "loop",
             Self::Attack => "attack",
             Self::Decay => "decay",
             Self::Sustain => "sustain",
             Self::Release => "release",
-            Self::LowPassCutoff => "low_pass_cutoff",
-            Self::LowPassResonance => "low_pass_resonance",
-            Self::HighPassCutoff => "high_pass_cutoff",
-            Self::HighPassResonance => "high_pass_resonance",
+            Self::LowPassCutoff => "lowpass_cutoff",
+            Self::LowPassResonance => "lowpass_resonance",
+            Self::HighPassCutoff => "highpass_cutoff",
+            Self::HighPassResonance => "highpass_resonance",
             Self::ReverbSend => "reverb_send",
             Self::DelaySend => "delay_send",
+            Self::Compressor => "compressor",
             Self::Select(_) => "select",
             Self::Custom(_) => "custom",
         }
@@ -851,8 +913,12 @@ impl ControlKeyIr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum ControlValueIr {
+    Modulation { value: super::ModulationParameters },
+    Delay { value: super::DelayParameters },
+    Reverb { value: super::ReverbParameters },
+    Compressor { value: super::CompressorParameters },
+
     Rational { value: Rational },
     Bool { value: bool },
     Symbol { value: String },
@@ -883,21 +949,28 @@ impl ControlValueIr {
                     Rational::zero()
                 }
             }
-            Self::Symbol { .. } => Rational::zero(),
+            Self::Modulation { .. }
+            | Self::Symbol { .. }
+            | Self::Delay { .. }
+            | Self::Reverb { .. }
+            | Self::Compressor { .. } => Rational::zero(),
         }
     }
 
     pub fn into_field_value(self) -> FieldValue {
         match self {
+            Self::Modulation { value } => FieldValue::Modulation { value },
             Self::Rational { value } => FieldValue::rational(value),
             Self::Bool { value } => FieldValue::bool(value),
             Self::Symbol { value } => FieldValue::symbol(value),
+            Self::Delay { value } => FieldValue::Delay { value },
+            Self::Reverb { value } => FieldValue::Reverb { value },
+            Self::Compressor { value } => FieldValue::Compressor { value },
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct ScalarStream {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<ScalarEvent>,
@@ -921,7 +994,6 @@ impl ScalarStream {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct ScalarEvent {
     pub span: CycleSpan,
     pub value: Rational,
@@ -947,7 +1019,6 @@ impl From<ScalarEvent> for PatternEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum DeduplicateKeyIr {
     Lifecycle,
     WholeSpanAndValue,
@@ -956,14 +1027,12 @@ pub enum DeduplicateKeyIr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum DeduplicateWinnerIr {
     First,
     Last,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct DeduplicatePolicyIr {
     pub key: DeduplicateKeyIr,
     pub winner: DeduplicateWinnerIr,
@@ -980,7 +1049,6 @@ impl DeduplicatePolicyIr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum PriorityConflictIr {
     SameWholeStartAndValue,
     SameWholeSpanAndValue,
@@ -988,7 +1056,6 @@ pub enum PriorityConflictIr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct PriorityMergePolicyIr {
     pub conflict: PriorityConflictIr,
 }
@@ -1001,10 +1068,35 @@ impl PriorityMergePolicyIr {
     }
 }
 
+/// Named recursive input of a flow projection. A vector keeps endpoint keys
+/// serializable and the authored binding order explicit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowInputIr {
+    pub endpoint: super::InputEndpoint,
+    pub nodes: Vec<PatternNodeIr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PatternNodeIr {
+    /// Evaluates the policy on whole events at query time, preserving recursive
+    /// input clocks, controls, and held-event decisions across window boundaries.
+    FlowProjection {
+        control: super::FlowControlNode,
+        inputs: Vec<FlowInputIr>,
+        output: super::OutputEndpoint,
+    },
     EventStream(EventStreamNodeIr),
+    /// One cycle of authored material, repeated on the musical clock.
+    CycleEventStream(EventStreamNodeIr),
+    /// Weighted child slots; each child retains the enclosing cycle index.
+    Sequence {
+        children: Vec<WeightedPatternIr>,
+    },
+    /// Timed pattern occurrences, each starting its source clock at zero.
+    Arrange {
+        segments: Vec<TimedPatternIr>,
+    },
     ControlStream(ControlStreamNodeIr),
     ScalarStream(ScalarStreamNodeIr),
     Merge {
@@ -1069,6 +1161,136 @@ pub enum PatternNodeIr {
 impl PatternNodeIr {
     pub fn event_stream(stream: PatternStream) -> Self {
         Self::EventStream(EventStreamNodeIr { stream })
+    }
+
+    pub fn cycle_event_stream(stream: PatternStream) -> Self {
+        Self::CycleEventStream(EventStreamNodeIr { stream })
+    }
+
+    pub fn sequence(children: Vec<WeightedPatternIr>) -> Self {
+        Self::Sequence { children }
+    }
+
+    pub fn arrange(segments: Vec<TimedPatternIr>) -> Self {
+        Self::Arrange { segments }
+    }
+
+    /// Query a bounded window without discarding alternation or local rate.
+    pub fn query(&self, span: CycleSpan) -> PatternStream {
+        super::query_ir::query(self, span)
+    }
+
+    /// Rewrites event leaves while retaining all time, selection and spatial structure.
+    pub fn map_event_leaves(&self, mapper: &mut impl FnMut(&PatternStream, bool) -> Self) -> Self {
+        match self {
+            Self::FlowProjection {
+                control,
+                inputs,
+                output,
+            } => Self::FlowProjection {
+                control: control.clone(),
+                inputs: inputs
+                    .iter()
+                    .map(|input| FlowInputIr {
+                        endpoint: input.endpoint.clone(),
+                        nodes: input
+                            .nodes
+                            .iter()
+                            .map(|node| node.map_event_leaves(mapper))
+                            .collect(),
+                    })
+                    .collect(),
+                output: output.clone(),
+            },
+            Self::EventStream(node) => mapper(&node.stream, false),
+            Self::CycleEventStream(node) => mapper(&node.stream, true),
+            Self::ControlStream(_) => self.clone(),
+            Self::ScalarStream(node) => mapper(&node.stream.to_pattern_stream(), true),
+            Self::Merge { children } => Self::merge(
+                children
+                    .iter()
+                    .map(|child| child.map_event_leaves(mapper))
+                    .collect(),
+            ),
+            Self::CycleRoute { children } => Self::cycle_route(
+                children
+                    .iter()
+                    .map(|child| child.map_event_leaves(mapper))
+                    .collect(),
+            ),
+            Self::CycleSlots { children } => Self::cycle_slots(
+                children
+                    .iter()
+                    .map(|child| child.map_event_leaves(mapper))
+                    .collect(),
+            ),
+            Self::Sequence { children } => Self::sequence(
+                children
+                    .iter()
+                    .map(|child| {
+                        WeightedPatternIr::new(child.weight, child.node.map_event_leaves(mapper))
+                    })
+                    .collect(),
+            ),
+            Self::Arrange { segments } => Self::arrange(
+                segments
+                    .iter()
+                    .map(|segment| TimedPatternIr {
+                        duration: segment.duration,
+                        repeats: segment.repeats,
+                        node: Box::new(segment.node.map_event_leaves(mapper)),
+                    })
+                    .collect(),
+            ),
+            Self::TimeScale { inner, factor } => {
+                Self::time_scale(inner.map_event_leaves(mapper), *factor)
+            }
+            Self::Shift { inner, offset } => Self::shift(inner.map_event_leaves(mapper), *offset),
+            Self::ReflectCycle { inner } => Self::reflect_cycle(inner.map_event_leaves(mapper)),
+            Self::SpaceShift { inner, offset } => {
+                Self::space_shift(inner.map_event_leaves(mapper), *offset)
+            }
+            Self::SpaceScale { inner, factor } => {
+                Self::space_scale(inner.map_event_leaves(mapper), *factor)
+            }
+            Self::SpaceReflect { inner, axis } => {
+                Self::space_reflect(inner.map_event_leaves(mapper), *axis)
+            }
+            Self::Degrade {
+                inner,
+                keep_probability,
+                seed,
+            } => Self::degrade(inner.map_event_leaves(mapper), *keep_probability, *seed),
+            Self::Deduplicate { inner, policy } => {
+                Self::deduplicate(inner.map_event_leaves(mapper), *policy)
+            }
+            Self::PriorityMerge { children, policy } => Self::priority_merge(
+                children
+                    .iter()
+                    .map(|child| child.map_event_leaves(mapper))
+                    .collect(),
+                *policy,
+            ),
+            Self::WeightedChoice { options, seed } => Self::weighted_choice(
+                options
+                    .iter()
+                    .map(|child| {
+                        WeightedPatternIr::new(child.weight, child.node.map_event_leaves(mapper))
+                    })
+                    .collect(),
+                *seed,
+            ),
+            Self::MaskClip { source, mask } => Self::mask_clip(
+                source.map_event_leaves(mapper),
+                mask.map_event_leaves(mapper),
+            ),
+            Self::Concat { children } => Self::concat(
+                children
+                    .iter()
+                    .map(|child| child.map_event_leaves(mapper))
+                    .collect(),
+            ),
+        }
     }
 
     pub fn control_stream(stream: ControlStream) -> Self {
@@ -1189,7 +1411,48 @@ impl PatternNodeIr {
 
     pub fn shape(&self) -> PatternStreamShape {
         match self {
-            Self::EventStream(_) => PatternStreamShape::Event,
+            Self::FlowProjection {
+                control,
+                inputs,
+                output,
+            } => {
+                let declared = match output {
+                    super::OutputEndpoint::Socket(port) => {
+                        control.signature.output_socket(port).map(|s| s.shape)
+                    }
+                    super::OutputEndpoint::GroupMember { group, .. } => {
+                        control.signature.output_group(group).map(|s| s.shape)
+                    }
+                };
+                match declared {
+                    Some(super::StreamShape::ScalarPattern) => PatternStreamShape::Scalar,
+                    Some(super::StreamShape::ControlPattern) => PatternStreamShape::Control,
+                    Some(super::StreamShape::EventPattern | super::StreamShape::NotePattern) => {
+                        PatternStreamShape::Event
+                    }
+                    _ => {
+                        let mut shapes = inputs
+                            .iter()
+                            .filter(|input| match &input.endpoint {
+                                super::InputEndpoint::GroupMember { .. } => true,
+                                super::InputEndpoint::Socket(port) => control
+                                    .signature
+                                    .input_socket(port)
+                                    .is_some_and(|s| s.role == super::NodeInputRole::Main),
+                            })
+                            .flat_map(|input| input.nodes.iter().map(Self::shape));
+                        let first = shapes.next().unwrap_or(PatternStreamShape::Event);
+                        if shapes.all(|shape| shape == first) {
+                            first
+                        } else {
+                            PatternStreamShape::Event
+                        }
+                    }
+                }
+            }
+            Self::EventStream(_) | Self::CycleEventStream(_) | Self::Sequence { .. } => {
+                PatternStreamShape::Event
+            }
             Self::ControlStream(_) => PatternStreamShape::Control,
             Self::ScalarStream(_) => PatternStreamShape::Scalar,
             Self::Merge { .. }
@@ -1206,33 +1469,72 @@ impl PatternNodeIr {
             | Self::PriorityMerge { .. }
             | Self::WeightedChoice { .. }
             | Self::MaskClip { .. }
-            | Self::Concat { .. } => PatternStreamShape::Event,
+            | Self::Concat { .. }
+            | Self::Arrange { .. } => PatternStreamShape::Event,
         }
     }
 
-    /// Cycle span this node occupies when sequenced in a [`Self::Concat`] chain.
-    ///
-    /// Matches [`Self::flatten`] / [`PatternStream::chain`] sequencing semantics.
+    /// Cycle allocation this node occupies in a [`Self::Concat`] chain.
+    /// Timed arrangements keep allocated silence even when no event spans it.
     pub fn duration(&self) -> CycleDuration {
-        self.flatten().duration()
+        match self {
+            Self::FlowProjection { inputs, .. } => CycleDuration(
+                inputs
+                    .iter()
+                    .flat_map(|input| &input.nodes)
+                    .map(|node| node.duration().0)
+                    .max()
+                    .unwrap_or_else(Rational::one),
+            ),
+            Self::CycleEventStream(_)
+            | Self::Sequence { .. }
+            | Self::CycleRoute { .. }
+            | Self::CycleSlots { .. } => CycleDuration(Rational::one()),
+            Self::Arrange { segments } => {
+                CycleDuration(arrangement_period(segments).unwrap_or_else(Rational::zero))
+            }
+            Self::TimeScale { inner, factor } if *factor > Rational::zero() => {
+                CycleDuration(inner.duration().0 * *factor)
+            }
+            Self::TimeScale { inner, .. } | Self::Shift { inner, .. } => inner.duration(),
+            Self::Concat { children } => CycleDuration(
+                children
+                    .iter()
+                    .fold(Rational::zero(), |total, child| total + child.duration().0),
+            ),
+            _ => self.flatten().duration(),
+        }
     }
 
     /// Preview flattening. Structural nodes preserve semantics where Cadence depends on them;
     /// `WeightedChoice` and `CycleRoute` still layer all branches for host preview.
     pub fn flatten(&self) -> PatternStream {
         match self {
-            Self::EventStream(node) => node.stream.clone(),
+            Self::FlowProjection { .. } => self.query(CycleSpan::new(
+                CycleTime(Rational::zero()),
+                CycleDuration(Rational::one()),
+            )),
+            Self::EventStream(node) | Self::CycleEventStream(node) => node.stream.clone(),
+            Self::Arrange { .. } => {
+                self.query(CycleSpan::new(CycleTime(Rational::zero()), self.duration()))
+            }
+            Self::Sequence { .. } => self.query(CycleSpan::new(
+                CycleTime(Rational::zero()),
+                CycleDuration(Rational::one()),
+            )),
             Self::ControlStream(node) => node.stream.to_pattern_stream(),
             Self::ScalarStream(node) => node.stream.to_pattern_stream(),
             Self::Merge { children } => {
                 PatternStream::layer(children.iter().map(Self::flatten).collect())
             }
-            Self::CycleRoute { children } => {
-                PatternStream::layer(children.iter().map(Self::flatten).collect())
-            }
-            Self::CycleSlots { children } => {
-                PatternStream::layer(children.iter().map(Self::flatten).collect())
-            }
+            Self::CycleRoute { .. } => self.query(CycleSpan::new(
+                CycleTime(Rational::zero()),
+                CycleDuration(Rational::one()),
+            )),
+            Self::CycleSlots { .. } => self.query(CycleSpan::new(
+                CycleTime(Rational::zero()),
+                CycleDuration(Rational::one()),
+            )),
             Self::TimeScale { inner, factor } => {
                 if *factor <= Rational::zero() {
                     inner.flatten()
@@ -1265,6 +1567,75 @@ impl PatternNodeIr {
                 }),
         }
     }
+}
+
+/// A source pattern played for a fixed span, with its clock reset for each repeat.
+/// Duration is an allocation, not a stretch factor; sound beyond its end is clipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedPatternIr {
+    pub duration: Rational,
+    pub repeats: u32,
+    pub node: Box<PatternNodeIr>,
+}
+
+impl TimedPatternIr {
+    pub fn new(duration: Rational, repeats: u32, node: PatternNodeIr) -> Self {
+        Self {
+            duration,
+            repeats,
+            node: Box::new(node),
+        }
+    }
+
+    pub fn total_duration(segments: &[Self]) -> Result<Rational, &'static str> {
+        for segment in segments {
+            segment.validate()?;
+        }
+        arrangement_period(segments)
+            .ok_or("Total arrangement duration exceeds the supported rational range.")
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.duration.denominator <= 0 || self.duration.numerator <= 0 {
+            return Err("Pattern occurrence duration must be positive.");
+        }
+        if self.repeats == 0 {
+            return Err("Pattern occurrence repeats must be positive.");
+        }
+        if self
+            .duration
+            .numerator
+            .checked_mul(i64::from(self.repeats))
+            .is_none()
+        {
+            return Err("Pattern occurrence duration exceeds the supported rational range.");
+        }
+        Ok(())
+    }
+}
+
+/// Invalid serialized timing never enters a dividing/iterating query path.
+pub(super) fn arrangement_period(segments: &[TimedPatternIr]) -> Option<Rational> {
+    let mut total = Rational::zero();
+    for segment in segments {
+        segment.validate().ok()?;
+        let extent = Rational::new(
+            segment
+                .duration
+                .numerator
+                .checked_mul(i64::from(segment.repeats))?,
+            segment.duration.denominator,
+        );
+        let numerator = total
+            .numerator
+            .checked_mul(extent.denominator)?
+            .checked_add(extent.numerator.checked_mul(total.denominator)?)?;
+        total = Rational::new(
+            numerator,
+            total.denominator.checked_mul(extent.denominator)?,
+        );
+    }
+    Some(total)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

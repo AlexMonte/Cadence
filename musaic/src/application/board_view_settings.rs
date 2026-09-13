@@ -26,7 +26,7 @@ impl Default for BoardViewSettings {
         Self {
             root_board: AtomDisplayMode::CompoundTile,
             container_preview_on_root: AtomDisplayMode::CompoundTile,
-            container_interior: AtomDisplayMode::Stack,
+            container_interior: AtomDisplayMode::CompoundTile,
         }
     }
 }

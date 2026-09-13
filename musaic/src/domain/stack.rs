@@ -8,13 +8,16 @@ use super::document::{Accidental, AtomValue, NoteName, OperatorValue, TileSpawnK
 pub fn stack_piece_from_atom(atom: AtomValue) -> Option<StackPiece> {
     match atom {
         AtomValue::NoteName(note) => Some(StackPiece::note(note_value(note), note_letter(note))),
+        AtomValue::DrumHit(hit) => Some(StackPiece::Sound(hit.code().into())),
         AtomValue::Rest => Some(StackPiece::Rest),
         AtomValue::Number(value) => Some(StackPiece::Scalar(Rational::from_integer(value as i64))),
-        AtomValue::Octave(value) => Some(StackPiece::Scalar(Rational::from_integer(value as i64))),
+        AtomValue::Ratio(value) => Some(StackPiece::Scalar(value)),
+        AtomValue::Octave(value) => Some(StackPiece::Octave(value as i64)),
         AtomValue::Accidental(accidental) => {
             Some(StackPiece::Accidental(signed_accidental(accidental)))
         }
         AtomValue::Operator(operator) => Some(StackPiece::Operator(operator_token(operator))),
+        AtomValue::Modifier(modifier) => Some(StackPiece::Modifier(modifier)),
     }
 }
 
@@ -28,6 +31,7 @@ pub fn input_stack_piece_from_spawn(
             container.map(|container| InputStackPiece::Container { node, container })
         }
         TileSpawnKind::Atom { atom } => match atom {
+            AtomValue::Ratio(value) => Some(InputStackPiece::Scalar(*value)),
             AtomValue::Number(value) => Some(InputStackPiece::Scalar(Rational::from_integer(
                 *value as i64,
             ))),
@@ -75,6 +79,8 @@ fn signed_accidental(accidental: Accidental) -> SignedAccidental {
 fn operator_token(operator: OperatorValue) -> AtomOperatorToken {
     match operator {
         OperatorValue::Power => AtomOperatorToken::Replicate,
+        OperatorValue::Choice => AtomOperatorToken::Choice,
+        OperatorValue::Parallel => AtomOperatorToken::Parallel,
         OperatorValue::At => AtomOperatorToken::Elongate,
         OperatorValue::Multiply => AtomOperatorToken::Fast,
         OperatorValue::Divide => AtomOperatorToken::Slow,
@@ -101,15 +107,15 @@ mod tests {
     fn input_stack_piece_from_spawn_maps_container_and_scalar() {
         assert_eq!(
             input_stack_piece_from_spawn(
-                NodeId::new("phrase"),
+                NodeId::new("pattern"),
                 &TileSpawnKind::Container {
                     kind: crate::domain::document::ContainerKind::Sequence
                 },
-                Some(ContainerId::new("phrase"))
+                Some(ContainerId::new("pattern"))
             ),
             Some(InputStackPiece::Container {
-                node: NodeId::new("phrase"),
-                container: ContainerId::new("phrase"),
+                node: NodeId::new("pattern"),
+                container: ContainerId::new("pattern"),
             })
         );
         assert_eq!(

@@ -8,7 +8,6 @@ use crate::domain::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct AuthoredTesseraProgram {
     pub root_surface: RootSurface,
     pub containers: BTreeMap<ContainerId, Container>,
@@ -24,7 +23,6 @@ impl AuthoredTesseraProgram {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct RootSurface {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub nodes: BTreeMap<NodeId, RootSurfaceNodeKind>,
@@ -37,7 +35,6 @@ pub struct RootSurface {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct BoardSlot {
     pub x: i32,
     pub y: i32,
@@ -57,7 +54,6 @@ impl BoardSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct TileFootprint {
     pub width: u32,
     pub height: u32,
@@ -138,7 +134,6 @@ impl TileFootprint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct RootPlacement {
     pub slot: BoardSlot,
     pub footprint: TileFootprint,
@@ -159,7 +154,6 @@ impl RootPlacement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum SpatialSide {
     Off,
     North,
@@ -231,11 +225,12 @@ impl SpatialSide {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct NodeSpatialBindings {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(with = "endpoint_map")]
     pub inputs: BTreeMap<InputEndpoint, SpatialSide>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(with = "endpoint_map")]
     pub outputs: BTreeMap<OutputEndpoint, SpatialSide>,
 }
 
@@ -284,5 +279,27 @@ impl NodeSpatialBindings {
         for side in self.outputs.values_mut() {
             *side = side.mirror_horizontal();
         }
+    }
+}
+
+/// Structured endpoint keys serialize as entries because JSON object keys must be strings.
+mod endpoint_map {
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+    pub fn serialize<K: Serialize, V: Serialize, S: serde::Serializer>(
+        value: &BTreeMap<K, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+    pub fn deserialize<
+        'de,
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+        D: serde::Deserializer<'de>,
+    >(
+        deserializer: D,
+    ) -> Result<BTreeMap<K, V>, D::Error> {
+        Vec::<(K, V)>::deserialize(deserializer).map(|entries| entries.into_iter().collect())
     }
 }

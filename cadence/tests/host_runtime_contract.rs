@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use cadence::infrastructure::{
-    CadenceCompiler, PreviewReport,
+    CadenceCompiler, PreparedScore, PreviewReport,
     audio::{
-        AudioRenderer, AudioRendererSettings, AudioTrigger, AudioTriggerResolver, Frame,
-        SampleBuffer, audio_trigger_channel,
+        AudioRenderer, AudioRendererSettings, AudioTriggerResolver, Frame, SampleBuffer,
+        ScheduledAudioEvent, audio_trigger_channel,
     },
     playback::{PlaybackRuntime, PlaybackSettings, PlaybackState, SampleBank},
     projection::{ControlKey, ControlValue, TransportSpan},
@@ -95,7 +95,7 @@ fn host_can_route_loaded_sample_triggers_through_infrastructure_audio() {
     let mut resolver = AudioTriggerResolver::new(receiver, bank, audio);
 
     sender
-        .send(AudioTrigger::StartVoice(
+        .send(ScheduledAudioEvent::start_voice(
             AudioVoicePlan::from_live_sample(
                 VoiceInstanceId::next_live(),
                 &cadence::domain::intent::SampleIntent::new("bd"),
@@ -122,7 +122,7 @@ fn host_can_route_synth_triggers_without_sample_manifest_loading() {
     let mut resolver = AudioTriggerResolver::new(receiver, bank, audio);
 
     sender
-        .send(AudioTrigger::StartVoice(
+        .send(ScheduledAudioEvent::start_voice(
             AudioVoicePlan::from_live_synth(
                 VoiceInstanceId::next_live(),
                 BuiltInSynthSource::Triangle,
@@ -150,7 +150,7 @@ fn host_can_route_mixed_audio_triggers_through_infrastructure_audio() {
     let mut resolver = AudioTriggerResolver::new(receiver, bank, audio);
 
     sender
-        .send(AudioTrigger::StartVoice(
+        .send(ScheduledAudioEvent::start_voice(
             AudioVoicePlan::from_live_sample(
                 VoiceInstanceId::next_live(),
                 &cadence::domain::intent::SampleIntent::new("bd"),
@@ -163,7 +163,7 @@ fn host_can_route_mixed_audio_triggers_through_infrastructure_audio() {
         ))
         .unwrap();
     sender
-        .send(AudioTrigger::StartVoice(
+        .send(ScheduledAudioEvent::start_voice(
             AudioVoicePlan::from_live_synth(
                 VoiceInstanceId::next_live(),
                 BuiltInSynthSource::Square,
@@ -187,7 +187,9 @@ fn host_can_play_mixed_scores_through_score_first_runtime() {
     let mut runtime = PlaybackRuntime::new(PlaybackSettings::default(), audio);
 
     runtime.load_sample("bd", sample_buffer());
-    runtime.play_score(mixed_score()).unwrap();
+    runtime
+        .play_prepared_score(PreparedScore::new(mixed_score()).unwrap())
+        .unwrap();
 
     runtime.tick().unwrap();
 
@@ -196,39 +198,35 @@ fn host_can_play_mixed_scores_through_score_first_runtime() {
 }
 
 #[test]
-fn host_can_inspect_projected_output_with_typed_sample_and_synth_identity() {
+fn host_can_inspect_evaluated_output_with_typed_sample_and_synth_identity() {
     let renderer = RendererCore::new(mixed_score());
-    let projected = renderer
-        .projected_output(&TransportSpan::new(Time::ZERO, Time::ONE).unwrap())
+    let events = renderer
+        .evaluate_window(&TransportSpan::new(Time::ZERO, Time::ONE).unwrap())
         .unwrap();
 
-    assert_eq!(projected.len(), 2);
-    assert!(projected.moments().iter().any(
-        |moment| matches!(moment.intent(), Intent::Sample(sample) if sample.sample_id == "bd")
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(
+        |event| matches!(event.projected().intent(), Intent::Sample(sample) if sample.sample_id == "bd")
     ));
-    assert!(projected
-        .moments()
-        .iter()
-        .any(|moment| matches!(moment.intent(), Intent::Synth(synth) if synth.source == BuiltInSynthSource::Sine)));
+    assert!(events.iter().any(|event| {
+        matches!(event.projected().intent(), Intent::Synth(synth) if synth.source == BuiltInSynthSource::Sine)
+    }));
 }
 
 #[test]
-fn host_sees_projected_output_as_richer_than_projected_mosaic() {
+fn host_sees_projected_controls_in_the_canonical_event_list() {
     let renderer = RendererCore::new(controlled_sample_score());
     let window = TransportSpan::new(Time::ZERO, Time::ONE).unwrap();
 
-    let rich = renderer.projected_output(&window).unwrap();
-    let thin = renderer.projected_mosaic(&window).unwrap();
+    let events = renderer.evaluate_window(&window).unwrap();
 
-    assert_eq!(rich.len(), 1);
-    assert_eq!(thin.len(), 1);
+    assert_eq!(events.len(), 1);
     assert!(matches!(
-        rich.moments()[0].controls().get(&ControlKey::Gain),
+        events[0].projected().controls().get(&ControlKey::Gain),
         Some(ControlValue::Ramp { from, to }) if (from, to) == (&1.0, &0.0)
     ));
-    assert_eq!(rich.moments()[0].whole(), thin.moments()[0].span());
     assert!(matches!(
-        thin.moments()[0].intent(),
+        events[0].projected().intent(),
         Intent::Sample(sample) if sample.sample_id == "pad"
     ));
 }
@@ -260,10 +258,11 @@ fn host_can_inspect_preview_evaluated_events_via_public_accessors() {
         ControlScore::track(controls),
     );
     let window = TransportSpan::new(Time::ZERO, Time::ONE).unwrap();
-    let report: PreviewReport = CadenceCompiler::new().preview(&score, &window).unwrap();
+    let prepared = PreparedScore::new(score).unwrap();
+    let report: PreviewReport = CadenceCompiler::new().preview(&prepared, &window).unwrap();
 
-    assert_eq!(report.evaluated.len(), 2);
-    let update: &EvaluatedEvent = report.evaluated.get(1).expect("control update");
+    assert_eq!(report.events.len(), 2);
+    let update: &EvaluatedEvent = report.events.get(1).expect("control update");
     assert!(matches!(
         update.kind(),
         EvaluatedEventKind::UpdateVoiceControls { .. }

@@ -1,0 +1,51 @@
+[package]
+name = "load_up"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+progress = ["dep:iyes_progress"]
+tracing = ["dep:tracing"]
+debug-inspector = ["dep:bevy-inspector-egui"]
+config-assets = ["dep:bevy_common_assets", "dep:serde"]
+
+[dependencies]
+bevy_app.workspace = true
+bevy_asset.workspace = true
+bevy_ecs.workspace = true
+bevy_reflect.workspace = true
+bevy_state.workspace = true
+bevy_time.workspace = true
+load_up_macros.workspace = true
+thiserror.workspace = true
+
+iyes_progress = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+bevy-inspector-egui = { workspace = true, optional = true }
+bevy_common_assets = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+bevy.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[[example]]
+name = "basic"
+path = "../../examples/basic.rs"
+
+[[example]]
+name = "progress"
+path = "../../examples/progress.rs"
+required-features = ["progress"]
+
+[[example]]
+name = "debug_inspector"
+path = "../../examples/debug_inspector.rs"
+required-features = ["debug-inspector"]
+
+[[example]]
+name = "config_and_assets"
+path = "../../examples/config_and_assets.rs"
+required-features = ["config-assets"]

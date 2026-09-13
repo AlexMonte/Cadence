@@ -20,7 +20,7 @@ pub fn default_project_filename() -> String {
 #[derive(Debug, Clone)]
 pub enum EditorOpenResult {
     Path(std::path::PathBuf),
-    Project(MusaicProject),
+    Project(Box<MusaicProject>),
 }
 
 /// Result of a successful save (path or download name). Cancelled picker → `None` Ok.
@@ -57,18 +57,16 @@ pub fn editor_save_project(
         let path = if let Some(path) = explicit_path {
             Some(path)
         } else if !force_picker {
-            last_saved_path
-                .map(|p| p.to_path_buf())
-                .or_else(|| {
-                    rfd::FileDialog::new()
-                        .add_filter("Musaic project", &["json"])
-                        .set_file_name(&default_project_filename())
-                        .save_file()
-                })
+            last_saved_path.map(|p| p.to_path_buf()).or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("Musaic project", &["json"])
+                    .set_file_name(default_project_filename())
+                    .save_file()
+            })
         } else {
             rfd::FileDialog::new()
                 .add_filter("Musaic project", &["json"])
-                .set_file_name(&default_project_filename())
+                .set_file_name(default_project_filename())
                 .save_file()
         };
         let Some(path) = path else {

@@ -1,0 +1,35 @@
+[
+  {
+    "zone": 2,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0041_GeneralUserGS_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 47.8,
+    "loop_frames": [
+      6310,
+      6647
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 3,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0041_GeneralUserGS_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 54.86,
+    "loop_frames": [
+      6613,
+      6837
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 5,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0041_GeneralUserGS_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 90.0,
+    "loop_frames": [
+      50,
+      82
+    ],
+    "ahdsr": true
+  }
+]

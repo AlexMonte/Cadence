@@ -407,3 +407,127 @@ fn schedule_due_windows_emits_gain_segment_update_without_restarting_voice() {
         ScheduledIntentKind::UpdateVoiceControls { .. }
     ));
 }
+
+#[test]
+fn thousands_of_repetitions_keep_only_current_voice_and_update_records() {
+    let controls = ControlTrack::new(
+        Time::ONE,
+        vec![
+            ControlTile::spanning(
+                Time::ZERO,
+                Time::new(1, 4),
+                ControlKey::Gain,
+                ControlValue::Scalar(1.0),
+            )
+            .unwrap(),
+            ControlTile::spanning(
+                Time::new(1, 4),
+                Time::new(1, 2),
+                ControlKey::Gain,
+                ControlValue::Scalar(0.5),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let renderer = RendererCore::new(Score::with_controls(
+        Score::from(sample_voice("pad")),
+        ControlScore::from(controls),
+    ));
+    let clock = Clock::new(Time::ONE, Instant::now());
+    let mut scheduler = Scheduler::new(renderer, Time::ONE, Time::new(1, 16));
+    let mut starts = 0;
+    let mut first_voice = None;
+    for step in 0..(2048 * 16) {
+        for event in scheduler.poll_next_window(&clock).unwrap() {
+            if matches!(event.kind(), ScheduledIntentKind::StartVoice { .. }) {
+                assert_eq!(event.entry_time(), Time::whole_number(starts));
+                if starts == 0 {
+                    first_voice = Some(event.voice_id());
+                } else {
+                    assert_ne!(Some(event.voice_id()), first_voice);
+                }
+                starts += 1;
+            }
+        }
+        assert!(scheduler.active_voices.len() <= 1);
+        assert!(scheduler.active_starts.len() <= 1);
+        assert!(scheduler.active_updates.len() <= 1);
+        assert!(
+            scheduler
+                .active_updates
+                .keys()
+                .all(|key| scheduler.active_voices.contains_key(&key.voice_id))
+        );
+        if step % 16 >= 8 {
+            assert!(scheduler.active_voices.is_empty());
+            assert!(scheduler.active_starts.is_empty());
+            assert!(scheduler.active_updates.is_empty());
+        }
+    }
+    assert_eq!(starts, 2048);
+
+    // The same reset path used by seek/stop discards both onset and update
+    // records, allowing one backfill and then a clean replay of cycle zero.
+    scheduler.reset_to(Time::new(1, 4));
+    assert!(scheduler.active_voices.is_empty());
+    assert!(scheduler.active_starts.is_empty());
+    assert!(scheduler.active_updates.is_empty());
+    let backfill = scheduler.poll_next_window(&clock).unwrap();
+    assert_eq!(backfill.len(), 1);
+    assert!(matches!(
+        backfill[0].kind(),
+        ScheduledIntentKind::StartVoice { .. }
+    ));
+    assert_eq!(Some(backfill[0].voice_id()), first_voice);
+    assert_eq!(
+        backfill[0].entry(),
+        ScheduledEntry::InProgress {
+            elapsed: Time::new(1, 4)
+        }
+    );
+    assert!(scheduler.poll_next_window(&clock).unwrap().is_empty());
+    scheduler.reset_to(Time::ZERO);
+    let replay = scheduler.poll_next_window(&clock).unwrap();
+    assert_eq!(replay.len(), 1);
+    assert_eq!(Some(replay[0].voice_id()), first_voice);
+    assert_eq!(replay[0].entry(), ScheduledEntry::Onset);
+}
+
+#[test]
+fn slow_voice_remains_known_across_slot_visibility_gaps_until_its_span_ends() {
+    use crate::domain::score::WeightedScore;
+    let held = Voice::new(
+        Time::ONE,
+        vec![Tile::spanning(Time::ZERO, Time::ONE, Intent::sample("held")).unwrap()],
+    )
+    .unwrap();
+    let score = Score::weighted_cycle_slots(vec![
+        WeightedScore::new(
+            Score::time_scale(Score::from(held), Time::new(1, 2)),
+            Time::ONE,
+        ),
+        WeightedScore::new(Score::from(sample_voice("other")), Time::ONE),
+    ]);
+    let clock = Clock::new(Time::ONE, Instant::now());
+    let mut scheduler = Scheduler::new(RendererCore::new(score), Time::ONE, Time::new(1, 8));
+    let mut held_starts = Vec::new();
+    for _ in 0..32 {
+        for event in scheduler.poll_next_window(&clock).unwrap() {
+            if matches!(event.kind(), ScheduledIntentKind::StartVoice { .. })
+                && matches!(event.intent(), Intent::Sample(sample) if sample.sample_id == "held")
+            {
+                held_starts.push(event);
+            }
+        }
+        assert!(scheduler.active_voices.len() <= 2);
+    }
+    assert_eq!(
+        held_starts.len(),
+        2,
+        "one onset for each two-cycle slow note"
+    );
+    assert_eq!(held_starts[0].entry_time(), Time::ZERO);
+    assert_eq!(held_starts[1].entry_time(), Time::whole_number(2));
+    assert_ne!(held_starts[0].voice_id(), held_starts[1].voice_id());
+}

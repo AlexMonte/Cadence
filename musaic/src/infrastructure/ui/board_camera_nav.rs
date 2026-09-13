@@ -140,13 +140,17 @@ fn apply_board_cursor_icon(
 
 fn board_camera_edge_scroll(
     session: Res<EditorSession>,
+    mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
     windows: Query<&Window, With<PrimaryWindow>>,
     viewports: Query<(&ComputedNode, &UiGlobalTransform), With<UiBoardViewport>>,
     pointer: Res<BoardCameraPointerState>,
     mut requests: MessageWriter<CameraRequest>,
 ) {
-    if session.is_placing_from_drawer()
+    // Hovering near the edge must never move the authored program out of view.
+    // Automatic panning only helps an active drag reach another board slot.
+    if !session.is_placing_from_drawer()
+        || !mouse.pressed(MouseButton::Left)
         || pointer.viewport_pan_active
         || pointer.middle_orbit_active
     {
@@ -155,6 +159,9 @@ fn board_camera_edge_scroll(
     let Ok(window) = windows.single() else {
         return;
     };
+    if !window.focused {
+        return;
+    }
     let Ok((node, global)) = viewports.single() else {
         return;
     };
@@ -262,6 +269,39 @@ fn edge_scroll_vector(local: Vec2, size: Vec2, margin: f32) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_hover_near_grid_edge_never_pans_the_program_away() {
+        let mut app = App::new();
+        app.init_resource::<EditorSession>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<BoardCameraPointerState>()
+            .init_resource::<Time>()
+            .add_message::<CameraRequest>()
+            .add_systems(Update, board_camera_edge_scroll);
+        let mut window = Window {
+            focused: true,
+            ..default()
+        };
+        window.set_cursor_position(Some(Vec2::new(1.0, 300.0)));
+        app.world_mut().spawn((window, PrimaryWindow));
+        app.world_mut().spawn((
+            UiBoardViewport,
+            ComputedNode {
+                size: Vec2::new(800.0, 600.0),
+                inverse_scale_factor: 1.0,
+                ..default()
+            },
+            UiGlobalTransform::from_translation(Vec2::new(400.0, 300.0)),
+        ));
+        for _ in 0..120 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(16));
+            app.update();
+            assert!(app.world().resource::<Messages<CameraRequest>>().is_empty());
+        }
+    }
 
     #[test]
     fn edge_scroll_idle_in_viewport_interior() {

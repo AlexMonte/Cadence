@@ -1,0 +1,23 @@
+error: #[dependency(...)] can only be used on Handle<T> fields
+ --> tests/ui/non_handle_field.rs:7:12
+  |
+7 |     label: String,
+  |            ^^^^^^
+
+error[E0277]: the trait bound `std::string::String: VisitAssetDependencies` is not satisfied
+ --> tests/ui/non_handle_field.rs:4:20
+  |
+4 | #[derive(Resource, Asset, LoadAssetResource, TypePath, Clone)]
+  |                    ^^^^^ the trait `VisitAssetDependencies` is not implemented for `std::string::String`
+  |
+  = help: the following other types implement trait `VisitAssetDependencies`:
+            ()
+            AnimationClip
+            AnimationGraph
+            AudioSource
+            AutoExposureCompensationCurve
+            BadAsset
+            ColorMaterial
+            DynamicWorld
+          and $N others
+  = note: this error originates in the derive macro `Asset` (in Nightly builds, run with -Z macro-backtrace for more info)

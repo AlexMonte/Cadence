@@ -20,7 +20,9 @@ pub use crate::{
         AudioTriggerResolver, Frame, SampleBuffer,
     },
     application::{
-        audio::{AudioTrigger, AudioTriggerReceiver, AudioTriggerSender, audio_trigger_channel},
+        audio::{
+            AudioTriggerReceiver, AudioTriggerSender, ScheduledAudioEvent, audio_trigger_channel,
+        },
         sample::SampleTrigger,
         synth::SynthTrigger,
     },

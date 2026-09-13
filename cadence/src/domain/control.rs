@@ -195,6 +195,12 @@ impl ControlSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 /// Typed model errors for control construction, validation, and resolution.
 pub enum ControlModelError {
+    /// A host pattern source rejected a query or returned invalid source data.
+    #[error("pattern query failed: {0}")]
+    QuerySource(String),
+    /// A timed arrangement query exceeds bounded iteration or exact-time limits.
+    #[error("arrangement query exceeds its work or time bounds")]
+    ArrangementQueryLimit,
     /// One control name is not part of the current core model.
     #[error("unknown control name `{0}`")]
     UnknownControlName(String),
@@ -312,6 +318,36 @@ impl SignedUnitValue {
     }
 }
 
+/// An additive pan sum. Authored offsets are bipolar; nested sums remain exact
+/// until stereo rendering clamps the final position to [-1, 1].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PanControl(f64);
+impl Eq for PanControl {}
+
+impl PanControl {
+    /// Creates a pan offset from a validated bipolar value.
+    pub fn new(value: SignedUnitValue) -> Self {
+        Self(value.value())
+    }
+
+    /// Returns the combined offset before the renderer clamps it.
+    pub fn value(self) -> f64 {
+        self.0
+    }
+
+    pub(crate) fn add(self, other: Self) -> Result<Self, ControlModelError> {
+        let value = self.0 + other.0;
+        if value.is_finite() {
+            Ok(Self(value))
+        } else {
+            Err(ControlModelError::InvalidControlValueRange {
+                key: "pan",
+                reason: "combined pan must be finite",
+            })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 /// Canonical control lanes understood by the runtime.
 pub enum ControlKey {
@@ -321,8 +357,10 @@ pub enum ControlKey {
     SampleBank,
     /// Explicit sample-variant selection.
     SampleVariant,
-    /// Musical pitch, usually in MIDI-note space or semitone offset space.
+    /// Absolute musical pitch in MIDI-note space.
     Pitch,
+    /// Additive transposition in signed semitones, independent of base pitch.
+    Transpose,
     /// Note velocity in unit range.
     Velocity,
     /// Legato amount or ratio.
@@ -347,6 +385,11 @@ pub enum ControlKey {
     PlaybackEnd,
     /// Reverse playback toggle.
     Reverse,
+    /// Fit the selected source region to its authored slot by changing rate.
+    /// Explicit rate and pitch offsets are applied afterward and can change its duration.
+    Fit,
+    /// Repeat the selected source region until its note envelope ends.
+    Loop,
     /// Low-pass cutoff frequency.
     LowPassCutoff,
     /// Low-pass resonance / Q.
@@ -357,6 +400,8 @@ pub enum ControlKey {
     HighPassResonance,
     /// Post-effect gain.
     PostGain,
+    /// Additive stereo pan offset, independent of spatial distance.
+    Pan,
     /// Reverb send.
     ReverbSend,
     /// Delay send.
@@ -365,7 +410,7 @@ pub enum ControlKey {
     Compressor,
     /// Named selector lane.
     Select(Symbol),
-    /// Pitch bend amount.
+    /// Normalized live pitch bend in [-1, 1], currently mapped to +/-2 semitones.
     PitchBend,
     /// Mod-wheel amount.
     ModWheel,
@@ -413,6 +458,14 @@ impl ControlKey {
                 ControlMerge::Add,
                 ControlSupport::Shared,
                 false,
+            ),
+            Self::Transpose => ControlSpec::new(
+                "transpose",
+                ControlValueKind::Scalar,
+                ControlTiming::ContinuousRuntime,
+                ControlMerge::Add,
+                ControlSupport::Shared,
+                true,
             ),
             Self::Velocity => ControlSpec::new(
                 "velocity",
@@ -489,7 +542,7 @@ impl ControlKey {
             Self::PlaybackStart => ControlSpec::new(
                 "playback_start",
                 ControlValueKind::Scalar,
-                ControlTiming::SegmentSampled,
+                ControlTiming::Onset,
                 ControlMerge::Override,
                 ControlSupport::SampleOnly,
                 false,
@@ -497,7 +550,7 @@ impl ControlKey {
             Self::PlaybackEnd => ControlSpec::new(
                 "playback_end",
                 ControlValueKind::Scalar,
-                ControlTiming::SegmentSampled,
+                ControlTiming::Onset,
                 ControlMerge::Override,
                 ControlSupport::SampleOnly,
                 false,
@@ -505,7 +558,23 @@ impl ControlKey {
             Self::Reverse => ControlSpec::new(
                 "reverse",
                 ControlValueKind::Bool,
-                ControlTiming::SegmentSampled,
+                ControlTiming::Onset,
+                ControlMerge::Override,
+                ControlSupport::SampleOnly,
+                false,
+            ),
+            Self::Fit => ControlSpec::new(
+                "fit",
+                ControlValueKind::Bool,
+                ControlTiming::Onset,
+                ControlMerge::Override,
+                ControlSupport::SampleOnly,
+                false,
+            ),
+            Self::Loop => ControlSpec::new(
+                "loop",
+                ControlValueKind::Bool,
+                ControlTiming::Onset,
                 ControlMerge::Override,
                 ControlSupport::SampleOnly,
                 false,
@@ -547,6 +616,14 @@ impl ControlKey {
                 ControlValueKind::Scalar,
                 ControlTiming::ContinuousRuntime,
                 ControlMerge::Multiply,
+                ControlSupport::Shared,
+                false,
+            ),
+            Self::Pan => ControlSpec::new(
+                "pan",
+                ControlValueKind::Bipolar,
+                ControlTiming::ContinuousRuntime,
+                ControlMerge::Add,
                 ControlSupport::Shared,
                 false,
             ),
@@ -632,7 +709,7 @@ impl ControlKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// Reverb-style send settings.
 pub struct ReverbSettings {
     amount: UnitValue,
@@ -672,7 +749,7 @@ impl ReverbSettings {
 }
 impl Eq for ReverbSettings {}
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// Delay-send settings.
 pub struct DelaySettings {
     amount: UnitValue,
@@ -725,11 +802,12 @@ impl DelaySettings {
 }
 impl Eq for DelaySettings {}
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// Compressor settings.
 pub struct CompressorSettings {
     threshold: UnitValue,
     ratio: f64,
+    knee_db: f64,
     attack: Duration,
     release: Duration,
 }
@@ -749,9 +827,28 @@ impl CompressorSettings {
         Self {
             threshold,
             ratio,
+            knee_db: 0.0,
             attack,
             release,
         }
+    }
+
+    /// Sets the width of the soft transition, in decibels (0 is a hard knee).
+    /// Panics unless the width is finite and within 0..=40 dB.
+    #[must_use]
+    pub fn with_knee_db(mut self, knee_db: f64) -> Self {
+        assert!(
+            knee_db.is_finite() && (0.0..=40.0).contains(&knee_db),
+            "compressor knee must be 0 to 40 dB"
+        );
+        self.knee_db = knee_db;
+        self
+    }
+
+    /// Returns the transition width in decibels.
+    #[must_use]
+    pub fn knee_db(&self) -> f64 {
+        self.knee_db
     }
 
     /// Returns the compression threshold.
@@ -780,6 +877,102 @@ impl CompressorSettings {
 }
 impl Eq for CompressorSettings {}
 
+/// Bounded additive transposition descriptor evaluated in musical cycle time.
+/// Scalars, ramps and up to eight signal components retain their shared owner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SemitoneControl {
+    offset: f64,
+    signals: Vec<Signal>,
+}
+impl Default for SemitoneControl {
+    fn default() -> Self {
+        Self {
+            offset: 0.0,
+            signals: Vec::new(),
+        }
+    }
+}
+impl SemitoneControl {
+    /// Moves this control to a later occurrence, preserving local signal time.
+    pub(crate) fn shifted(mut self, offset: Time) -> Self {
+        for signal in &mut self.signals {
+            *signal = signal.with_phase(signal.phase() - signal.rate() * offset);
+        }
+        self
+    }
+    /// Creates a signed semitone offset in the supported [-127, 127] range.
+    pub fn constant(offset: f64) -> Result<Self, ControlModelError> {
+        let control = Self {
+            offset,
+            ..Self::default()
+        };
+        control.validate()?;
+        Ok(control)
+    }
+    /// Creates a continuous semitone modulation.
+    pub fn signal(signal: Signal) -> Result<Self, ControlModelError> {
+        let control = Self {
+            signals: vec![signal],
+            ..Self::default()
+        };
+        control.validate()?;
+        Ok(control)
+    }
+    /// Adds controls while retaining each continuous component.
+    pub fn combine(self, other: Self) -> Result<Self, ControlModelError> {
+        let mut result = self;
+        result.offset += other.offset;
+        if result.signals.len() + other.signals.len() > 8 {
+            return Err(ControlModelError::InvalidControlValueRange {
+                key: "transpose",
+                reason: "transpose supports at most eight simultaneous signal components",
+            });
+        }
+        result.signals.extend(other.signals);
+        result.validate()?;
+        Ok(result)
+    }
+    /// Resolves the offset at an absolute transport cycle, without allocating.
+    pub fn eval(&self, cycle: f64) -> f64 {
+        self.offset
+            + self
+                .signals
+                .iter()
+                .map(|signal| signal.eval(cycle))
+                .sum::<f64>()
+    }
+    /// Checks the complete range before audio rendering.
+    pub fn validate(&self) -> Result<(), ControlModelError> {
+        let mut low = self.offset;
+        let mut high = self.offset;
+        for signal in &self.signals {
+            if !signal.bias().is_finite() || !signal.depth().is_finite() {
+                return Err(ControlModelError::InvalidControlValueRange {
+                    key: "transpose",
+                    reason: "transpose signal bias and depth must be finite",
+                });
+            }
+            let (a, b) = if signal.waveform() == crate::domain::signal::Waveform::Ramp {
+                (signal.bias(), signal.bias() + signal.depth())
+            } else {
+                (
+                    signal.bias() - signal.depth().abs(),
+                    signal.bias() + signal.depth().abs(),
+                )
+            };
+            low += a.min(b);
+            high += a.max(b);
+        }
+        if !low.is_finite() || !high.is_finite() || low < -127.0 || high > 127.0 {
+            return Err(ControlModelError::InvalidControlValueRange {
+                key: "transpose",
+                reason: "combined transpose must stay finite and within [-127, 127] semitones",
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 /// Runtime value carried by a control lane.
 pub enum ControlValue {
@@ -800,11 +993,16 @@ pub enum ControlValue {
     Bipolar(SignedUnitValue),
     /// Named symbolic choice.
     Choice(Symbol),
-    /// Continuous signal source evaluated per audio frame on the audio thread.
+    /// Signal evaluated at note onset for Velocity, or per audio frame for
+    /// continuous controls.
     ///
     /// Signal-valued lanes are attached once to a projected moment (like an
     /// attach-once value) and are not boundary-sliced during projection.
     Signal(Signal),
+    /// Resolved additive semitone control used by the Transpose lane.
+    Semitones(SemitoneControl),
+    /// Resolved additive stereo pan, clamped only by the renderer.
+    Pan(PanControl),
     /// Reverb-send settings.
     Reverb(ReverbSettings),
     /// Delay-send settings.
@@ -826,6 +1024,8 @@ impl ControlValue {
             Self::Bipolar(_) => "bipolar",
             Self::Choice(_) => "choice",
             Self::Signal(_) => "signal",
+            Self::Semitones(_) => "semitones",
+            Self::Pan(_) => "pan",
             Self::Reverb(_) => "reverb_settings",
             Self::Delay(_) => "delay_settings",
             Self::Compressor(_) => "compressor_settings",
@@ -835,15 +1035,57 @@ impl ControlValue {
     /// Validates that this value shape matches the given key.
     pub fn validate_for(&self, key: &ControlKey) -> Result<(), ControlModelError> {
         match (key, self) {
-            (ControlKey::Gate | ControlKey::Reverse | ControlKey::SustainPedal, Self::Bool(_)) => {
-                Ok(())
-            }
+            (
+                ControlKey::Gate
+                | ControlKey::Reverse
+                | ControlKey::SustainPedal
+                | ControlKey::Fit
+                | ControlKey::Loop,
+                Self::Bool(_),
+            ) => Ok(()),
             (ControlKey::SampleBank, Self::Choice(_)) => Ok(()),
             (ControlKey::Pitch, Self::Scalar(value)) => {
                 assert_finite("pitch control", *value);
                 Ok(())
             }
+            (ControlKey::Transpose, Self::Scalar(value)) => {
+                SemitoneControl::constant(*value).map(|_| ())
+            }
+            (ControlKey::Transpose, Self::Ramp { from, to }) => {
+                SemitoneControl::constant(*from)?;
+                SemitoneControl::constant(*to)?;
+                Ok(())
+            }
+            (ControlKey::Transpose, Self::Signal(signal)) => {
+                SemitoneControl::signal(*signal).map(|_| ())
+            }
+            (ControlKey::Transpose, Self::Semitones(control)) => control.validate(),
+            (ControlKey::Pan, Self::Bipolar(_) | Self::Pan(_)) => Ok(()),
             (ControlKey::Velocity, Self::Unipolar(_)) => Ok(()),
+            (ControlKey::Velocity, Self::Signal(signal)) => {
+                let (low, high) = if signal.waveform() == crate::domain::signal::Waveform::Ramp {
+                    let a = signal.bias();
+                    let b = a + signal.depth();
+                    (a.min(b), a.max(b))
+                } else {
+                    (
+                        signal.bias() - signal.depth().abs(),
+                        signal.bias() + signal.depth().abs(),
+                    )
+                };
+                if signal.bias().is_finite()
+                    && signal.depth().is_finite()
+                    && low >= 0.0
+                    && high <= 1.0
+                {
+                    Ok(())
+                } else {
+                    Err(ControlModelError::InvalidControlValueRange {
+                        key: key.canonical_name(),
+                        reason: "velocity signal must stay finite and within [0.0, 1.0]",
+                    })
+                }
+            }
             (ControlKey::Velocity, Self::Scalar(value)) => {
                 if value.is_finite() && (0.0..=1.0).contains(value) {
                     Ok(())
@@ -907,12 +1149,12 @@ impl ControlValue {
             }
             (ControlKey::Gain, Self::Unipolar(_)) => Ok(()),
             (ControlKey::PlaybackRate, Self::Scalar(value)) => {
-                if value.is_finite() && *value > 0.0 {
+                if value.is_finite() && *value > 0.0 && *value <= 65_536.0 {
                     Ok(())
                 } else {
                     Err(ControlModelError::InvalidControlValueRange {
                         key: key.canonical_name(),
-                        reason: "playback rate must be finite and > 0.0",
+                        reason: "playback rate must be finite, positive and at most 65536",
                     })
                 }
             }
@@ -1007,6 +1249,8 @@ impl ControlValue {
                 | Self::Bipolar(_)
                 | Self::Choice(_)
                 | Self::Signal(_)
+                | Self::Semitones(_)
+                | Self::Pan(_)
                 | Self::Reverb(_)
                 | Self::Delay(_)
                 | Self::Compressor(_) => Ok(()),

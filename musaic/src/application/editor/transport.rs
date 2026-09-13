@@ -18,6 +18,7 @@ use crate::infrastructure::app::TransportMode;
 pub struct TransportClock {
     pub position: CycleTime,
     pub bpm: f64,
+    pub beats_per_cycle: u32,
     pub loop_region: Option<Span<CycleTime>>,
 }
 
@@ -26,6 +27,7 @@ impl Default for TransportClock {
         Self {
             position: CycleTime::ZERO,
             bpm: 120.0,
+            beats_per_cycle: 4,
             loop_region: None,
         }
     }
@@ -47,6 +49,7 @@ pub fn sync_clock_from_document(
     mut clock: ResMut<'_, TransportClock>,
 ) {
     clock.set_bpm(project.document.playback.bpm);
+    clock.beats_per_cycle = project.document.playback.beats_per_cycle;
 }
 
 pub fn handle_transport_command(
@@ -62,12 +65,37 @@ pub fn handle_transport_command(
         }
         EditorCommand::TransportStop => {
             transport_mode.set(TransportMode::Stopped);
+            clock.seek(CycleTime::ZERO);
+            runtime.transport_request =
+                Some(crate::application::pipeline::runtime::TransportRequest::Stop);
+            runtime.mark_transport_changed();
+            true
+        }
+        EditorCommand::TransportPause => {
+            transport_mode.set(TransportMode::Paused);
+            true
+        }
+        EditorCommand::TransportPanic => {
+            transport_mode.set(TransportMode::Stopped);
+            clock.seek(CycleTime::ZERO);
+            runtime.transport_request =
+                Some(crate::application::pipeline::runtime::TransportRequest::Panic);
+            runtime.mark_transport_changed();
             true
         }
         EditorCommand::TransportToggle => false,
         EditorCommand::TransportSeek { position_cycles } => {
-            clock.seek(cycle_time_from_f64(*position_cycles));
-            runtime.dirty.runtime = true;
+            if !position_cycles.is_finite()
+                || *position_cycles < 0.0
+                || *position_cycles > 1_000_000.0
+            {
+                return true;
+            }
+            let position = cycle_time_from_f64(*position_cycles);
+            clock.seek(position);
+            runtime.transport_request =
+                Some(crate::application::pipeline::runtime::TransportRequest::Seek(position));
+            runtime.mark_transport_changed();
             true
         }
         // SetBpm goes through execute_command (document + invalidation);
@@ -78,8 +106,8 @@ pub fn handle_transport_command(
 
 pub fn toggle_transport_mode(current: TransportMode) -> TransportMode {
     match current {
-        TransportMode::Playing => TransportMode::Stopped,
-        TransportMode::Stopped => TransportMode::Playing,
+        TransportMode::Playing => TransportMode::Paused,
+        TransportMode::Stopped | TransportMode::Paused => TransportMode::Playing,
     }
 }
 

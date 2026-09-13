@@ -110,7 +110,7 @@ impl Board {
 
     pub fn remove_at(&mut self, slot: BoardSlot) -> Option<TileRef> {
         let id = self.slot_to_node.get(&slot)?.clone();
-        let placement = self.program.root_surface.placements.get(&id)?.clone();
+        let placement = *self.program.root_surface.placements.get(&id)?;
         unindex_placement_cells(&mut self.slot_to_node, &id, &placement);
         remove_placed_node(&mut self.program, &id);
         Some(TileRef {
@@ -129,13 +129,12 @@ impl Board {
         F: FnOnce(TileSlot<'_>) -> Result<TileRef, BoardError>,
     {
         self.ensure_live_tile(from)?;
-        let from_placement = self
+        let from_placement = *self
             .program
             .root_surface
             .placements
             .get(&from.id)
-            .expect("live tile has placement")
-            .clone();
+            .expect("live tile has placement");
         let neighbor_footprint = TileFootprint::unit();
         let anchor = from_placement.footprint.anchor_for_neighbor(
             from_placement.slot,
@@ -169,10 +168,10 @@ impl Board {
             footprint: placement.footprint,
         };
         for cell in new_placement.footprint.occupied_cells(new_placement.slot) {
-            if let Some(occupant) = self.slot_to_node.get(&cell) {
-                if occupant != id {
-                    return Err(BoardError::SlotOccupied);
-                }
+            if let Some(occupant) = self.slot_to_node.get(&cell)
+                && occupant != id
+            {
+                return Err(BoardError::SlotOccupied);
             }
         }
         unindex_placement_cells(&mut self.slot_to_node, id, &placement);
@@ -259,12 +258,12 @@ impl Board {
     }
 
     fn ensure_unique_id(&self, id: &NodeId, slot: BoardSlot) -> Result<(), BoardError> {
-        if let Some(placement) = self.program.root_surface.placements.get(id) {
-            if placement.slot != slot {
-                return Err(BoardError::DuplicateId {
-                    existing_slot: placement.slot,
-                });
-            }
+        if let Some(placement) = self.program.root_surface.placements.get(id)
+            && placement.slot != slot
+        {
+            return Err(BoardError::DuplicateId {
+                existing_slot: placement.slot,
+            });
         }
         Ok(())
     }
@@ -284,14 +283,11 @@ impl Board {
             return;
         }
         for cell in footprint.occupied_cells(slot) {
-            if self.slot_to_node.contains_key(&cell) {
-                if let Some(id) = self.slot_to_node.get(&cell).cloned() {
-                    if let Some(placement) = self.program.root_surface.placements.get(&id).cloned()
-                    {
-                        unindex_placement_cells(&mut self.slot_to_node, &id, &placement);
-                        remove_placed_node(&mut self.program, &id);
-                    }
-                }
+            if let Some(id) = self.slot_to_node.get(&cell).cloned()
+                && let Some(placement) = self.program.root_surface.placements.get(&id).copied()
+            {
+                unindex_placement_cells(&mut self.slot_to_node, &id, &placement);
+                remove_placed_node(&mut self.program, &id);
             }
         }
     }
@@ -330,6 +326,7 @@ impl Board {
         self.program.containers.insert(
             container_id.clone(),
             Container {
+                source_nodes: Default::default(),
                 kind,
                 axis: crate::domain::ContainerAxis::Time,
                 stack,
@@ -357,6 +354,7 @@ impl Board {
         self.program.containers.insert(
             container_id,
             Container {
+                source_nodes: Default::default(),
                 kind,
                 axis: crate::domain::ContainerAxis::Time,
                 stack,
@@ -474,6 +472,21 @@ impl TileSlot<'_> {
         )
     }
 
+    /// Run each child for its Elongate duration in cycles.
+    pub fn arrangement(
+        self,
+        stack: impl Into<Vec<ContainerSurfaceTile>>,
+    ) -> Result<TileRef, BoardError> {
+        self.board.place_container(
+            self.slot,
+            self.footprint,
+            self.name,
+            ContainerKind::Arrangement,
+            stack.into(),
+            self.replace,
+        )
+    }
+
     pub fn alternate(
         self,
         stack: impl Into<Vec<ContainerSurfaceTile>>,
@@ -526,6 +539,13 @@ impl TileSlot<'_> {
         self.transform(TransformKind::Transpose)
     }
 
+    /// Places a numeric operand as an independently editable source tile.
+    pub fn scalar(self, value: crate::domain::Rational) -> Result<TileRef, BoardError> {
+        let node = RootSurfaceNodeKind::Scalar(crate::domain::ScalarAtom { value });
+        self.board
+            .place_node(self.slot, self.footprint, self.name, node, self.replace)
+    }
+
     pub fn transform(self, kind: TransformKind) -> Result<TileRef, BoardError> {
         let node = RootSurfaceNodeKind::Transform(TransformNode::new(kind));
         self.board
@@ -539,9 +559,18 @@ impl TileSlot<'_> {
     }
 
     pub fn flow_control(self, kind: FlowControlKind) -> Result<TileRef, BoardError> {
-        let node = RootSurfaceNodeKind::FlowControl(FlowControlNode::new(kind));
-        self.board
-            .place_node(self.slot, self.footprint, self.name, node, self.replace)
+        self.flow_control_node(FlowControlNode::new(kind))
+    }
+
+    /// Places a complete flow definition without resetting its policy or declared ports.
+    pub fn flow_control_node(self, node: FlowControlNode) -> Result<TileRef, BoardError> {
+        self.board.place_node(
+            self.slot,
+            self.footprint,
+            self.name,
+            RootSurfaceNodeKind::FlowControl(node),
+            self.replace,
+        )
     }
 
     pub fn layer(
@@ -674,6 +703,9 @@ impl Flow {
         match kind {
             ContainerKind::Sequence => {
                 slot.sequence(stack)?;
+            }
+            ContainerKind::Arrangement => {
+                slot.arrangement(stack)?;
             }
             ContainerKind::Alternate => {
                 slot.alternate(stack)?;

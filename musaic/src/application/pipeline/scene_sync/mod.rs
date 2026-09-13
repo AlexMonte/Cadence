@@ -1,25 +1,22 @@
 //! Scene projection: canonical document + attention + selection → visible board read model.
 
-pub mod board_scene;
 pub mod logic;
+mod projection;
 pub mod surface_content;
 pub mod types;
 pub mod view_model;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::state::condition::in_state;
 
 use crate::infrastructure::app::MusaicSet;
 
-pub use board_scene::{
-    BoardSceneAtomCompound, BoardSceneConnection, BoardSceneTile, TileVisualKind,
-    project_board_scene,
-};
 pub use logic::{
     focused_node_from_attention, needs_visible_board_rebuild, render_focus_from_attention,
 };
 pub use types::{
-    BoardScene, RenderBoardFocus, TileSurfaceContent, VisibleAtomCompound, VisibleBoardConnection,
+    RenderBoardFocus, TileSurfaceContent, VisibleAtomCompound, VisibleBoardConnection,
     VisibleBoardNode, VisibleNodeKind,
 };
 pub use view_model::VisibleBoardState;
@@ -47,52 +44,57 @@ pub fn register_scene_sync(app: &mut App) {
         );
 }
 
-fn compute_ui_projection_system(
-    project: Res<'_, crate::application::session::MusaicProject>,
-    attention: Res<'_, crate::application::editor::EditorAttention>,
-    selection: Res<'_, crate::application::editor::SelectionState>,
-    session: Res<'_, crate::application::editor::EditorSession>,
-    cursor: Res<'_, crate::application::editor::CursorInteraction>,
-    drawer_panel: Res<'_, crate::application::editor::DrawerPanelState>,
-    minimap_panel: Res<'_, crate::application::editor::MinimapPanelState>,
-    timeline_panel: Res<'_, crate::application::editor::TimelinePanelState>,
-    visible: Res<'_, VisibleBoardState>,
-    preview: Res<'_, crate::application::pipeline::runtime::RuntimePreviewSnapshot>,
-    diagnostics: Res<'_, crate::infrastructure::diagnostics::DiagnosticStore>,
-    tile_assets: Option<Res<'_, crate::infrastructure::ui::transform_tile::TransformTileAssets>>,
-    ui_sprites: Option<Res<'_, crate::adapter::load_up::UiSpriteAssets>>,
-    mut projection: ResMut<'_, crate::application::pipeline::ui_projection::EditorUiProjection>,
-    mut last: ResMut<'_, crate::application::pipeline::ui_projection::LastEditorUiProjection>,
-    mut dirty: ResMut<'_, crate::application::pipeline::ui_projection::UiDirty>,
-) {
+#[derive(SystemParam)]
+struct UiProjectionSystemParams<'w> {
+    project: Res<'w, crate::application::session::MusaicProject>,
+    attention: Res<'w, crate::application::editor::EditorAttention>,
+    selection: Res<'w, crate::application::editor::SelectionState>,
+    session: Res<'w, crate::application::editor::EditorSession>,
+    cursor: Res<'w, crate::application::editor::CursorInteraction>,
+    drawer_panel: Res<'w, crate::application::editor::DrawerPanelState>,
+    minimap_panel: Res<'w, crate::application::editor::MinimapPanelState>,
+    timeline_panel: Res<'w, crate::application::editor::TimelinePanelState>,
+    visible: Res<'w, VisibleBoardState>,
+    preview: Res<'w, crate::application::pipeline::runtime::RuntimePreviewSnapshot>,
+    view_settings: Res<'w, crate::application::board_view_settings::BoardViewSettings>,
+    diagnostics: Res<'w, crate::infrastructure::diagnostics::DiagnosticStore>,
+    tile_assets: Option<Res<'w, crate::infrastructure::ui::transform_tile::TransformTileAssets>>,
+    ui_sprites: Option<Res<'w, crate::adapter::load_up::UiSpriteAssets>>,
+    projection: ResMut<'w, crate::application::pipeline::ui_projection::EditorUiProjection>,
+    last: ResMut<'w, crate::application::pipeline::ui_projection::LastEditorUiProjection>,
+    dirty: ResMut<'w, crate::application::pipeline::ui_projection::UiDirty>,
+}
+
+fn compute_ui_projection_system(mut params: UiProjectionSystemParams<'_>) {
     use crate::application::pipeline::ui_projection::{
         UiProjectionInputs, compute_editor_ui_projection, diff_ui_regions,
     };
 
     let next = compute_editor_ui_projection(&UiProjectionInputs {
-        project: &project,
-        attention: &attention,
-        selection: &selection,
-        session: &session,
-        cursor: &cursor,
-        drawer_panel: &drawer_panel,
-        minimap_panel: &minimap_panel,
-        timeline_panel: &timeline_panel,
-        visible: &visible,
-        preview: &preview,
-        diagnostics: &diagnostics,
-        transform_tiles_ready: tile_assets.as_ref().is_some_and(|a| a.ready),
-        ui_sprites_ready: ui_sprites.is_some(),
+        project: &params.project,
+        attention: &params.attention,
+        selection: &params.selection,
+        session: &params.session,
+        cursor: &params.cursor,
+        drawer_panel: &params.drawer_panel,
+        minimap_panel: &params.minimap_panel,
+        timeline_panel: &params.timeline_panel,
+        visible: &params.visible,
+        preview: &params.preview,
+        view_settings: *params.view_settings,
+        diagnostics: &params.diagnostics,
+        transform_tiles_ready: params.tile_assets.as_ref().is_some_and(|a| a.ready),
+        ui_sprites_ready: params.ui_sprites.is_some(),
     });
     // First frame after reset: last is default — force full dirty via all-true when
     // last matches default and next is non-default, or always diff (default→real is dirty).
-    *dirty = diff_ui_regions(&last.0, &next);
-    last.0 = next.clone();
-    *projection = next;
+    *params.dirty = diff_ui_regions(&params.last.0, &next);
+    params.last.0 = next.clone();
+    *params.projection = next;
 }
 
 fn mark_scene_clean(mut runtime: ResMut<'_, crate::application::pipeline::runtime::RuntimeState>) {
-    if runtime.dirty.scene {
-        runtime.dirty.scene = false;
+    if runtime.needs_scene() {
+        runtime.revisions.rendered_presentation = runtime.revisions.presentation;
     }
 }

@@ -26,11 +26,31 @@ pub fn resolve_spatial_program(
 fn infer_spatial_relations(
     authored: &AuthoredTesseraProgram,
 ) -> Result<Vec<RootRelation>, Vec<Diagnostic>> {
+    let explicit_inputs: BTreeSet<_> = authored
+        .root_surface
+        .explicit_relations
+        .iter()
+        .map(|relation| match relation {
+            RootRelation::ChainedTo { to, .. } => (
+                to.clone(),
+                InputEndpoint::Socket(crate::domain::InputPort::new("main")),
+            ),
+            RootRelation::FlowsTo { to, .. } => match to {
+                StreamTarget::OutputInput { node, endpoint }
+                | StreamTarget::TransformInput { node, endpoint }
+                | StreamTarget::FlowControlInput { node, endpoint } => {
+                    (node.clone(), endpoint.clone())
+                }
+            },
+        })
+        .collect();
     let mut relations = Vec::new();
     let mut diagnostics = Vec::new();
     for (target_node, bindings) in &authored.root_surface.bindings {
         for (input_endpoint, side) in &bindings.inputs {
-            if !side.is_enabled() {
+            if !side.is_enabled()
+                || explicit_inputs.contains(&(target_node.clone(), input_endpoint.clone()))
+            {
                 continue;
             }
             match infer_input_relation(authored, target_node, input_endpoint, *side) {
@@ -47,7 +67,7 @@ fn infer_spatial_relations(
     }
 }
 
-fn infer_input_relation(
+pub(crate) fn infer_input_relation(
     authored: &AuthoredTesseraProgram,
     target_node: &NodeId,
     input_endpoint: &InputEndpoint,
@@ -155,12 +175,14 @@ fn stream_target_for_input(
             node: target_node,
             endpoint,
         }),
-        RootSurfaceNodeKind::Container { .. } => Err(Diagnostic::new(
-            DiagnosticCategory::RootRelation,
-            DiagnosticKind::InvalidFlowTarget,
-            "Containers do not accept FlowsTo inputs by default.",
-            Some(DiagnosticLocation::RootNode(target_node)),
-        )),
+        RootSurfaceNodeKind::Container { .. } | RootSurfaceNodeKind::Scalar(_) => {
+            Err(Diagnostic::new(
+                DiagnosticCategory::RootRelation,
+                DiagnosticKind::InvalidFlowTarget,
+                "Containers do not accept FlowsTo inputs by default.",
+                Some(DiagnosticLocation::RootNode(target_node)),
+            ))
+        }
     }
 }
 

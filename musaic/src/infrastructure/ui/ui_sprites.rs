@@ -37,7 +37,7 @@ pub fn image_node(handle: &Handle<Image>) -> ImageNode {
     ImageNode::new(handle.clone()).with_mode(NodeImageMode::Auto)
 }
 
-pub fn port_slot_image<'a>(assets: &'a UiSpriteAssets, state: PortSlotState) -> &'a Handle<Image> {
+pub fn port_slot_image(assets: &UiSpriteAssets, state: PortSlotState) -> &Handle<Image> {
     match state {
         PortSlotState::Input => &assets.scalar_value_connection,
         PortSlotState::Output => &assets.control_map_connection,
@@ -80,11 +80,12 @@ pub fn spawn_scaled_sprite(
 
 pub fn spawn_panel_backdrop(
     parent: &mut ChildSpawnerCommands<'_>,
+    theme: &MusaicUiTheme,
     images: &Assets<Image>,
     sprites: Option<&UiSpriteAssets>,
     backdrop: PanelBackdrop,
 ) {
-    let chrome = MusaicUiTheme::default_dark().chrome;
+    let chrome = &theme.chrome;
     let (handle, fallback, tint) = match backdrop {
         PanelBackdrop::Panel => (sprites.map(|a| a.panel_bg.clone()), chrome.panel_bg, None),
         PanelBackdrop::Section => (
@@ -161,10 +162,7 @@ pub fn spawn_menu_item_backdrop(
     true
 }
 
-pub fn minimap_tile_image<'a>(
-    assets: &'a UiSpriteAssets,
-    kind: VisibleNodeKind,
-) -> &'a Handle<Image> {
+pub fn minimap_tile_image(assets: &UiSpriteAssets, kind: VisibleNodeKind) -> &Handle<Image> {
     match kind {
         VisibleNodeKind::Container | VisibleNodeKind::Atom => &assets.minimap_container_tile,
         VisibleNodeKind::Output => &assets.minimap_output_tile,

@@ -1,0 +1,24 @@
+[
+  {
+    "zone": 1,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0340_JCLive_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 45.54,
+    "loop_frames": [
+      7175,
+      7563
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 0,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0340_JCLive_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 45.54,
+    "loop_frames": [
+      7175,
+      7563
+    ],
+    "ahdsr": true
+  }
+]

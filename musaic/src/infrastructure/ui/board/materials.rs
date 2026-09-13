@@ -14,9 +14,7 @@ pub(super) struct Board3dRenderCache {
     pub(super) root: Option<Entity>,
     pub(super) active_surface: Option<BoardSurfaceId>,
     pub(super) layout: SurfaceLayoutKind,
-    pub(super) ortho_tiles_ready: bool,
-    pub(super) tile_icons_ready: bool,
-    pub(super) tile_meshes_ready: bool,
+    pub(super) stack_columns: usize,
     pub(super) tiles: BTreeMap<NodeId, (Entity, TileVisualKey)>,
     pub(super) connections: BTreeMap<(NodeId, NodeId), (Entity, ConnectionVisualKey)>,
     pub(super) stack_inserts: BTreeMap<StackIndex, Entity>,
@@ -26,13 +24,8 @@ pub(super) struct Board3dRenderCache {
 #[derive(Resource)]
 pub(super) struct Board3dMaterials {
     pub(super) board: Handle<StandardMaterial>,
+    pub(super) surface: Handle<StandardMaterial>,
     pub(super) grid_line: Handle<StandardMaterial>,
-    pub(super) container: Handle<StandardMaterial>,
-    pub(super) atom: Handle<StandardMaterial>,
-    pub(super) output: Handle<StandardMaterial>,
-    pub(super) trick: Handle<StandardMaterial>,
-    pub(super) generic: Handle<StandardMaterial>,
-    pub(super) selected: Handle<StandardMaterial>,
     pub(super) focused: Handle<StandardMaterial>,
     pub(super) locked_slot: Handle<StandardMaterial>,
     pub(super) connection_scalar: Handle<StandardMaterial>,
@@ -45,51 +38,30 @@ impl FromWorld for Board3dMaterials {
     fn from_world(world: &mut World) -> Self {
         let colors = world
             .get_resource::<MusaicUiTheme>()
-            .map(|t| t.board)
-            .unwrap_or_else(|| MusaicUiTheme::default_dark().board);
+            .expect("MusaicUiTheme must be inserted before Board3dMaterials")
+            .board;
+        let glyphs = world.resource::<AssetServer>().load("ui/tile-glyphs.png");
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
         Self {
+            surface: materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(glyphs),
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            }),
             board: materials.add(StandardMaterial {
                 base_color: colors.board,
+                unlit: true,
                 perceptual_roughness: 1.0,
                 ..default()
             }),
             grid_line: materials.add(StandardMaterial {
                 base_color: colors.grid_line,
+                unlit: true,
                 emissive: LinearRgba::rgb(0.005, 0.006, 0.01),
                 perceptual_roughness: 0.95,
-                ..default()
-            }),
-            container: materials.add(StandardMaterial {
-                base_color: colors.container,
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            atom: materials.add(StandardMaterial {
-                base_color: colors.atom,
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            output: materials.add(StandardMaterial {
-                base_color: colors.output,
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            trick: materials.add(StandardMaterial {
-                base_color: colors.trick,
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            generic: materials.add(StandardMaterial {
-                base_color: colors.generic,
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            selected: materials.add(StandardMaterial {
-                base_color: colors.selected,
-                emissive: LinearRgba::rgb(0.18, 0.12, 0.02),
-                perceptual_roughness: 0.8,
                 ..default()
             }),
             focused: materials.add(StandardMaterial {
@@ -105,20 +77,22 @@ impl FromWorld for Board3dMaterials {
             }),
             connection_scalar: materials.add(StandardMaterial {
                 base_color: colors.connection_scalar,
+                unlit: true,
                 emissive: LinearRgba::rgb(0.04, 0.14, 0.18),
                 perceptual_roughness: 0.85,
                 ..default()
             }),
             connection_control: materials.add(StandardMaterial {
                 base_color: colors.connection_control,
+                unlit: true,
                 emissive: LinearRgba::rgb(0.16, 0.08, 0.02),
                 perceptual_roughness: 0.85,
                 ..default()
             }),
             connection_preview: materials.add(StandardMaterial {
-                base_color: colors.connection_preview,
+                base_color: colors.connection_preview.with_alpha(0.75),
                 alpha_mode: AlphaMode::Blend,
-                emissive: LinearRgba::rgb(0.05, 0.13, 0.2),
+                unlit: true,
                 perceptual_roughness: 0.7,
                 ..default()
             }),

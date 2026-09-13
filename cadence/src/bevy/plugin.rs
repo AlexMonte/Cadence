@@ -19,8 +19,8 @@ pub enum CadenceSet {
 
 /// Registers Cadence playback resources and systems.
 ///
-/// Hosts must insert [`super::resources::PlaybackHandle`] after creating audio
-/// output (`AudioRenderer::split`) because device setup remains host-owned.
+/// Hosts must insert a [`crate::infrastructure::PlaybackRuntime`] after creating
+/// audio output (`AudioRenderer::split`) because device setup remains host-owned.
 /// Hosts that own frame order should nest [`CadenceSet`] into their schedule
 /// (Musaic: both variants under `MusaicSet::Runtime`).
 pub struct CadencePlugin;

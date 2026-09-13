@@ -1,0 +1,100 @@
+{
+  "variants": [
+    {
+      "path": "Jazz arpeggio 2 - zone 006.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 70.84,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 5302,
+          "end_frame": 5392
+        }
+      },
+      "pitch_zone": {
+        "low": 61.0,
+        "high": 64.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 2 - zone 009.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 83.62,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 4797,
+          "end_frame": 4840
+        }
+      },
+      "pitch_zone": {
+        "low": 73.0,
+        "high": 73.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 2 - zone 007.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 73.76,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 5272,
+          "end_frame": 5348
+        }
+      },
+      "pitch_zone": {
+        "low": 65.0,
+        "high": 68.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 2 - zone 008.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 78.75,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 4992,
+          "end_frame": 5049
+        }
+      },
+      "pitch_zone": {
+        "low": 69.0,
+        "high": 72.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 2 - zone 010.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 83.62,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 4797,
+          "end_frame": 4840
+        }
+      },
+      "pitch_zone": {
+        "low": 74.0,
+        "high": 83.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 2 - zone 004.audio",
+      "sample_rate": 44100,
+      "options": {
+        "root_pitch": 65.85,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 5251,
+          "end_frame": 5371
+        }
+      },
+      "pitch_zone": {
+        "low": 57.0,
+        "high": 59.0
+      }
+    }
+  ]
+}

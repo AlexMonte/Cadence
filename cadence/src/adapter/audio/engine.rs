@@ -3,13 +3,30 @@
 use std::sync::mpsc::TryRecvError;
 
 use crate::{
-    adapter::{audio::AudioControl, sample_bank::SampleBank},
+    adapter::{
+        audio::{AudioControl, RenderCommand, RenderCommandError},
+        sample_bank::SampleBank,
+    },
     application::{
-        audio::{AudioTrigger, AudioTriggerReceiver},
+        audio::{AudioTriggerReceiver, ScheduledAudioEvent},
         sample::SampleTrigger,
         synth::SynthTrigger,
     },
 };
+
+#[derive(Debug, thiserror::Error)]
+/// Resolution failure surfaced to the host, including missing project assets.
+pub enum AudioTriggerResolveError {
+    /// A bounded renderer queue rejected a command.
+    #[error(transparent)]
+    Queue(#[from] RenderCommandError),
+    /// A named sample is not available in the supplied sample bank.
+    #[error("sample '{0}' is not loaded")]
+    MissingSample(String),
+    /// The combined fitting, rate or root-pitch settings exceed supported bounds.
+    #[error("invalid sample playback: {0}")]
+    InvalidSamplePlayback(&'static str),
+}
 
 /// Pulls mixed audio triggers from the application queue and resolves them into
 /// renderer commands.
@@ -17,6 +34,7 @@ pub struct AudioTriggerResolver {
     trigger_receiver: AudioTriggerReceiver,
     sample_bank: SampleBank,
     audio: AudioControl,
+    last_error: Option<AudioTriggerResolveError>,
 }
 
 impl AudioTriggerResolver {
@@ -31,6 +49,7 @@ impl AudioTriggerResolver {
             trigger_receiver,
             sample_bank,
             audio,
+            last_error: None,
         }
     }
 
@@ -38,55 +57,105 @@ impl AudioTriggerResolver {
     ///
     /// Returns `false` when the trigger source has disconnected permanently.
     pub fn tick(&mut self) -> bool {
+        if self.trigger_receiver.take_overflow() {
+            self.last_error = Some(RenderCommandError::QueueFull.into());
+        }
         loop {
-            match self.trigger_receiver.try_recv() {
-                Ok(trigger) => self.handle_trigger(trigger),
+            match self.trigger_receiver.try_recv_timed() {
+                Ok(queued) => self.handle_trigger(queued.trigger, queued.frame),
                 Err(TryRecvError::Empty) => return true,
                 Err(TryRecvError::Disconnected) => return false,
             }
         }
     }
 
-    fn handle_trigger(&mut self, trigger: AudioTrigger) {
+    /// Takes the latest command rejection so the host can display an overload.
+    pub fn take_error(&mut self) -> Option<AudioTriggerResolveError> {
+        self.last_error.take()
+    }
+
+    fn handle_trigger(&mut self, trigger: ScheduledAudioEvent, frame: Option<u64>) {
         match trigger {
-            AudioTrigger::StartVoice(plan) => self.handle_voice_plan(plan),
-            AudioTrigger::UpdateVoiceControls { voice_id, delta } => {
-                if let Err(error) = self.audio.update_voice_controls(voice_id, delta) {
-                    eprintln!("failed to enqueue voice update: {error}");
+            ScheduledAudioEvent::StartVoice(plan) => self.handle_voice_plan(*plan, frame),
+            ScheduledAudioEvent::UpdateVoiceControls { voice_id, delta } => {
+                if let Err(error) = self.audio.schedule(
+                    frame.unwrap_or_else(|| self.audio.next_render_frame()),
+                    RenderCommand::UpdateVoiceControls {
+                        voice_id,
+                        delta: *delta,
+                    },
+                ) {
+                    self.last_error = Some(error.into());
                 }
             }
-            AudioTrigger::ReleaseVoice(voice_id) => {
-                if let Err(error) = self.audio.release_voice(voice_id) {
-                    eprintln!("failed to enqueue voice release: {error}");
+            ScheduledAudioEvent::ReleaseVoice(voice_id) => {
+                if let Err(error) = self.audio.schedule(
+                    frame.unwrap_or_else(|| self.audio.next_render_frame()),
+                    RenderCommand::ReleaseVoice(voice_id),
+                ) {
+                    self.last_error = Some(error.into());
                 }
             }
         }
     }
 
-    fn handle_voice_plan(&mut self, plan: crate::application::audio::AudioVoicePlan) {
+    fn handle_voice_plan(
+        &mut self,
+        plan: crate::application::audio::AudioVoicePlan,
+        frame: Option<u64>,
+    ) {
         match &plan.source {
-            crate::application::audio::AudioSourcePlan::Sample(_) => {
+            crate::application::audio::AudioSourcePlan::Sample(source) => {
+                if !source.playback_start.is_finite()
+                    || !source.playback_end.is_finite()
+                    || source.playback_start < 0.0
+                    || source.playback_start >= source.playback_end
+                    || source.playback_end > 1.0
+                {
+                    self.last_error = Some(AudioTriggerResolveError::InvalidSamplePlayback(
+                        "sample region must satisfy 0 <= start < end <= 1",
+                    ));
+                    return;
+                }
                 let Some(trigger) = SampleTrigger::from_voice_plan(&plan) else {
                     return;
                 };
                 let loaded = match self.sample_bank.resolve_trigger(&trigger) {
                     Some(loaded) => loaded,
                     None => {
-                        eprintln!("failed to find decoded sample for trigger '{trigger:?}'");
+                        self.last_error = Some(AudioTriggerResolveError::MissingSample(
+                            trigger.sample.clone(),
+                        ));
                         return;
                     }
                 };
 
-                if let Err(error) = self.audio.play_loaded(loaded) {
-                    eprintln!("failed to enqueue render command: {error}");
+                if !loaded.trigger.playback_rate.is_finite()
+                    || loaded.trigger.playback_rate <= 0.0
+                    || loaded.trigger.playback_rate > 65_536.0
+                {
+                    self.last_error = Some(AudioTriggerResolveError::InvalidSamplePlayback(
+                        "fitted rate including root pitch must be positive, finite and at most 65536; Fit requires a positive note duration",
+                    ));
+                    return;
+                }
+
+                if let Err(error) = self.audio.schedule(
+                    frame.unwrap_or_else(|| self.audio.next_render_frame()),
+                    RenderCommand::Play(loaded),
+                ) {
+                    self.last_error = Some(error.into());
                 }
             }
             crate::application::audio::AudioSourcePlan::Synth(_) => {
                 let Some(trigger) = SynthTrigger::from_voice_plan(&plan) else {
                     return;
                 };
-                if let Err(error) = self.audio.play_synth(trigger) {
-                    eprintln!("failed to enqueue synth render command: {error}");
+                if let Err(error) = self.audio.schedule(
+                    frame.unwrap_or_else(|| self.audio.next_render_frame()),
+                    RenderCommand::PlaySynth(trigger),
+                ) {
+                    self.last_error = Some(error.into());
                 }
             }
         }
@@ -101,7 +170,7 @@ mod tests {
             audio::{AudioRenderer, AudioRendererSettings, Frame, SampleBuffer},
             sample_bank::{SampleBank, SampleLoadOptions},
         },
-        application::audio::{AudioTrigger, audio_trigger_channel},
+        application::audio::{ScheduledAudioEvent, audio_trigger_channel},
         domain::{
             control::ControlMap,
             intent::{BuiltInSynthSource, SampleIntent},
@@ -123,7 +192,7 @@ mod tests {
         let mut audio_engine = AudioTriggerResolver::new(trigger_receiver, bank, audio);
 
         trigger_sender
-            .send(AudioTrigger::StartVoice(
+            .send(ScheduledAudioEvent::start_voice(
                 crate::application::audio::AudioVoicePlan::from_live_sample(
                     crate::application::audio::VoiceInstanceId::new(1),
                     &SampleIntent::new("kick"),
@@ -165,7 +234,7 @@ mod tests {
         let mut audio_engine = AudioTriggerResolver::new(trigger_receiver, bank, audio);
 
         trigger_sender
-            .send(AudioTrigger::StartVoice(
+            .send(ScheduledAudioEvent::start_voice(
                 crate::application::audio::AudioVoicePlan::from_live_synth(
                     crate::application::audio::VoiceInstanceId::new(2),
                     BuiltInSynthSource::Sine,

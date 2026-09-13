@@ -20,8 +20,7 @@ use crate::domain::rational::Time;
 /// Keeping the `tick` concept inside [`ClockTime`] is valuable even in a
 /// cycle-oriented app because it gives us a stable whole+fraction transport
 /// representation that can also be reused for lower-level timing concerns
-/// that are not strictly musical phrase/cycle semantics.
-
+/// that are not strictly musical cycle semantics.
 /// Converts a wall-clock duration into musical cycles at the given transport rate.
 ///
 /// # Panics

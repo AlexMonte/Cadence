@@ -4,7 +4,6 @@ use super::atom::{AtomExpr, AtomTile};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[serde(transparent)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct ContainerId(pub String);
 
 impl ContainerId {
@@ -15,9 +14,10 @@ impl ContainerId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum ContainerKind {
     Sequence,
+    /// Run children for their Elongate duration in cycles, preserving local clocks.
+    Arrangement,
     Alternate,
     Layer,
 }
@@ -31,7 +31,6 @@ pub enum ContainerKind {
 /// becomes a pattern of being over a temporal-spatial lattice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub enum ContainerAxis {
     #[default]
     Time,
@@ -41,8 +40,7 @@ pub enum ContainerAxis {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ContainerSurfaceTile {
     Atom(AtomTile),
     NestedContainer(ContainerId),
@@ -51,10 +49,11 @@ pub enum ContainerSurfaceTile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct Container {
+    /// Optional authored tile identity for each input token, before normalization.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_nodes: std::collections::BTreeMap<usize, super::NodeId>,
     pub kind: ContainerKind,
-    #[serde(default)]
     pub axis: ContainerAxis,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<ContainerSurfaceTile>,
@@ -62,6 +61,7 @@ pub struct Container {
 impl Container {
     pub fn new(kind: ContainerKind, stack: Vec<ContainerSurfaceTile>) -> Self {
         Self {
+            source_nodes: Default::default(),
             kind,
             axis: ContainerAxis::Time,
             stack,
@@ -80,11 +80,9 @@ impl Container {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bevy", derive(bevy_reflect::Reflect))]
 pub struct NormalizedContainer {
     pub id: ContainerId,
     pub kind: ContainerKind,
-    #[serde(default)]
     pub axis: ContainerAxis,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exprs: Vec<AtomExpr>,

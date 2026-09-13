@@ -8,11 +8,15 @@
 //! - [`plugin`] — system order
 
 mod components;
+pub(crate) mod detail;
+pub use detail::BoardDetailLevel;
 mod grid;
 mod helpers;
+mod keyboard_cursor;
 mod materials;
 mod picking;
 mod placement_ghost;
+mod playback_activity;
 mod plugin;
 mod scene_reconcile;
 
@@ -39,26 +43,21 @@ mod tests {
     use crate::infrastructure::app::{AppState, TransportMode};
     use crate::infrastructure::ui::tile_icons::TileIconAssets;
     use crate::infrastructure::ui::transform_tile::TransformTileAssets;
-    use tessera::bevy::TesseraPlugin;
 
     fn test_app() -> App {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
             .add_plugins(bevy::state::app::StatesPlugin)
             .init_state::<AppState>()
             .init_state::<TransportMode>()
-            .insert_resource(Assets::<Image>::default())
+            .init_asset::<Image>()
             .insert_resource(Assets::<Mesh>::default())
             .insert_resource(Assets::<StandardMaterial>::default())
             .init_resource::<TransformTileAssets>()
             .init_resource::<TileIconAssets>()
             .init_resource::<super::super::board_camera_nav::BoardCameraPointerState>()
             .init_resource::<super::super::camera_rig::BoardCameraRig>()
-            .add_plugins((
-                TesseraPlugin,
-                crate::application::editor::EditorPlugin,
-                PlaybackPlugin,
-            ))
+            .add_plugins((crate::application::editor::EditorPlugin, PlaybackPlugin))
             .add_plugins(Board3dPlugin);
         app.insert_state(AppState::Editor);
         app
@@ -150,7 +149,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        place_container(&mut app, root_surface, BoardSlot::new(2, 0));
+        place_container(&mut app, root_surface, BoardSlot::new(5, 0));
         let second = app
             .world()
             .resource::<SelectionState>()

@@ -1,0 +1,13 @@
+[
+  {
+    "zone": 0,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/1080_Chaos_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 72.03,
+    "loop_frames": [
+      2024,
+      2192
+    ],
+    "ahdsr": true
+  }
+]

@@ -1,0 +1,5 @@
+error: unsupported state_safe mode `eventually`; expected `ready` or `loaded`
+ --> tests/ui/invalid_state_safe.rs:6:5
+  |
+6 |     #[dependency(path = "a.png", state_safe = eventually)]
+  |     ^

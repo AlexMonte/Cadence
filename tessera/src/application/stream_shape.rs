@@ -40,11 +40,27 @@ pub fn normalized_node_output_shape(
         return StreamShape::Any;
     }
     let shape = match program.root_nodes.get(node_id) {
+        Some(RootSurfaceNodeKind::Scalar(_)) => StreamShape::ScalarPattern,
         Some(RootSurfaceNodeKind::Container { container }) => program
             .containers
             .get(container)
             .map(|container| infer_normalized_container_shape(program, container))
             .unwrap_or(StreamShape::Any),
+        Some(RootSurfaceNodeKind::Transform(transform))
+            if transform.kind == crate::domain::TransformKind::Wire =>
+        {
+            let sources = super::relations::incoming_socket_sources_normalized(
+                program,
+                node_id,
+                &crate::domain::InputPort::new("main"),
+            );
+            sources
+                .first()
+                .map(|source| {
+                    normalized_node_output_shape(program, &source.node, &source.endpoint, visiting)
+                })
+                .unwrap_or(StreamShape::Any)
+        }
         Some(RootSurfaceNodeKind::Transform(transform)) => match endpoint {
             OutputEndpoint::Socket(port) => transform
                 .signature
@@ -80,7 +96,7 @@ fn infer_expr_shape(
     expr: &AtomExpr,
     visiting: &mut BTreeSet<NodeId>,
 ) -> StreamShape {
-    match &expr.kind {
+    let shape = match &expr.kind {
         AtomExprKind::Value(value) => infer_value_shape(program, value, visiting),
         AtomExprKind::Choice(options) | AtomExprKind::Parallel(options) => merge_expr_shapes(
             options
@@ -88,6 +104,16 @@ fn infer_expr_shape(
                 .map(|expr| infer_expr_shape(program, expr, visiting))
                 .collect(),
         ),
+    };
+    if shape == StreamShape::ScalarPattern
+        && expr
+            .modifiers
+            .iter()
+            .any(|modifier| matches!(modifier, crate::domain::AtomModifier::Scale(_)))
+    {
+        StreamShape::NotePattern
+    } else {
+        shape
     }
 }
 
@@ -98,7 +124,9 @@ fn infer_value_shape(
 ) -> StreamShape {
     match value {
         MusicalValue::Note(_) => StreamShape::NotePattern,
-        MusicalValue::Rest => StreamShape::EventPattern,
+        MusicalValue::Sound(_) => StreamShape::EventPattern,
+        MusicalValue::Rest => StreamShape::Any,
+        MusicalValue::Effect(_) => StreamShape::ControlPattern,
         MusicalValue::Scalar(_) => StreamShape::ScalarPattern,
         MusicalValue::NestedContainer(container_id) => program
             .containers
@@ -112,8 +140,19 @@ fn infer_value_shape(
 }
 
 fn merge_expr_shapes(shapes: Vec<StreamShape>) -> StreamShape {
+    // Rests carry timing but do not change the type of surrounding values.
+    let shapes: Vec<_> = shapes
+        .into_iter()
+        .filter(|shape| *shape != StreamShape::Any)
+        .collect();
     if shapes.is_empty() {
         return StreamShape::Any;
+    }
+    if shapes
+        .iter()
+        .all(|shape| matches!(shape, StreamShape::ControlPattern))
+    {
+        return StreamShape::ControlPattern;
     }
     if shapes
         .iter()

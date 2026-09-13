@@ -1,13 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::application::{
-    compile_container, compile_context::CompileContext, compile_flow_control_node_ir,
+    compile_container_ir, compile_context::CompileContext, compile_flow_control_node_ir,
     compile_transform_node_ir, relations,
 };
 use crate::domain::{
-    CycleDuration, CycleSpan, CycleTime, Diagnostic, NodeId, NormalizedProgram, OutputEndpoint,
-    OutputPort, PatternIr, PatternNodeIr, PatternOutput, PatternStream, PortGroupId,
-    RootSurfaceNodeKind, StreamSource,
+    Diagnostic, NodeId, NormalizedProgram, OutputEndpoint, OutputPort, PatternIr, PatternNodeIr,
+    PatternOutput, PatternStream, PortGroupId, RootSurfaceNodeKind, StreamSource,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -130,8 +129,95 @@ fn compile_node_all_outputs_ir(
     visiting: &mut BTreeSet<NodeOutputKey>,
 ) -> Result<NodeOutputsIr, Vec<Diagnostic>> {
     match program.root_nodes.get(node_id) {
+        Some(RootSurfaceNodeKind::Scalar(scalar)) => Ok(BTreeMap::from_iter([(
+            OutputEndpoint::Socket(OutputPort::new("out")),
+            PatternNodeIr::scalar_stream(crate::domain::ScalarStream::new(vec![
+                crate::domain::ScalarEvent::new(
+                    crate::domain::CycleSpan::new(
+                        crate::domain::CycleTime(crate::domain::Rational::zero()),
+                        crate::domain::CycleDuration(crate::domain::Rational::one()),
+                    ),
+                    scalar.value,
+                ),
+            ])),
+        )])),
+
         Some(RootSurfaceNodeKind::Container { container }) => {
             compile_container_outputs_ir(program, node_id, container, ctx, cache, visiting)
+        }
+        Some(RootSurfaceNodeKind::Transform(transform))
+            if transform.kind == crate::domain::TransformKind::Trick =>
+        {
+            let error = |message: &str| {
+                vec![Diagnostic::new(
+                    crate::domain::DiagnosticCategory::Compile,
+                    crate::domain::DiagnosticKind::CompileFailed,
+                    message,
+                    Some(crate::domain::DiagnosticLocation::RootNode(node_id.clone())),
+                )]
+            };
+            ctx.trick_calls += 1;
+            if ctx.trick_calls > 65_536 {
+                return Err(error("Trick expansion exceeds 65536 calls"));
+            }
+            if !transform.sequence.is_empty() {
+                let mut segments = Vec::new();
+                for (source, duration, repeats) in &transform.sequence {
+                    let body = compile_node_output_ir(
+                        program,
+                        source.clone(),
+                        OutputEndpoint::Socket(OutputPort::new("out")),
+                        ctx,
+                        cache,
+                        visiting,
+                    )?;
+                    segments.push(crate::domain::TimedPatternIr::new(
+                        *duration, *repeats, body,
+                    ));
+                }
+                return Ok(BTreeMap::from([(
+                    OutputEndpoint::Socket(OutputPort::new("out")),
+                    PatternNodeIr::arrange(segments),
+                )]));
+            }
+            let source = transform
+                .reference
+                .as_ref()
+                .ok_or_else(|| error("Trick has no definition"))?;
+            if visiting.len() > 128 {
+                return Err(error("Trick nesting exceeds 128 calls"));
+            }
+            let mut scope = BTreeMap::new();
+            if let Some(argument) = &transform.argument {
+                let sources = relations::incoming_socket_sources_normalized(
+                    program,
+                    node_id,
+                    &crate::domain::InputPort::new("main"),
+                );
+                if sources.len() != 1 {
+                    return Err(error("This trick needs one input pattern"));
+                }
+                let input = compile_source_ir(program, &sources[0], ctx, cache, visiting)?;
+                scope.insert(
+                    NodeOutputKey {
+                        node: argument.clone(),
+                        endpoint: OutputEndpoint::Socket(OutputPort::new("out")),
+                    },
+                    input,
+                );
+            }
+            let body = compile_node_output_ir(
+                program,
+                source.clone(),
+                OutputEndpoint::Socket(OutputPort::new("out")),
+                ctx,
+                &mut scope,
+                visiting,
+            )?;
+            Ok(BTreeMap::from([(
+                OutputEndpoint::Socket(OutputPort::new("out")),
+                body,
+            )]))
         }
         Some(RootSurfaceNodeKind::Transform(transform)) => {
             compile_transform_outputs_ir(program, node_id, transform, ctx, cache, visiting)
@@ -145,6 +231,19 @@ fn compile_node_all_outputs_ir(
             "Outputs consume streams and cannot be compiled as produced streams.",
             Some(crate::domain::DiagnosticLocation::RootNode(node_id.clone())),
         )]),
+        None if program
+            .containers
+            .contains_key(&crate::domain::ContainerId::new(node_id.0.clone())) =>
+        {
+            compile_container_outputs_ir(
+                program,
+                node_id,
+                &crate::domain::ContainerId::new(node_id.0.clone()),
+                ctx,
+                cache,
+                visiting,
+            )
+        }
         None => Err(vec![Diagnostic::new(
             crate::domain::DiagnosticCategory::Placement,
             crate::domain::DiagnosticKind::MissingContainer,
@@ -188,15 +287,7 @@ fn compile_container_outputs_ir(
     } else {
         None
     };
-    let local = PatternNodeIr::event_stream(compile_container(
-        program,
-        &normalized,
-        CycleSpan {
-            start: CycleTime(crate::domain::Rational::zero()),
-            duration: CycleDuration(crate::domain::Rational::one()),
-        },
-        ctx,
-    )?);
+    let local = compile_container_ir(program, &normalized, ctx)?;
     let node = if let Some(left) = chain_ir {
         PatternNodeIr::concat(vec![left, local])
     } else {
@@ -231,6 +322,7 @@ fn compile_flow_control_outputs_ir(
     visiting: &mut BTreeSet<NodeOutputKey>,
 ) -> Result<NodeOutputsIr, Vec<Diagnostic>> {
     let policy_ctx = CompileContext {
+        trick_calls: ctx.trick_calls,
         cycle_index: ctx.cycle_index,
         provenance_stack: ctx.provenance_stack.clone(),
     };

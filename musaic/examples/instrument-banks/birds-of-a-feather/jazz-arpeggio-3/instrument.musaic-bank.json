@@ -1,0 +1,68 @@
+{
+  "variants": [
+    {
+      "path": "Jazz arpeggio 3 - zone 008.audio",
+      "sample_rate": 22050,
+      "options": {
+        "root_pitch": 64.44,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 19667,
+          "end_frame": 20124
+        }
+      },
+      "pitch_zone": {
+        "low": 61.0,
+        "high": 64.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 3 - zone 010.audio",
+      "sample_rate": 22050,
+      "options": {
+        "root_pitch": 74.4,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 23631,
+          "end_frame": 23851
+        }
+      },
+      "pitch_zone": {
+        "low": 70.0,
+        "high": 74.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 3 - zone 009.audio",
+      "sample_rate": 22050,
+      "options": {
+        "root_pitch": 69.45,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 17180,
+          "end_frame": 18402
+        }
+      },
+      "pitch_zone": {
+        "low": 65.0,
+        "high": 69.0
+      }
+    },
+    {
+      "path": "Jazz arpeggio 3 - zone 007.audio",
+      "sample_rate": 22050,
+      "options": {
+        "root_pitch": 59.25,
+        "default_gain": null,
+        "sustain_loop": {
+          "start_frame": 40799,
+          "end_frame": 41063
+        }
+      },
+      "pitch_zone": {
+        "low": 56.0,
+        "high": 60.0
+      }
+    }
+  ]
+}

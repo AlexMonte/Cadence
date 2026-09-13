@@ -61,10 +61,12 @@ impl TileSheetKind {
 
 pub fn tile_sheet_for_atom(atom: &AtomValue) -> TileSheetKind {
     match atom {
-        AtomValue::NoteName(_) | AtomValue::Rest => TileSheetKind::AtomNote,
+        AtomValue::NoteName(_) | AtomValue::DrumHit(_) | AtomValue::Rest => TileSheetKind::AtomNote,
         AtomValue::Accidental(_) => TileSheetKind::AtomAccidental,
-        AtomValue::Octave(_) | AtomValue::Number(_) => TileSheetKind::AtomScalar,
-        AtomValue::Operator(_) => TileSheetKind::AtomOperator,
+        AtomValue::Octave(_) | AtomValue::Number(_) | AtomValue::Ratio(_) => {
+            TileSheetKind::AtomScalar
+        }
+        AtomValue::Operator(_) | AtomValue::Modifier(_) => TileSheetKind::AtomOperator,
     }
 }
 
@@ -81,7 +83,9 @@ pub fn tile_sheet_for_spawn(spawn: &TileSpawnKind) -> Option<TileSheetKind> {
     match spawn {
         TileSpawnKind::Container { .. } => Some(TileSheetKind::Container),
         TileSpawnKind::Output { .. } => Some(TileSheetKind::Output),
-        TileSpawnKind::TrickInstance { .. } => Some(TileSheetKind::Transform),
+        TileSpawnKind::Sound { .. }
+        | TileSpawnKind::TrickInstance { .. }
+        | TileSpawnKind::FlowControl { .. } => Some(TileSheetKind::Transform),
         TileSpawnKind::Tile { .. } | TileSpawnKind::Atom { .. } => None,
     }
 }

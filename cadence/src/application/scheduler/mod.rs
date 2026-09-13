@@ -13,7 +13,10 @@ use crate::{
         },
     },
     domain::span::Span,
-    domain::{control::ControlModelError, prelude::Time},
+    domain::{
+        control::{ControlMap, ControlModelError},
+        prelude::Time,
+    },
 };
 
 /// Scheduled-event support types.
@@ -27,8 +30,10 @@ static SCHEDULED_INTENT_ID_GENERATOR: IDGenerator = IDGenerator::new(10_000);
 #[derive(Debug, Clone, Copy)]
 struct ActiveStart;
 
-#[derive(Debug, Clone, Copy)]
-struct ActiveUpdate;
+#[derive(Debug, Clone)]
+struct ActiveUpdate {
+    controls: ControlMap,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct UpdateScheduleKey {
@@ -42,7 +47,9 @@ pub struct Scheduler {
     renderer: RendererCore,
     active_starts: BTreeMap<QueryKey, ActiveStart>,
     active_updates: BTreeMap<UpdateScheduleKey, ActiveUpdate>,
-    active_voices: std::collections::BTreeSet<VoiceInstanceId>,
+    // Projection membership ends with the authored span. Audio envelopes and
+    // Legato tails have their own lifetime in the mixer and are not stopped here.
+    active_voices: BTreeMap<VoiceInstanceId, Time>,
     next_window_start: Time,
     step: Time,
     look_ahead: Time,
@@ -69,7 +76,7 @@ impl Scheduler {
             renderer,
             active_starts: BTreeMap::new(),
             active_updates: BTreeMap::new(),
-            active_voices: std::collections::BTreeSet::new(),
+            active_voices: BTreeMap::new(),
             next_window_start: start,
             step,
             look_ahead,
@@ -95,17 +102,22 @@ impl Scheduler {
         let mut current_starts = BTreeMap::new();
         let mut current_updates = BTreeMap::new();
         let mut current_voices = self.active_voices.clone();
+        current_voices.retain(|_, end| *end > window_start);
         let mut intents = Vec::new();
 
         for event in evaluated {
             let kind = event.kind().clone();
             match kind {
-                EvaluatedEventKind::StartVoice { voice_id, .. } => {
+                EvaluatedEventKind::StartVoice {
+                    voice_id,
+                    voice_whole,
+                } => {
                     let key = event.key();
                     current_starts.insert(key, ActiveStart);
-                    current_voices.insert(voice_id);
+                    let voice_was_started = current_voices.contains_key(&voice_id);
+                    current_voices.insert(voice_id, voice_whole.end());
 
-                    if self.active_starts.contains_key(&key) {
+                    if voice_was_started || self.active_starts.contains_key(&key) {
                         continue;
                     }
 
@@ -123,14 +135,28 @@ impl Scheduler {
                         voice_id,
                         boundary_start: event.key().whole().start(),
                     };
-                    current_updates.insert(update_key, ActiveUpdate);
-                    current_voices.insert(voice_id);
+                    let controls = event.projected().controls();
+                    current_updates.insert(
+                        update_key,
+                        ActiveUpdate {
+                            controls: controls.clone(),
+                        },
+                    );
+                    let voice_was_started = current_voices.contains_key(&voice_id);
+                    current_voices.insert(voice_id, voice_whole.end());
 
-                    if self.active_updates.contains_key(&update_key) {
+                    // Partial query windows may retain the note's boundary key
+                    // while a continuous lane changes. Only suppress an update
+                    // when its actual control snapshot is also unchanged.
+                    if self
+                        .active_updates
+                        .get(&update_key)
+                        .is_some_and(|previous| previous.controls == *controls)
+                    {
                         continue;
                     }
 
-                    if !self.active_voices.contains(&voice_id) {
+                    if !voice_was_started {
                         let start_kind = EvaluatedEventKind::StartVoice {
                             voice_whole,
                             voice_id,

@@ -1,0 +1,5 @@
+error: #[dependency(skip)] is not supported. Use #[dependency(default)], #[dependency(init = ...)], or #[dependency(path = ...)] instead.
+ --> tests/ui/skip_unsupported.rs:6:5
+  |
+6 |     #[dependency(skip)]
+  |     ^

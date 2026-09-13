@@ -1,0 +1,46 @@
+[
+  {
+    "zone": 12,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0253_Acoustic_Guitar_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 60.76,
+    "loop_frames": [
+      48649,
+      57664
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 19,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0253_Acoustic_Guitar_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 72.67999999999999,
+    "loop_frames": [
+      52582,
+      63360
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 16,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0253_Acoustic_Guitar_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 67.66999999999999,
+    "loop_frames": [
+      36929,
+      47232
+    ],
+    "ahdsr": true
+  },
+  {
+    "zone": 22,
+    "source": "https://felixroos.github.io/webaudiofontdata/sound/0253_Acoustic_Guitar_sf2_file.js",
+    "original_frames": null,
+    "root_pitch": 77.58,
+    "loop_frames": [
+      42358,
+      53120
+    ],
+    "ahdsr": true
+  }
+]

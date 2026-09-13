@@ -33,12 +33,11 @@ pub fn render_focus_from_attention(
         FocusTarget::Tile { node }
         | FocusTarget::Atom { node }
         | FocusTarget::Port { node, .. } => queries
-            .authored_tile(node)
-            .and_then(|tile| tile.placement)
-            .filter(|placement| placement.surface == active_surface)
-            .map(|placement| RenderBoardFocus::Tile {
+            .location_of(node)
+            .filter(|location| location.surface == active_surface)
+            .map(|location| RenderBoardFocus::Tile {
                 node: node.clone(),
-                address: placement.address,
+                address: location.address,
             }),
         _ => None,
     }

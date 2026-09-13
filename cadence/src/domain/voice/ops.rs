@@ -419,6 +419,9 @@ fn clone_tile_with_phase(tile: &Tile, phase: Span<Phase>) -> Tile {
     let mut cloned = Tile::new(phase, tile.intent().clone())
         .unwrap()
         .with_position(tile.position());
+    if let Some(value) = tile.value_identity() {
+        cloned = cloned.with_value_identity(value.clone());
+    }
     if let Some(id) = tile.id() {
         cloned = cloned.with_id(id);
     }

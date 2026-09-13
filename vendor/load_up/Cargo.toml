@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/load_up",
+    "crates/load_up_macros",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.3.0"
+license = "MIT OR Apache-2.0"
+authors = ["Alexis"]
+repository = "https://github.com/AlexMonte/loud_up"
+description = "State-aware asset preparation and loading orchestration for Bevy."
+
+[workspace.dependencies]
+bevy = "0.18.1"
+bevy_app = "0.18.1"
+bevy_asset = "0.18.1"
+bevy_ecs = "0.18.1"
+bevy_reflect = "0.18.1"
+bevy_state = "0.18.1"
+bevy_time = "0.18.1"
+load_up_macros = { path = "crates/load_up_macros" }
+
+thiserror = "2"
+tracing = "0.1"
+iyes_progress = "0.17"
+
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+darling = "0.20"
+trybuild = "1.0.120"
+
+serde = { version = "1", features = ["derive"] }
+bevy-inspector-egui = { version = "0.37", default-features = false, features = ["bevy"] }
+bevy_common_assets = { version = "0.17", features = ["ron"] }

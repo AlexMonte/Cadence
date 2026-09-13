@@ -1,33 +1,34 @@
-use std::collections::BTreeMap;
-
 use bevy_ecs::prelude::*;
 use bevy_ecs::reflect::ReflectResource;
 use bevy_reflect::Reflect;
 
-use crate::{
-    domain::score::Score,
-    infrastructure::{
-        merge,
-        playback::{PlaybackError, PlaybackRuntime, PlaybackSettings},
-    },
-};
+use crate::infrastructure::PreparedScore;
 
-/// Active lowered scores keyed by output id.
+/// Prepared score currently proposed by the host.
 #[derive(Resource, Default, Reflect)]
 #[reflect(Resource)]
 pub struct ActiveScores {
     /// Monotonic revision bumped whenever scores change.
     pub revision: u64,
-    /// Lowered output scores ready for playback.
+    /// Number of host output lanes represented by the prepared score.
+    pub output_count: usize,
+    /// Merged score ready for playback without another structural scan.
     #[reflect(ignore)]
-    pub scores: BTreeMap<String, Score>,
+    score: PreparedScore,
 }
 
 impl ActiveScores {
-    /// Replaces all active scores and bumps the revision.
-    pub fn replace(&mut self, scores: BTreeMap<String, Score>) {
+    /// Replaces the active proposal and bumps the revision.
+    pub fn replace(&mut self, output_count: usize, score: PreparedScore) {
         self.revision = self.revision.saturating_add(1);
-        self.scores = scores;
+        self.output_count = output_count;
+        self.score = score;
+    }
+
+    /// Borrows the prepared merged score.
+    #[must_use]
+    pub fn score(&self) -> &PreparedScore {
+        &self.score
     }
 }
 
@@ -37,33 +38,6 @@ impl ActiveScores {
 pub struct PlaybackSync {
     /// Revision last merged into the active playback score.
     pub last_applied_revision: u64,
-}
-
-/// Host helper for installing a non-send playback runtime resource.
-pub struct PlaybackHandle;
-
-impl PlaybackHandle {
-    /// Creates playback settings and runtime from host audio control.
-    #[must_use]
-    pub fn new(
-        settings: PlaybackSettings,
-        audio: crate::adapter::audio::AudioControl,
-    ) -> PlaybackRuntime {
-        PlaybackRuntime::new(settings, audio)
-    }
-
-    /// Merges lowered output scores into one playback score tree.
-    pub fn replace_merged_scores(
-        runtime: &mut PlaybackRuntime,
-        scores: BTreeMap<String, Score>,
-    ) -> Result<(), PlaybackError> {
-        let merged = if scores.is_empty() {
-            Score::empty()
-        } else {
-            merge(scores.into_values().collect())
-        };
-        runtime.replace_score(merged)
-    }
 }
 
 #[derive(Resource, Reflect, Default)]

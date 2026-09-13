@@ -1,0 +1,5 @@
+error: `timeout` must be finite and greater than zero
+ --> tests/ui/invalid_timeout.rs:6:5
+  |
+6 |     #[dependency(path = "a.png", timeout = 0.0)]
+  |     ^

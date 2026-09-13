@@ -48,6 +48,9 @@ pub fn request_open_project() {
 }
 
 pub fn download_project(project: &MusaicProject, filename: &str) -> Result<(), PersistenceError> {
+    if !project.samples.manifest().samples.is_empty() {
+        return Err(PersistenceError::Sample("Projects with imported WAV files currently need a native project folder; browser downloads cannot include their sample assets".into()));
+    }
     let bytes = export_project_bytes(project)?;
     trigger_download(filename, &bytes)
         .map_err(|e| PersistenceError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
@@ -59,11 +62,10 @@ fn trigger_download(filename: &str, bytes: &[u8]) -> Result<(), String> {
     let array = js_sys::Uint8Array::from(bytes);
     let parts = js_sys::Array::new();
     parts.push(&array);
-    let blob = Blob::new_with_blob_sequence_and_options(
-        &parts,
-        BlobPropertyBag::new().type_("application/json"),
-    )
-    .map_err(|_| "blob failed")?;
+    let options = BlobPropertyBag::new();
+    options.set_type("application/json");
+    let blob =
+        Blob::new_with_blob_sequence_and_options(&parts, &options).map_err(|_| "blob failed")?;
     let url = Url::create_object_url_with_blob(&blob).map_err(|_| "object url failed")?;
     let anchor = document
         .create_element("a")
@@ -88,8 +90,9 @@ fn open_file_picker() -> Result<(), String> {
     input.set_type("file");
     input.set_accept(".json,application/json");
 
+    let changed_input = input.clone();
     let closure = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-        let Some(files) = input.files() else {
+        let Some(files) = changed_input.files() else {
             return;
         };
         if files.length() == 0 {

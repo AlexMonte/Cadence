@@ -47,13 +47,13 @@ Dragging the breadcrumb timeline grip emits `EnterTimelineMode` / `EnterCompose`
 | `board` | 3D material base colors (grid, tiles, connections, drag preview) |
 | `motion` | `panel_slide_secs`, `panel_slide_distance_fallback` |
 
-Feathers `UiTheme` is built from the same tokens via `theme::feathers_theme_from` (replaces bare `create_dark_theme()`).
+Feathers `UiTheme` is built from the same tokens via `theme::feathers_theme_from`.
 
 ## Widget catalog
 
 | Widget | API | Use |
 |--------|-----|-----|
-| Button | `widgets::musaic_button` / `musaic_clickable` | One Activate-on-click path for shell chips |
+| Button | `widgets::musaic_button` | One Activate-on-click path for shell chips |
 | Chrome button | `widgets::musaic_chrome_button` | Themed bg/border button |
 | Panel | `widgets::spawn_shell_panel` + `PanelBackdrop` | Shell / inspector / minimap frames |
 | Dialog | `widgets::spawn_dialog_overlay` / `spawn_dialog_card` | Unsaved-changes and future modals |

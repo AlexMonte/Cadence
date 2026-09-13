@@ -12,9 +12,10 @@ use cadence::prelude::*;
 let score = merge(vec![
     Score::from(cycle(vec![tile(Time::ZERO, Time::new(1, 2), sample("bd"))])),
 ]);
+let prepared = PreparedScore::new(score)?;
 
 let window = Span::new(Time::ZERO, Time::ONE).unwrap();
-let preview = CadenceCompiler::new().preview(&score, &window)?;
+let preview = CadenceCompiler::new().preview(&prepared, &window)?;
 ```
 
 ## Module map (Tessera parallel)
@@ -38,6 +39,11 @@ Free functions (no wrapper types):
 
 Voice-level transforms remain in `domain::voice::ops` (`euclid`, `chain`, `overlay`, …).
 
+`Repeat::Forever` is cyclic on both sides of transport zero. Notes and control
+tracks use the same signed period phase, so negative queries and shifted patterns
+retain earlier occurrences. `Once`, `Count`, and `Until` have an explicit beginning
+at zero and do not repeat backwards; shifting one moves that beginning.
+
 ## Patterns and signals
 
 `Pattern` is a uniform "query a transport-time window" seam (Strudel-style)
@@ -55,43 +61,54 @@ pub trait Pattern {
 - `impl Pattern for Score` (`Event = ProjectedMoment`) returns the visible
   events for the window — equivalent to `evaluate_score` over visible spans.
 
-### `Signal`: continuous modulation sources
+### `Signal`: musical-time sources
 
-A `Signal` is a small, serializable-friendly descriptor evaluated as a pure,
-deterministic function of cycle time: `bias + depth * shape(rate * t + phase)`.
-It carries only `f64`/`u64` parameters so `Score`/`ControlScore` keep their
-`Clone + PartialEq + Debug + Send + Sync` invariants.
+A `Signal` is a small descriptor evaluated as a pure, deterministic function of
+cycle time: `bias + depth * shape(rate * t + phase)`. Rate and phase use exact
+`Time` ratios; amplitude and bias use `f64`.
 
 ```rust
 use cadence::prelude::*;
 
-// Constructors: sine/saw/tri/square + seeded perlin/rand noise.
-let lfo = Signal::sine().with_rate(2.0).with_depth(0.5).with_bias(0.5);
-let value = lfo.eval (0.25); // pure, deterministic
+let lfo = Signal::sine().with_rate(Time::new(2, 1)).with_depth(0.5).with_bias(0.5);
+let value = lfo.eval(0.25);
 ```
 
-Waveforms: `Sine`, `Saw`, `Tri`, `Square`, `Perlin { seed }` (smooth seeded
-noise), `Rand { seed }` (sample-and-hold seeded noise). The noise shapes use
-fast hash-based math — no allocation, no external state.
+Waveforms include `Sine`, `Saw`, `Tri`, `Square`, `Ramp`, seeded `Perlin`
+(smooth noise), seeded `Rand` (sample-and-hold noise), and seeded `Random`
+(independent fractional-time noise). Noise evaluation
+allocates nothing and depends only on the seed and musical time.
 
-### `with_signal`: per-frame control modulation
+### `with_signal`: continuous controls and note intensity
 
-`with_signal(score, key, signal)` attaches a continuous `Signal` to one
-modulatable control lane. The signal is carried unchanged through projection
-(attach-once; never ramp-sliced) and evaluated **per audio output frame** on the
-audio thread, so it modulates the live voice rather than being sampled once.
+`score.with_signal(key, signal)` attaches a signal control. Gain, PlaybackRate,
+LowPassCutoff and Transpose use continuous signals during voice rendering.
+Velocity samples its signal once at the original note onset, producing a fixed
+level throughout the note. Velocity signal ranges must stay finite within 0–1.
 
 ```rust
 use cadence::prelude::*;
 
 let score = Score::from(cycle(vec![tile(Time::ZERO, Time::ONE, sample("pad"))]))
-    .with_signal(ControlKey::Gain, Signal::sine().with_rate(4.0).with_bias(0.5).with_depth(0.5));
+    .with_signal(ControlKey::Velocity,
+        Signal::random(73).with_rate(Time::new(4, 1)).with_bias(0.85).with_depth(0.15));
 ```
 
-Modulatable lanes: `Gain`, `Pan`, `PlaybackRate`, and `LowPassCutoff`. During
-lowering, signal-valued lanes become `SignalBinding`s on the `AudioVoicePlan`
-(carrying the voice start cycle and cycles-per-second), which the audio voice
-evaluates each frame as `start_cycle + (rendered_frames / sample_rate) * cps`.
+Gain, sample-speed and cutoff signals become `SignalBinding`s on the voice plan
+and are evaluated each output frame using its musical clock. Transpose retains
+its additive semitone owner. Velocity is resolved during projection, before
+outer timing transforms, and multiplies other velocity controls. Arrange,
+reverse and speed changes carry that chosen intensity with each source note;
+attach the signal after a transform to sample the transformed note onsets.
+Seeking into a held note recovers its original intensity even after the original
+control tile has ended. Playback and WAV export share these values.
+
+For note-onset Random, `Signal::eval_at(Time)` hashes the normalized exact
+fraction after rate and phase are applied, plus the seed. Sixteen distinct
+onsets can therefore receive sixteen independent values even with rate 4.
+Continuous controls use `Signal::eval(f64)`, which hashes the floating clock.
+These deterministic values provide the same note-by-note variation behavior
+without claiming another application's PRNG identity.
 
 ### `PatternExt` combinators
 
@@ -114,13 +131,11 @@ per-event variant is a planned follow-up.
 
 `CadenceCompiler` wraps `RendererCore` with Tessera-like naming:
 
-- `preview(score, window)` → `PreviewReport { window, projected, evaluated }`
-  - `projected` — start-voice moments only (timeline-friendly, backward compatible)
-  - `evaluated` — full evaluation list (starts + `UpdateVoiceControls`), same as the scheduler
-  - `PreviewReport::starts()` / `control_updates()` — filter `evaluated` by kind
+- `preview(score, window)` → `PreviewReport { window, events }`
+  - `events` — the full evaluation list (starts + `UpdateVoiceControls`), same as the scheduler
+  - `PreviewReport::starts()` / `control_updates()` — filter `events` by kind
   - `EvaluatedEvent::kind()` / `projected()` / `into_projected()` — inspect any evaluated row (also in `cadence::prelude`)
-- `RendererCore::evaluate_window_full` — full evaluation without `CadenceCompiler`
-- `projected_output` / `projected_mosaic` — starts-only direct access
+- `RendererCore::evaluate_window` — full evaluation without `CadenceCompiler`
 
 ### Control timing on start vs update
 
@@ -132,13 +147,14 @@ per-event variant is a planned follow-up.
 
 Segment-sampled changes use one `StartVoice` per lifecycle plus `UpdateVoiceControls` at later boundaries (no sample retrigger).
 
-Per-window `evaluated` rows are stateless: a sub-window that begins mid-lifecycle may list `UpdateVoiceControls` only. The scheduler promotes the first update for an unseen `voice_id` to a backfill `StartVoice` so playback and scrubbing stay correct.
+Per-window event rows are stateless: a sub-window that begins mid-lifecycle may list `UpdateVoiceControls` only. The scheduler promotes the first update for an unseen `voice_id` to a backfill `StartVoice` so playback and scrubbing stay correct.
 
 ## Playback runtime
 
-`PlaybackRuntime` (in `infrastructure::playback`) is the score-first runtime entry:
+`PlaybackRuntime` (in `infrastructure::playback`) is the prepared-score runtime entry:
 
-- `play_score`, `replace_score`, `tick`, transport commands
+- `PreparedScore::new` checks the structural and one-cycle workload budget once
+- `play_prepared_score`, `replace_prepared_score`, `tick`, transport commands
 - Host owns audio device setup via `AudioRenderer::split`
 
 ## Bevy integration (`feature = "bevy"`)
@@ -147,18 +163,18 @@ Per-window `evaluated` rows are stateless: a sub-window that begins mid-lifecycl
 use cadence::bevy_prelude::*;
 
 app.add_plugins(CadencePlugin);
-app.insert_non_send_resource(PlaybackHandle::new(settings, audio_control));
+app.insert_non_send_resource(PlaybackRuntime::new(settings, audio_control));
 ```
 
 Resources:
 
-- `ActiveScores` — lowered `BTreeMap<String, Score>` with revision tracking
+- `ActiveScores` — one merged `PreparedScore`, output count, and revision
 - `PlaybackSync` — last applied score revision
-- `PlaybackHandle::new` — constructs `PlaybackRuntime` for `insert_non_send_resource`
+- `PlaybackRuntime::new` — constructs the non-send runtime inserted into the app
 
 Systems (registered by `CadencePlugin`):
 
-- `replace_scores_system` — merges `ActiveScores` into playback when revision changes
+- `replace_scores_system` — publishes the prepared score when its revision changes
 - `tick_playback_system` — calls `PlaybackRuntime::tick` while playing
 
 `PlaybackRuntime` is `!Sync`; always install it with `App::insert_non_send_resource`.
@@ -176,6 +192,10 @@ cycle/concat alignment stays honest). Leaf and score-only transforms are noted b
 
 | PatternNodeIr | ScoreKind | ControlScoreKind | Notes |
 |---------------|-----------|------------------|-------|
+| `FlowProjection` | `QuerySource` | `QuerySource` | Immutable language query adapter; runs during planning, never the audio callback |
+| `CycleEventStream` | `Events` under its structural cycle owner | — | Whole held spans survive clipped queries |
+| `Sequence` | `WeightedCycleSlots` | `WeightedCycleSlots` | Weighted child allocation with preserved parent clocks |
+| `Arrange` | `Arrange` | `Arrange` | Explicit occurrence duration and repeat count |
 | `Merge` | `Merge` | `Merge` | Simultaneous children |
 | `Concat` | `Concat` | `Concat` | Sequential children in transport-time order |
 | `CycleRoute` | `CycleRoute` | `CycleRoute` | |
@@ -191,7 +211,7 @@ cycle/concat alignment stays honest). Leaf and score-only transforms are noted b
 | `SpaceReflect` | `SpaceReflect` | — | Score-only; controls pass through |
 | `Degrade` | `Degrade` | — | Score-only; control-only trees → unsupported diagnostic |
 | `Deduplicate` | `Deduplicate` | — | Score-only; control-only trees → unsupported diagnostic |
-| `EventStream` | `Voice` / `Mosaic` | — | Leaf lowering only |
+| `EventStream` | `Voice` / `Events` | — | Leaf lowering only; **intentional discard on the control path** (event-only leaf — `lower_control_node` yields no controls, no diagnostic) |
 | `ControlStream` | — | `Track` | Leaf lowering only |
 | `ScalarStream` | — | gate `Track` | Leaf lowering only |
 
@@ -218,11 +238,38 @@ Tessera IR → `Score` lowering stays in the `musaic` crate. Write results into
 
 Avoid importing `cadence::application::*` from host code.
 
-## Stable seams (unchanged)
+## Host-facing modules
 
 Per-topic infrastructure modules remain the integration boundary:
 
-- `infrastructure::{score, voice, projection, mosaic, input, audio, render, playback}`
+- `infrastructure::{score, voice, projection, input, audio, render, playback}`
 
 `infrastructure::render::RendererCore` is a re-export of
 `application::renderer_core::RendererCore` (one type, not a wrapper).
+
+## Immutable host query sources
+
+`Score::query_source` and `ControlScore::query_source` accept immutable,
+thread-safe `ScoreQuerySource` and `ControlQuerySource` implementations. Cadence
+stays independent of the host language. Queries run while preparing/scheduling
+scores; the callback receives prepared events and never invokes a host source.
+
+`QueryMoment` carries a whole `Moment`, stable `instance_key`, and ordered typed
+controls. Keys identify occurrences across overlapping windows and direct seeks;
+distinct unison occurrences need distinct keys. Duplicate occurrence keys are
+rejected. `Moment::value_identity` optionally supplies musical value identity for
+value-based merge/deduplication policies without confusing two pitches that share
+an instrument. Existing intent-based policies retain their meaning.
+
+Sources declare conservative `estimated_work(window_cycles)` and finite sequence
+`extent()`. Non-finite or oversized work is rejected before calling the source;
+results are bounded and controls validated, including source-specific support.
+Control sources declare owned lanes with `contains_key`; the default conservatively
+owns all lanes so a gap releases a previous control value. The adapter must not
+underestimate internal work merely because its final output is small.
+
+Musaic's adapter preserves recursive Tessera flow policies and authored provenance.
+Its estimate includes repeated held-note overlap, complete onset-cycle queries,
+and mask work across whole notes. `cadence/tests/query_sources.rs` verifies stable
+identity, later seeks, control gaps, invalid source rejection, callback independence,
+and sequence extent. Musaic's flow conformance suite checks the language adapter.

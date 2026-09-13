@@ -3,21 +3,17 @@ use tessera::prelude::NodeId;
 
 use super::{
     logic::needs_visible_board_rebuild,
-    project_board_scene,
-    surface_content::surface_content_for_node,
+    projection::project_visible_board,
     types::{
         RenderBoardFocus, VisibleAtomCompound, VisibleBoardConnection, VisibleBoardNode,
         VisibleNodeKind,
     },
 };
 use crate::{
-    application::editor::{
-        AtomCompoundSemantic, AtomCompoundView, EditorAttention, PickHit, SelectionState,
-        connection_endpoint_view,
-    },
+    application::editor::{EditorAttention, PickHit, SelectionState},
     application::session::MusaicProject,
     domain::board::{BoardSlot, BoardSurfaceId, SurfaceLayoutKind},
-    domain::document::{AtomValue, DocumentNodeKind, DocumentQueries, PlacementAddress, StackIndex},
+    domain::document::{PlacementAddress, StackIndex},
 };
 
 #[derive(Resource, Debug, Clone, Default)]
@@ -28,11 +24,30 @@ pub struct VisibleBoardState {
     pub atom_compounds: Vec<VisibleAtomCompound>,
     pub stack_inserts: Vec<StackIndex>,
     pub stack_locked_slots: Vec<StackIndex>,
+    pub stack_display: super::types::StackDisplayMap,
     pub connections: Vec<VisibleBoardConnection>,
     pub focus: Option<RenderBoardFocus>,
 }
 
 impl VisibleBoardState {
+    /// Translate only presentation coordinates; authored document addresses stay intact.
+    pub fn display_address(&self, address: PlacementAddress) -> PlacementAddress {
+        self.stack_display.display_address(address)
+    }
+
+    pub fn display_address_of(&self, node: &NodeId) -> Option<PlacementAddress> {
+        self.address_of(node)
+            .map(|address| self.display_address(address))
+    }
+
+    /// Placement address for a projected node, if it is on the visible surface.
+    pub fn address_of(&self, node: &NodeId) -> Option<PlacementAddress> {
+        self.nodes
+            .iter()
+            .find(|n| &n.node == node)
+            .map(|n| n.address)
+    }
+
     pub fn pick_at(&self, slot: BoardSlot) -> Option<PickHit> {
         if let Some(compound) = self
             .atom_compounds
@@ -47,7 +62,15 @@ impl VisibleBoardState {
         }
 
         if let Some(node) = self.nodes.iter().find(|node| {
-            let anchor = visual_slot_from_address(node.address);
+            if node.kind == VisibleNodeKind::Atom
+                && matches!(
+                    node.surface_content,
+                    super::types::TileSurfaceContent::Empty
+                )
+            {
+                return false;
+            }
+            let anchor = visual_slot_from_address(self.display_address(node.address));
             node.tessera_footprint
                 .is_some_and(|footprint| footprint.occupies(anchor, slot))
                 || node.tessera_footprint.is_none() && anchor == slot
@@ -57,18 +80,20 @@ impl VisibleBoardState {
             });
         }
 
-        self.active_surface.map(|surface| match self.layout {
-            SurfaceLayoutKind::Board => PickHit::EmptySlot { surface, slot },
-            SurfaceLayoutKind::Stack => PickHit::StackInsert {
-                surface,
-                index: self
-                    .stack_inserts
-                    .iter()
-                    .find(|insert| insert.0 == slot.x.max(0) as usize)
-                    .copied()
-                    .unwrap_or(StackIndex(slot.x.max(0) as usize)),
-            },
-        })
+        let surface = self.active_surface?;
+        match self.layout {
+            SurfaceLayoutKind::Board => Some(PickHit::EmptySlot { surface, slot }),
+            SurfaceLayoutKind::Stack if slot.x >= 0 && slot.y == 0 => {
+                let index = self
+                    .stack_display
+                    .authored_index(StackIndex(slot.x as usize));
+                // The append marker is a hint, not the only usable cell.
+                // Empty cells (including wrapped rows and authored gaps) are
+                // legitimate drop targets, just like the visible grid suggests.
+                Some(PickHit::StackInsert { surface, index })
+            }
+            SurfaceLayoutKind::Stack => None,
+        }
     }
 }
 
@@ -88,7 +113,7 @@ pub(super) fn rebuild_visible_board_state(
     mut visible: ResMut<'_, VisibleBoardState>,
 ) {
     if !needs_visible_board_rebuild(
-        runtime.dirty.scene,
+        runtime.needs_scene(),
         attention.is_changed(),
         selection.is_changed(),
         visible.active_surface,
@@ -98,241 +123,98 @@ pub(super) fn rebuild_visible_board_state(
         return;
     }
 
-    let queries = DocumentQueries::new(&project.document);
-    let scene = project_board_scene(&queries, &attention, &selection, *view_settings);
-
-    let chrome_for_node = |node_id: &NodeId,
-                           address: PlacementAddress|
-     -> (
-        Option<crate::adapter::tile_icons::TileIconId>,
-        Option<AtomValue>,
-        Option<crate::application::editor::ConnectionEndpointView>,
-    ) {
-        let kind = queries.node_kind(node_id);
-        let icon = match &kind {
-            Some(DocumentNodeKind::TrickInstance(trick)) => Some(
-                crate::adapter::tile_icons::icon_for_trick_prototype(trick.prototype),
-            ),
-            _ => None,
-        };
-        let atom = match &kind {
-            Some(DocumentNodeKind::Atom(atom)) => Some(atom.atom.clone()),
-            _ => None,
-        };
-        let ports = match address {
-            PlacementAddress::BoardSlot(slot) => {
-                connection_endpoint_view(&queries, node_id, Some(slot), None)
-            }
-            PlacementAddress::StackIndex(_) => None,
-        };
-        (icon, atom, ports)
-    };
-    visible.active_surface = Some(scene.surface);
-    visible.layout = scene.layout;
-
-    let mut compound_by_member = std::collections::BTreeMap::new();
-    for compound in &scene.compounds {
-        if let Some(anchor) = compound.members.first() {
-            compound_by_member.insert(anchor.clone(), compound.display.clone());
-        }
-    }
-    let compound_members: std::collections::BTreeSet<_> = scene
-        .compounds
-        .iter()
-        .flat_map(|compound| compound.members.iter().cloned())
-        .collect();
-
-    visible.nodes = scene
-        .tiles
-        .into_iter()
-        .map(|tile| {
-            let (icon, atom, ports) = chrome_for_node(&tile.node, tile.address);
-            VisibleBoardNode {
-                node: tile.node.clone(),
-                address: tile.address,
-                tessera_footprint: tile.tessera_footprint,
-                kind: match tile.visual_kind {
-                    super::TileVisualKind::Container(_) => VisibleNodeKind::Container,
-                    super::TileVisualKind::Atom => VisibleNodeKind::Atom,
-                    super::TileVisualKind::Output => VisibleNodeKind::Output,
-                    super::TileVisualKind::Trick => VisibleNodeKind::TrickInstance,
-                    super::TileVisualKind::Generic => VisibleNodeKind::Tile,
-                },
-                selected: tile.selected,
-                focused: tile.focused,
-                icon,
-                atom,
-                ports,
-                surface_content: surface_content_for_node(
-                    &queries,
-                    &tile.node,
-                    &compound_by_member,
-                    &compound_members,
-                ),
-            }
-        })
-        .collect();
-    visible.atom_compounds = scene
-        .compounds
-        .into_iter()
-        .map(|compound| {
-            let primary_atom = compound.members.first().and_then(|member| {
-                match queries.node_kind(member) {
-                    Some(DocumentNodeKind::Atom(atom)) => Some(atom.atom.clone()),
-                    _ => None,
-                }
-            });
-            VisibleAtomCompound {
-                slot: compound.anchor_slot,
-                compound: AtomCompoundView {
-                    members: compound.members,
-                    display: compound.display,
-                    semantic: AtomCompoundSemantic::Single,
-                },
-                primary_atom,
-            }
-        })
-        .collect();
-    visible.stack_inserts = scene.stack_inserts;
-    visible.stack_locked_slots = scene.stack_locked_slots;
-    visible.connections = scene
-        .connections
-        .into_iter()
-        .map(|connection| VisibleBoardConnection {
-            from: connection.from,
-            to: connection.to,
-            from_slot: connection.from_slot,
-            to_slot: connection.to_slot,
-            kind: connection.kind,
-        })
-        .collect();
-    visible.focus = scene.focus;
+    *visible = project_visible_board(&project, &attention, &selection, *view_settings);
 }
 
 #[cfg(test)]
-mod tests {
-    use bevy::prelude::*;
+#[path = "compact_stack_tests.rs"]
+mod compact_stack_tests;
 
+#[cfg(test)]
+mod tests {
     use super::*;
-    use crate::application::pipeline::scene_sync::TileSurfaceContent;
     use crate::{
+        application::board_view_settings::{AtomDisplayMode, BoardViewSettings},
         application::command::{EditorCommand, execute_command},
-        application::editor::{EditorAttention, SelectionState, transaction::PlacementTarget},
-        application::pipeline::PlaybackPlugin,
-        application::pipeline::runtime::TimelineProvenanceStore,
+        application::editor::{
+            AtomCompoundSemantic, AtomCompoundView, EditorAttention, SelectionState,
+            transaction::PlacementTarget,
+        },
+        application::pipeline::{
+            runtime::TimelineProvenanceStore,
+            scene_sync::{TileSurfaceContent, projection::project_visible_board},
+        },
         application::session::MusaicProject,
         domain::board::{BoardSlot, BoardSurfaceId},
         domain::document::{AtomValue, ContainerKind, NoteName, TileSpawnKind},
-        infrastructure::app::{AppState, TransportMode},
     };
-    use tessera::bevy::{TesseraBoard, TesseraPlugin};
 
     #[test]
     fn visible_board_compounds_atom_row_into_a2() {
-        let mut app = App::new();
-        app.add_plugins(bevy::state::app::StatesPlugin)
-            .init_state::<AppState>()
-            .init_state::<TransportMode>()
-            .add_plugins(MinimalPlugins)
-            .add_plugins((
-                TesseraPlugin,
-                crate::application::editor::EditorPlugin,
-                PlaybackPlugin,
-            ));
-        app.insert_state(AppState::Editor);
-        app.world_mut()
-            .resource_mut::<crate::application::board_view_settings::BoardViewSettings>()
-            .container_interior =
-            crate::application::board_view_settings::AtomDisplayMode::CompoundTile;
-
+        let mut project = MusaicProject::new_empty();
         let provenance = TimelineProvenanceStore::default();
-        let root_surface = app
-            .world()
-            .resource::<MusaicProject>()
+        let root_surface = project.document.root_surface;
+        let mut attention = EditorAttention::new(root_surface);
+        let mut selection = SelectionState::default();
+        execute_command(
+            &mut project.document,
+            &mut attention,
+            &mut selection,
+            &provenance,
+            &EditorCommand::PlaceTile {
+                target: PlacementTarget::BoardSlot {
+                    surface: root_surface,
+                    slot: BoardSlot::new(0, 0),
+                },
+                tile: TileSpawnKind::Container {
+                    kind: ContainerKind::Sequence,
+                },
+            },
+        )
+        .unwrap();
+        let container = selection.nodes.iter().next().unwrap().clone();
+        let local_surface = project
             .document
-            .root_surface;
-        app.world_mut()
-            .resource_scope(|world, mut project: Mut<'_, MusaicProject>| {
-                world.resource_scope(|world, mut board: Mut<'_, TesseraBoard>| {
-                    world.resource_scope(|world, mut attention: Mut<'_, EditorAttention>| {
-                        world.resource_scope(|_world, mut selection: Mut<'_, SelectionState>| {
-                            let _ = execute_command(
-                                &mut project.document,
-                                &mut board,
-                                &mut attention,
-                                &mut selection,
-                                &provenance,
-                                &EditorCommand::PlaceTile {
-                                    target: PlacementTarget::BoardSlot {
-                                        surface: root_surface,
-                                        slot: BoardSlot::new(0, 0),
-                                    },
-                                    tile: TileSpawnKind::Container {
-                                        kind: ContainerKind::Sequence,
-                                    },
-                                },
-                            );
-                            let container = selection.nodes.iter().next().unwrap().clone();
-                            let local_surface = project
-                                .document
-                                .graph
-                                .container_surface(&container)
-                                .unwrap();
+            .graph
+            .container_surface(&container)
+            .unwrap();
+        execute_command(
+            &mut project.document,
+            &mut attention,
+            &mut selection,
+            &provenance,
+            &EditorCommand::EnterContainer { container },
+        )
+        .unwrap();
+        for (x, atom) in [
+            (0, AtomValue::NoteName(NoteName::A)),
+            (1, AtomValue::Octave(2)),
+        ] {
+            execute_command(
+                &mut project.document,
+                &mut attention,
+                &mut selection,
+                &provenance,
+                &EditorCommand::PlaceTile {
+                    target: PlacementTarget::BoardSlot {
+                        surface: local_surface,
+                        slot: BoardSlot::new(x, 0),
+                    },
+                    tile: TileSpawnKind::Atom { atom },
+                },
+            )
+            .unwrap();
+        }
 
-                            let _ = execute_command(
-                                &mut project.document,
-                                &mut board,
-                                &mut attention,
-                                &mut selection,
-                                &provenance,
-                                &EditorCommand::EnterContainer { container },
-                            );
-
-                            let _ = execute_command(
-                                &mut project.document,
-                                &mut board,
-                                &mut attention,
-                                &mut selection,
-                                &provenance,
-                                &EditorCommand::PlaceTile {
-                                    target: PlacementTarget::BoardSlot {
-                                        surface: local_surface,
-                                        slot: BoardSlot::new(0, 0),
-                                    },
-                                    tile: TileSpawnKind::Atom {
-                                        atom: AtomValue::NoteName(NoteName::A),
-                                    },
-                                },
-                            );
-
-                            let _ = execute_command(
-                                &mut project.document,
-                                &mut board,
-                                &mut attention,
-                                &mut selection,
-                                &provenance,
-                                &EditorCommand::PlaceTile {
-                                    target: PlacementTarget::BoardSlot {
-                                        surface: local_surface,
-                                        slot: BoardSlot::new(1, 0),
-                                    },
-                                    tile: TileSpawnKind::Atom {
-                                        atom: AtomValue::Octave(2),
-                                    },
-                                },
-                            );
-                        });
-                    });
-                });
-            });
-        app.world_mut()
-            .resource_mut::<crate::application::pipeline::runtime::RuntimeState>()
-            .dirty
-            .scene = true;
-
-        app.update();
-
-        let visible = app.world().resource::<VisibleBoardState>();
+        let visible = project_visible_board(
+            &project,
+            &attention,
+            &selection,
+            BoardViewSettings {
+                container_interior: AtomDisplayMode::CompoundTile,
+                ..Default::default()
+            },
+        );
         assert_eq!(visible.active_surface, Some(BoardSurfaceId(1)));
         assert_eq!(visible.atom_compounds.len(), 1);
         assert_eq!(visible.atom_compounds[0].compound.display, "A2");
@@ -340,56 +222,34 @@ mod tests {
 
     #[test]
     fn visible_board_projects_port_chrome_for_root_board_tiles() {
-        let mut app = App::new();
-        app.add_plugins(bevy::state::app::StatesPlugin)
-            .init_state::<AppState>()
-            .init_state::<TransportMode>()
-            .add_plugins(MinimalPlugins)
-            .add_plugins((
-                TesseraPlugin,
-                crate::application::editor::EditorPlugin,
-                PlaybackPlugin,
-            ));
-        app.insert_state(AppState::Editor);
-
+        let mut project = MusaicProject::new_empty();
         let provenance = TimelineProvenanceStore::default();
-        let root_surface = app
-            .world()
-            .resource::<MusaicProject>()
-            .document
-            .root_surface;
-        app.world_mut()
-            .resource_scope(|world, mut project: Mut<'_, MusaicProject>| {
-                world.resource_scope(|world, mut board: Mut<'_, TesseraBoard>| {
-                    world.resource_scope(|world, mut attention: Mut<'_, EditorAttention>| {
-                        world.resource_scope(|_world, mut selection: Mut<'_, SelectionState>| {
-                            let _ = execute_command(
-                                &mut project.document,
-                                &mut board,
-                                &mut attention,
-                                &mut selection,
-                                &provenance,
-                                &EditorCommand::PlaceTile {
-                                    target: PlacementTarget::BoardSlot {
-                                        surface: root_surface,
-                                        slot: BoardSlot::new(0, 0),
-                                    },
-                                    tile: TileSpawnKind::Container {
-                                        kind: ContainerKind::Sequence,
-                                    },
-                                },
-                            );
-                        });
-                    });
-                });
-            });
-        app.world_mut()
-            .resource_mut::<crate::application::pipeline::runtime::RuntimeState>()
-            .dirty
-            .scene = true;
-        app.update();
+        let root_surface = project.document.root_surface;
+        let mut attention = EditorAttention::new(root_surface);
+        let mut selection = SelectionState::default();
+        execute_command(
+            &mut project.document,
+            &mut attention,
+            &mut selection,
+            &provenance,
+            &EditorCommand::PlaceTile {
+                target: PlacementTarget::BoardSlot {
+                    surface: root_surface,
+                    slot: BoardSlot::new(0, 0),
+                },
+                tile: TileSpawnKind::Container {
+                    kind: ContainerKind::Sequence,
+                },
+            },
+        )
+        .unwrap();
 
-        let visible = app.world().resource::<VisibleBoardState>();
+        let visible = project_visible_board(
+            &project,
+            &attention,
+            &selection,
+            BoardViewSettings::default(),
+        );
         let node = visible
             .nodes
             .iter()
@@ -400,6 +260,33 @@ mod tests {
             node.ports.is_some(),
             "root-board tiles must project port compass view data"
         );
+    }
+
+    #[test]
+    fn address_of_returns_projected_node_address() {
+        let node = NodeId::new("tile");
+        let visible = VisibleBoardState {
+            active_surface: Some(BoardSurfaceId(1)),
+            layout: SurfaceLayoutKind::Board,
+            nodes: vec![VisibleBoardNode {
+                node: node.clone(),
+                address: PlacementAddress::BoardSlot(BoardSlot::new(3, 4)),
+                tessera_footprint: None,
+                kind: VisibleNodeKind::Output,
+                selected: false,
+                focused: false,
+                icon: None,
+                atom: None,
+                ports: None,
+                surface_content: TileSurfaceContent::Empty,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            visible.address_of(&node),
+            Some(PlacementAddress::BoardSlot(BoardSlot::new(3, 4)))
+        );
+        assert_eq!(visible.address_of(&NodeId::new("missing")), None);
     }
 
     #[test]
@@ -430,6 +317,7 @@ mod tests {
             }],
             stack_inserts: Vec::new(),
             stack_locked_slots: Vec::new(),
+            stack_display: Default::default(),
             connections: Vec::new(),
             focus: None,
         };

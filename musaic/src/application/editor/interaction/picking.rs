@@ -79,8 +79,9 @@ pub fn command_from_pick_checked(
             if !queries.contains_node(&primary_node) {
                 return None;
             }
-            Some(EditorCommand::Focus {
-                target: FocusTarget::Atom { node: primary_node },
+            Some(EditorCommand::SelectNode {
+                node: primary_node,
+                mode: selection_mode_from_modifiers(pick.modifiers),
             })
         }
         PickHit::Port { node, port } => {
@@ -169,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn checked_atom_compound_pick_focuses_primary_atom() {
+    fn checked_atom_compound_pick_selects_primary_atom() {
         let (mut document, _) = queries_with_root_tile();
         let atom = document
             .graph
@@ -194,8 +195,9 @@ mod tests {
         let command = command_from_pick_checked(&queries, pick).unwrap();
         assert_eq!(
             command,
-            EditorCommand::Focus {
-                target: FocusTarget::Atom { node: atom },
+            EditorCommand::SelectNode {
+                node: atom,
+                mode: SelectionMode::Replace,
             }
         );
     }

@@ -2,6 +2,20 @@
 
 use std::hash::{Hash, Hasher};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// Invalid equal-slice selection inside a sample region.
+pub enum SampleSliceError {
+    /// Equal slicing requires between one and 65,536 parts.
+    #[error("sample slice count must be between 1 and 65536")]
+    InvalidCount,
+    /// The zero-based slice index must be smaller than the count.
+    #[error("sample slice index must be smaller than its count")]
+    InvalidIndex,
+    /// The selected region must have finite ascending bounds in [0, 1].
+    #[error("sample region must have finite bounds with 0 <= start < end <= 1")]
+    InvalidRegion,
+}
+
 fn assert_finite(label: &str, value: f64) {
     assert!(value.is_finite(), "{label} must be finite");
 }
@@ -59,6 +73,13 @@ impl Intent {
     #[must_use]
     pub fn synth(source: BuiltInSynthSource) -> Self {
         Self::Synth(SynthIntent::new(source))
+    }
+
+    /// Creates a synth with a named set of envelope, filter and gain defaults.
+    /// Authored controls override these defaults; note pitch stays independent.
+    #[must_use]
+    pub fn synth_preset(preset: SynthPreset) -> Self {
+        Self::Synth(SynthIntent::preset(preset))
     }
 
     /// Creates a toggle intent.
@@ -144,12 +165,64 @@ impl Hash for Intent {
 pub enum BuiltInSynthSource {
     /// Pure sine wave.
     Sine,
-    /// Square wave.
+    /// Square wave with polynomial correction at its discontinuities.
     Square,
-    /// Sawtooth wave.
+    /// Sawtooth wave with polynomial correction at its discontinuity.
     Saw,
-    /// Triangle wave.
+    /// Triangle wave with polynomial correction at its corners.
     Triangle,
+    /// Deterministic white noise. Pitch does not change this unpitched source.
+    Noise,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Small, stable sound definitions; controls can override each default.
+pub enum SynthPreset {
+    /// Filtered saw with a quick attack and short release for bass lines.
+    Bass,
+    /// Soft triangle with a slow attack and release for sustained harmony.
+    Pad,
+    /// High-passed noise with a short decay and zero sustain for percussion.
+    Percussion,
+}
+
+impl SynthPreset {
+    /// The oscillator selected by this sound definition.
+    #[must_use]
+    pub const fn source(self) -> BuiltInSynthSource {
+        match self {
+            Self::Bass => BuiltInSynthSource::Saw,
+            Self::Pad => BuiltInSynthSource::Triangle,
+            Self::Percussion => BuiltInSynthSource::Noise,
+        }
+    }
+
+    /// Explicit defaults for control-thread lowering and host inspection.
+    /// Times are seconds, cutoffs are hertz and gain/sustain are linear.
+    #[must_use]
+    pub fn controls(self) -> crate::domain::control::ControlMap {
+        use crate::domain::control::{ControlKey as K, ControlValue as V};
+        let (attack, decay, sustain, release, gain, cutoff, resonance) = match self {
+            Self::Bass => (0.004, 0.12, 0.55, 0.06, 0.3, 900.0, 0.15),
+            Self::Pad => (0.15, 0.2, 0.65, 0.4, 0.25, 3_500.0, 0.0),
+            Self::Percussion => (0.001, 0.12, 0.0, 0.015, 0.3, 9_000.0, 0.0),
+        };
+        let mut controls = [
+            (K::Attack, V::Scalar(attack)),
+            (K::Decay, V::Scalar(decay)),
+            (K::Sustain, V::Scalar(sustain)),
+            (K::Release, V::Scalar(release)),
+            (K::Gain, V::Scalar(gain)),
+            (K::LowPassCutoff, V::Scalar(cutoff)),
+            (K::LowPassResonance, V::Scalar(resonance)),
+        ]
+        .into_iter()
+        .collect::<crate::domain::control::ControlMap>();
+        if matches!(self, Self::Percussion) {
+            controls.insert(K::HighPassCutoff, V::Scalar(1_800.0));
+        }
+        controls
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +230,12 @@ pub enum BuiltInSynthSource {
 pub struct SynthIntent {
     /// Which built-in source to use.
     pub source: BuiltInSynthSource,
+    /// Optional sound defaults, applied below ambient and authored controls.
+    pub preset: Option<SynthPreset>,
+    /// Ordered per-voice processing, after control-derived filters and compression.
+    pub inserts: super::inserts::InsertChain,
+    /// Instrument envelope, gain, and sends, below authored controls.
+    pub sound_defaults: super::sound::SoundDefaults,
 }
 
 impl Eq for SynthIntent {}
@@ -164,6 +243,9 @@ impl Eq for SynthIntent {}
 impl Hash for SynthIntent {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.source.hash(state);
+        self.preset.hash(state);
+        self.inserts.hash(state);
+        self.sound_defaults.hash(state);
     }
 }
 
@@ -171,7 +253,43 @@ impl SynthIntent {
     /// Creates a synth intent.
     #[must_use]
     pub fn new(source: BuiltInSynthSource) -> Self {
-        Self { source }
+        Self {
+            source,
+            preset: None,
+            inserts: Default::default(),
+            sound_defaults: Default::default(),
+        }
+    }
+
+    /// Creates one stable sound definition without changing note pitch.
+    #[must_use]
+    pub fn preset(preset: SynthPreset) -> Self {
+        Self {
+            source: preset.source(),
+            preset: Some(preset),
+            inserts: Default::default(),
+            sound_defaults: Default::default(),
+        }
+    }
+
+    /// Sound defaults before ambient and authored controls are overlaid.
+    #[must_use]
+    pub fn default_controls(&self) -> crate::domain::control::ControlMap {
+        let mut controls = self.preset.map(SynthPreset::controls).unwrap_or_default();
+        controls.extend(self.sound_defaults.controls());
+        controls
+    }
+
+    /// Replaces instrument defaults without changing authored controls.
+    pub fn with_sound_defaults(mut self, defaults: super::sound::SoundDefaults) -> Self {
+        self.sound_defaults = defaults;
+        self
+    }
+
+    /// Replaces the immutable ordered insert chain for subsequent voices.
+    pub fn with_inserts(mut self, inserts: super::inserts::InsertChain) -> Self {
+        self.inserts = inserts;
+        self
     }
 }
 
@@ -190,6 +308,10 @@ pub struct SampleIntent {
     pub end: f64,
     /// Whether playback should run backward through the region.
     pub reverse: bool,
+    /// Ordered per-voice processing, after control-derived filters and compression.
+    pub inserts: super::inserts::InsertChain,
+    /// Instrument envelope, gain, and sends, below authored controls.
+    pub sound_defaults: super::sound::SoundDefaults,
 }
 
 impl Eq for SampleIntent {}
@@ -202,6 +324,8 @@ impl Hash for SampleIntent {
         self.start.to_bits().hash(state);
         self.end.to_bits().hash(state);
         self.reverse.hash(state);
+        self.inserts.hash(state);
+        self.sound_defaults.hash(state);
     }
 }
 
@@ -225,7 +349,14 @@ impl SampleIntent {
             start: Self::DEFAULT_START,
             end: Self::DEFAULT_END,
             reverse: false,
+            inserts: Default::default(),
+            sound_defaults: Default::default(),
         }
+    }
+
+    /// Instrument defaults below ambient and authored controls.
+    pub fn default_controls(&self) -> crate::domain::control::ControlMap {
+        self.sound_defaults.controls()
     }
 
     /// Replaces the base gain.
@@ -237,6 +368,18 @@ impl SampleIntent {
     pub fn gain(mut self, gain: f64) -> Self {
         assert_non_negative("sample gain", gain);
         self.gain = gain;
+        self
+    }
+
+    /// Replaces instrument defaults without changing authored controls.
+    pub fn with_sound_defaults(mut self, defaults: super::sound::SoundDefaults) -> Self {
+        self.sound_defaults = defaults;
+        self
+    }
+
+    /// Replaces the immutable ordered insert chain for subsequent voices.
+    pub fn with_inserts(mut self, inserts: super::inserts::InsertChain) -> Self {
+        self.inserts = inserts;
         self
     }
 
@@ -263,6 +406,36 @@ impl SampleIntent {
         self.start = start;
         self.end = end;
         self
+    }
+
+    /// Selects one zero-based equal slice of the current region.
+    ///
+    /// This changes source bounds only; note timing and playback rate remain
+    /// unchanged. Use the `Fit` control to fit the slice to its authored slot.
+    pub fn slice(mut self, index: u32, count: u32) -> Result<Self, SampleSliceError> {
+        if !(1..=65_536).contains(&count) {
+            return Err(SampleSliceError::InvalidCount);
+        }
+        if index >= count {
+            return Err(SampleSliceError::InvalidIndex);
+        }
+        if !self.start.is_finite()
+            || !self.end.is_finite()
+            || self.start < 0.0
+            || self.start >= self.end
+            || self.end > 1.0
+        {
+            return Err(SampleSliceError::InvalidRegion);
+        }
+        let width = self.end - self.start;
+        let start = self.start + width * f64::from(index) / f64::from(count);
+        let end = self.start + width * f64::from(index + 1) / f64::from(count);
+        if end <= start {
+            return Err(SampleSliceError::InvalidRegion);
+        }
+        self.start = start;
+        self.end = end;
+        Ok(self)
     }
 
     /// Sets whether playback should run in reverse.
